@@ -40,11 +40,9 @@ def train():
 
     model = SpeechClassifier1(
         hidden_dim=conf['model']['hidden_dim'],
-        embedding_dim=conf['model']['embedding_dim'],
         n_speakers=train_dataset.n_speakers)
 
-    loss_fn = nn.CosineEmbeddingLoss()
-    ce_loss = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=6e-4)
 
     # file stuff
@@ -100,12 +98,10 @@ def train():
             speech_features = speech_features.to(device)
             gt_label = gt_label.to(device)
 
-            pred_emb, tgt_emb = model(speech_features, gt_label)
-            pred_idx, pred_logits = model.pseudo_logits(pred_emb)
+            pred_label = model(speech_features)
+            loss = loss_fn(pred_label, gt_label)
 
-            loss = loss_fn(pred_emb, tgt_emb, torch.ones(pred_emb.size(0)).to(
-                device)) + ce_loss(pred_logits, gt_label)
-
+            pred_idx = pred_label.argmax(dim=1)
             pred_list += pred_idx.tolist()
             gt_list += gt_label.tolist()
 
@@ -137,12 +133,10 @@ def train():
                 speech_features = speech_features.to(device)
                 gt_label = gt_label.to(device)
 
-                pred_emb, tgt_emb = model(speech_features, gt_label)
+                pred_label = model(speech_features)
+                loss = loss_fn(pred_label, gt_label)
 
-                pred_idx, pred_logits = model.pseudo_logits(pred_emb)
-                loss = loss_fn(pred_emb, tgt_emb, torch.ones(pred_emb.size(0)).to(
-                    device)) + ce_loss(pred_logits, gt_label)
-
+                pred_idx = pred_label.argmax(dim=1)
                 num_correct += torch.sum(pred_idx == gt_label).cpu()
                 val_loss += loss.cpu()
 
