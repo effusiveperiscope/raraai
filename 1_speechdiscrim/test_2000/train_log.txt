@@ -1,0 +1,34 @@
+resuming training from test_2000\model_105.pt
+Model with 10276384 trainable params
+Beginning training with 32 classes
+(Random guess is 0.03125)
+========== Epoch 105 ==========
+Total train loss: 0.24419039487838745
+Total val loss: 3.8472912311553955
+Val acc: 0.375 | 42.0 / 112
+Precision: 0.31290052294267473 Recall: 0.2965177547092528
+========== Epoch 106 ==========
+Total train loss: 0.2437065839767456
+Total val loss: 3.258028030395508
+Val acc: 0.375 | 42.0 / 112
+Precision: 0.3152122922113584 Recall: 0.2965177547092528
+========== Epoch 107 ==========
+Total train loss: 0.2257024496793747
+Total val loss: 3.8114001750946045
+Val acc: 0.375 | 42.0 / 112
+Precision: 0.31087201545836823 Recall: 0.2965177547092528
+========== Epoch 108 ==========
+Total train loss: 0.24931371212005615
+Total val loss: 3.6773693561553955
+Val acc: 0.375 | 42.0 / 112
+Precision: 0.31087201545836823 Recall: 0.2965177547092528
+========== Epoch 109 ==========
+Total train loss: 0.24505381286144257
+Total val loss: 3.2545278072357178
+Val acc: 0.375 | 42.0 / 112
+Precision: 0.3152122922113584 Recall: 0.2965177547092528
+========== Epoch 110 ==========
+Total train loss: 0.2383846491575241
+Total val loss: 3.4992499351501465
+Val acc: 0.3839285671710968 | 43.0 / 112
+Precision: 0.3163193454219327 Recall: 0.3034621983820924
