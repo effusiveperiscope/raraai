@@ -31,7 +31,7 @@ def load_checkpoint(conf, filename, optimizer=None, strict=True):
     model = SpeechClassifier1(
         hidden_dim=conf['model']['hidden_dim'],
         embedding_dim=conf['model']['embedding_dim'],
-         n_speakers=len(checkpoint['label_encoder']))
+         n_speakers=conf['model']['n_speakers'])
     model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
 
     return (checkpoint['epoch'], checkpoint['best_accuracy'],

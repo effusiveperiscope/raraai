@@ -33,7 +33,7 @@ def train():
     #data_folder = 'dataset_over5min.parquet'
     model_name = 'test_2000'
     data_folder = 'dataset_2000.parquet'
-    warmstart_ckpt = 'warmstart.pt'
+    warmstart_ckpt = None
 
     train_dataset = SpeechClassDataset(split='train', data_path=data_folder)
     val_dataset = SpeechClassDataset(split='test', data_path=data_folder)
@@ -44,7 +44,7 @@ def train():
         n_speakers=conf['model']['n_speakers'])
 
     loss_fn = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    optimizer = optim.Adam(model.parameters(), lr=6e-4)
 
     # file stuff
     default_ckpt_folder = model_name
