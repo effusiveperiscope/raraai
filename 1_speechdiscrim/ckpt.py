@@ -19,17 +19,20 @@ def search_checkpoint(folder, pattern=r'model_(\d+).pt'):
     else:
         return None
 
-def load_checkpoint(filename, optimizer=None):
+def load_checkpoint(conf, filename, optimizer=None, strict=True):
     if torch.cuda.is_available():
         checkpoint = torch.load(filename)
     else:
         checkpoint = torch.load(filename, map_location=torch.device('cpu'))
     if optimizer is not None:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'],
+            strict=strict)
 
-    model = SpeechClassifier1(hidden_dim=768,
+    model = SpeechClassifier1(
+        hidden_dim=conf['model']['hidden_dim'],
+        embedding_dim=conf['model']['embedding_dim'],
          n_speakers=len(checkpoint['label_encoder']))
-    model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
 
     return (checkpoint['epoch'], checkpoint['best_accuracy'],
         checkpoint['label_encoder'], model)

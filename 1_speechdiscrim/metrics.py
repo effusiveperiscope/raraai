@@ -106,6 +106,8 @@ def make_histogram(l, epoch, name, n_speakers=1, by_epoch=True, ckpt_folder = ''
         os.makedirs(ckpt_folder)
     plt.figure()
     plt.hist(l, bins=n_speakers)
+    plt.xlim(0, n_speakers+1)
+    plt.ylim(0, len(l))
     plt.title(name)
     if not by_epoch:
         plt.savefig(

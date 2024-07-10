@@ -12,37 +12,44 @@ import numpy as np
 import os
 import logging
 from logging import info
+from omegaconf import OmegaConf
 
 logging.basicConfig(level=logging.INFO,
      format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
 
 def train():
     torch.manual_seed(0)
     np.random.seed(0)
 
+    conf = OmegaConf.load('config.yaml')
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     draw_interval = 5
     log_interval = 1
     save_interval = 5
+    upperb = 8
     #model_name = 'full'
     #data_folder = 'dataset_over5min.parquet'
     model_name = 'test_2000'
     data_folder = 'dataset_2000.parquet'
+    warmstart_ckpt = 'warmstart.pt'
 
-    default_ckpt_folder = model_name
     train_dataset = SpeechClassDataset(split='train', data_path=data_folder)
     val_dataset = SpeechClassDataset(split='test', data_path=data_folder)
 
     model = SpeechClassifier1(
-        hidden_dim=768, n_speakers=train_dataset.n_speakers)
+        hidden_dim=conf['model']['hidden_dim'],
+        embedding_dim=conf['model']['embedding_dim'],
+        n_speakers=conf['model']['n_speakers'])
 
-    loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    loss_fn = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
 
     # file stuff
+    default_ckpt_folder = model_name
+    if not os.path.exists(default_ckpt_folder):
+        os.makedirs(default_ckpt_folder)
     val_dataset.dump_to_file(os.path.join(default_ckpt_folder, 'val_list.txt'))
     logger = logging.getLogger()
     logfile_handler = logging.FileHandler(os.path.join(default_ckpt_folder,
@@ -50,11 +57,11 @@ def train():
     logger.addHandler(logfile_handler)
 
     train_dataloader = DataLoader(
-    train_dataset, batch_size=16, shuffle=True,
-    num_workers=16,
+    train_dataset, batch_size=upperb, shuffle=True,
+    num_workers=upperb,
     collate_fn=collate_fn)
     val_dataloader = DataLoader(
-    val_dataset, batch_size=16, shuffle=True,
+    val_dataset, batch_size=upperb, shuffle=True,
     num_workers=4,
     collate_fn=collate_fn)
 
@@ -64,11 +71,16 @@ def train():
 
     n_epochs = 1000
 
-    search_ckpt = search_checkpoint(default_ckpt_folder)
-    if search_ckpt:
-        info(f"resuming training from {search_ckpt}")
-        start_epoch, best_acc, _, model = load_checkpoint(search_ckpt)
+    if warmstart_ckpt is None:
+        search_ckpt = search_checkpoint(default_ckpt_folder)
+        if search_ckpt:
+            info(f"resuming training from {search_ckpt}")
+            start_epoch, best_acc, _, model = load_checkpoint(conf, search_ckpt)
+        else:
+            start_epoch = 0
+            best_acc = 0.0
     else:
+        _, _, _, model = load_checkpoint(conf, warmstart_ckpt, strict=False)
         start_epoch = 0
         best_acc = 0.0
 
@@ -87,10 +99,12 @@ def train():
             speech_features = speech_features.to(device)
             gt_label = gt_label.to(device)
 
-            pred_label = model(speech_features)
-            loss = loss_fn(pred_label, gt_label)
+            pred_emb, tgt_emb = model(speech_features, gt_label)
+            # import pdb
+            # pdb.set_trace()
+            loss = loss_fn(pred_emb, tgt_emb)
 
-            pred_idx = pred_label.argmax(dim=1)
+            pred_idx, _ = model.pseudo_logits(pred_emb)
             pred_list += pred_idx.tolist()
             gt_list += gt_label.tolist()
 
@@ -122,10 +136,10 @@ def train():
                 speech_features = speech_features.to(device)
                 gt_label = gt_label.to(device)
 
-                pred_label = model(speech_features)
-                loss = loss_fn(pred_label, gt_label)
+                pred_emb, tgt_emb = model(speech_features, gt_label)
+                loss = loss_fn(pred_emb, tgt_emb)
 
-                pred_idx = pred_label.argmax(dim=1)
+                pred_idx, _ = model.pseudo_logits(pred_emb)
                 num_correct += torch.sum(pred_idx == gt_label).cpu()
                 val_loss += loss.cpu()
 
