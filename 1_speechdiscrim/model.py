@@ -16,7 +16,7 @@ class SpeechClassifier1(nn.Module):
             dim_feedforward=256, dropout=0.4
         )
         self.transformer_encoder = nn.TransformerEncoder(
-            self.encoder_layers, num_layers=4
+            self.encoder_layers, num_layers=3
         )
         self.n_speakers = n_speakers
         self.decoder = nn.Linear(hidden_dim, embedding_dim)
@@ -49,16 +49,16 @@ class SpeechClassifier1(nn.Module):
         pred_emb = self.decoder(x)
         return pred_emb
 
-    """Returns argmax of nMSE (most confident prediction index) and nMSE"""
+    """Returns argmax of most confident prediction index and logits"""
     def pseudo_logits(self, pred_batch): # [batch x emb_dim]
         with torch.no_grad():
             logits = []
 
-            for pred_emb in pred_batch: # [1 x emb_dim]
+            for pred_emb in pred_batch: # [emb_dim]
                 # embedding.weight = [n_speaker x emb_dim]
-                neg_mse = (-torch.mean(
-                    (self.embedding.weight - pred_emb) ** 2, dim=1)) # [n_speaker]
-                logits.append(neg_mse)
+                cos_sim = nn.functional.cosine_similarity(
+                    self.embedding.weight, pred_emb.unsqueeze(0)) 
+                logits.append(cos_sim) # [n_speaker]
             logits = torch.stack(tuple(logits)) # [batch x n_speaker]
 
             return logits.argmax(dim=1), logits
