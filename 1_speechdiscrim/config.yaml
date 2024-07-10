@@ -1,4 +1,3 @@
 model:
   hidden_dim: 768
   embedding_dim: 32
-  n_speakers: 100

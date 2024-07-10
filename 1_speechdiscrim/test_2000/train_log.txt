@@ -1,144 +1,59 @@
-Model with 11066592 trainable params
+Model with 11064416 trainable params
 Beginning training with 32 classes
 (Random guess is 0.03125)
-Model with 11066592 trainable params
+Model with 11064416 trainable params
 Beginning training with 32 classes
 (Random guess is 0.03125)
-========== Epoch 0 ==========
-Total train loss: 0.8215755224227905
-Total val loss: 0.8982229828834534
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 1 ==========
-Total train loss: 0.668513298034668
-Total val loss: 0.8228663802146912
-Val acc: 0.028846153989434242 | 3.0 / 104
-Precision: 0.0018749999812500003 Recall: 0.06249997916667361
-========== Epoch 2 ==========
-Total train loss: 0.5766710638999939
-Total val loss: 0.7537100315093994
-Val acc: 0.08653846383094788 | 9.0 / 104
-Precision: 0.00562499994375 Recall: 0.062499993055556334
-========== Epoch 3 ==========
-Total train loss: 0.5198575258255005
-Total val loss: 0.7644681334495544
-Val acc: 0.08653846383094788 | 9.0 / 104
-Precision: 0.00562499994375 Recall: 0.062499993055556334
-========== Epoch 4 ==========
-Total train loss: 0.4662633240222931
-Total val loss: 0.6666222214698792
-Val acc: 0.009615384973585606 | 1.0 / 104
-Precision: 0.00062499999375 Recall: 0.062499937500062504
 Model with 11064416 trainable params
 Beginning training with 32 classes
 (Random guess is 0.03125)
 ========== Epoch 0 ==========
-Total train loss: 0.8237230777740479
-Total val loss: 0.9187024235725403
-Val acc: 0.11538461595773697 | 12.0 / 104
-Precision: 0.007499999925000001 Recall: 0.0624999947916671
+Total train loss: 4.189204216003418
+Total val loss: 4.201411247253418
+Val acc: 0.13461539149284363 | 14.0 / 104
+Precision: 0.021986606078802685 Recall: 0.0760416600173617
 ========== Epoch 1 ==========
-Total train loss: 0.7134630680084229
-Total val loss: 0.8335481882095337
-Val acc: 0.0 | 0.0 / 104
-Precision: 0.0 Recall: 0.0
-========== Epoch 2 ==========
-Total train loss: 0.585081934928894
-Total val loss: 0.6907192468643188
-Val acc: 0.0 | 0.0 / 104
-Precision: 0.0 Recall: 0.0
-========== Epoch 3 ==========
-Total train loss: 0.5215907692909241
-Total val loss: 0.6233967542648315
-Val acc: 0.09615384787321091 | 10.0 / 104
-Precision: 0.012002042313376666 Recall: 0.12499993055561884
-========== Epoch 4 ==========
-Total train loss: 0.4707958400249481
-Total val loss: 0.5612682104110718
+Total train loss: 4.040695667266846
+Total val loss: 4.226128578186035
 Val acc: 0.009615384973585606 | 1.0 / 104
 Precision: 0.00062499999375 Recall: 0.062499937500062504
+========== Epoch 2 ==========
+Total train loss: 3.85286545753479
+Total val loss: 4.113072872161865
+Val acc: 0.028846153989434242 | 3.0 / 104
+Precision: 0.0018939393748086933 Recall: 0.06249997916667361
+========== Epoch 3 ==========
+Total train loss: 3.736649990081787
+Total val loss: 4.078779220581055
+Val acc: 0.028846153989434242 | 3.0 / 104
+Precision: 0.0018749999812500003 Recall: 0.06249997916667361
+========== Epoch 4 ==========
+Total train loss: 3.6726198196411133
+Total val loss: 3.9885401725769043
+Val acc: 0.18269230425357819 | 19.0 / 104
+Precision: 0.019233483491898153 Recall: 0.07675437954947749
 ========== Epoch 5 ==========
-Total train loss: 0.4201534390449524
-Total val loss: 0.4912981390953064
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
+Total train loss: 3.6046555042266846
+Total val loss: 3.9298183917999268
+Val acc: 0.009615384973585606 | 1.0 / 104
+Precision: 0.00062499999375 Recall: 0.062499937500062504
 ========== Epoch 6 ==========
-Total train loss: 0.37359222769737244
-Total val loss: 0.4340639114379883
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
+Total train loss: 3.542142152786255
+Total val loss: 3.916797399520874
+Val acc: 0.028846153989434242 | 3.0 / 104
+Precision: 0.0018749999812500003 Recall: 0.06249997916667361
 ========== Epoch 7 ==========
-Total train loss: 0.32944437861442566
-Total val loss: 0.40939223766326904
+Total train loss: 3.4846253395080566
+Total val loss: 3.831143617630005
 Val acc: 0.18269230425357819 | 19.0 / 104
 Precision: 0.01187499988125 Recall: 0.06249999671052649
 ========== Epoch 8 ==========
-Total train loss: 0.2893110513687134
-Total val loss: 0.3764635920524597
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
+Total train loss: 3.4322280883789062
+Total val loss: 3.813805103302002
+Val acc: 0.009615384973585606 | 1.0 / 104
+Precision: 0.00062499999375 Recall: 0.062499937500062504
 ========== Epoch 9 ==========
-Total train loss: 0.2534472346305847
-Total val loss: 0.37196800112724304
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 10 ==========
-Total train loss: 0.22165189683437347
-Total val loss: 0.29779723286628723
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 11 ==========
-Total train loss: 0.19305264949798584
-Total val loss: 0.28180888295173645
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 12 ==========
-Total train loss: 0.16882899403572083
-Total val loss: 0.2786937355995178
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 13 ==========
-Total train loss: 0.14807656407356262
-Total val loss: 0.2545303702354431
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 14 ==========
-Total train loss: 0.1297796368598938
-Total val loss: 0.22767409682273865
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 15 ==========
-Total train loss: 0.11442362517118454
-Total val loss: 0.2292284220457077
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 16 ==========
-Total train loss: 0.10142651945352554
-Total val loss: 0.20513136684894562
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 17 ==========
-Total train loss: 0.09031911939382553
-Total val loss: 0.18349528312683105
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 18 ==========
-Total train loss: 0.08095991611480713
-Total val loss: 0.17461706697940826
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 19 ==========
-Total train loss: 0.07270525395870209
-Total val loss: 0.15393230319023132
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 20 ==========
-Total train loss: 0.06587431579828262
-Total val loss: 0.14608612656593323
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
-========== Epoch 21 ==========
-Total train loss: 0.059884242713451385
-Total val loss: 0.1327487826347351
-Val acc: 0.18269230425357819 | 19.0 / 104
-Precision: 0.01187499988125 Recall: 0.06249999671052649
+Total train loss: 3.3880105018615723
+Total val loss: 3.8284127712249756
+Val acc: 0.028846153989434242 | 3.0 / 104
+Precision: 0.0018749999812500003 Recall: 0.06249997916667361
