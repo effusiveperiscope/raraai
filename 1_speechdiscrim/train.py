@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from model import SpeechClassifier1
-from dataset import SpeechClassDataset, collate_fn
+from dataset import (SpeechClassDataset0, BalancedSampler, AvoidSampler,
+    collate_fn)
 from ckpt import load_checkpoint, save_checkpoint, search_checkpoint
 from metrics import (macro_precision, macro_recall, make_histogram,
     make_confusion)
@@ -28,22 +29,22 @@ def train():
     draw_interval = 5
     log_interval = 1
     save_interval = 5
-    upperb = 8
-    #model_name = 'full'
-    #data_folder = 'dataset_over5min.parquet'
-    model_name = 'test_2000'
-    data_folder = 'dataset_2000.parquet'
+    upperb = 16
+    # model_name = 'full'
+    # data_folder = 'dataset_over5min.parquet'
+    model_name = 'test_100'
+    data_folder = 'dataset_100.parquet'
     warmstart_ckpt = None
 
-    train_dataset = SpeechClassDataset(split='train', data_path=data_folder)
-    val_dataset = SpeechClassDataset(split='test', data_path=data_folder)
+    train_dataset = SpeechClassDataset0(split='train', data_path=data_folder)
+    val_dataset = SpeechClassDataset0(split='test', data_path=data_folder)
 
     model = SpeechClassifier1(
         hidden_dim=conf['model']['hidden_dim'],
         n_speakers=train_dataset.n_speakers)
 
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=6e-4)
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
 
     # file stuff
     default_ckpt_folder = model_name
@@ -55,14 +56,19 @@ def train():
          'train_log.txt'))
     logger.addHandler(logfile_handler)
 
+    # Unfortunately things start to break on Windows with num_workers > 0
     train_dataloader = DataLoader(
-    train_dataset, batch_size=upperb, shuffle=True,
-    num_workers=upperb,
-    collate_fn=collate_fn)
+        train_dataset, batch_size=16, 
+        num_workers=16,
+        collate_fn=collate_fn,
+        sampler=BalancedSampler(train_dataset.classes(),
+            avoid_idxs=set(), alpha=0.8))
     val_dataloader = DataLoader(
-    val_dataset, batch_size=upperb, shuffle=True,
-    num_workers=4,
-    collate_fn=collate_fn)
+        val_dataset, batch_size=16, 
+        num_workers=4,
+        collate_fn=collate_fn,
+        sampler=AvoidSampler(val_dataset.classes(),
+            avoid_idxs=set()))
 
     def trainable_params(model):
         model_params = filter(lambda p: p.requires_grad, model.parameters())

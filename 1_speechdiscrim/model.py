@@ -16,7 +16,7 @@ class SpeechClassifier1(nn.Module):
             dim_feedforward=128, dropout=0.4
         )
         self.transformer_encoder = nn.TransformerEncoder(
-            self.encoder_layers, num_layers=3
+            self.encoder_layers, num_layers=5
         )
         self.decoder = nn.Linear(hidden_dim, n_speakers)
         self.lrelu = nn.LeakyReLU()
@@ -24,6 +24,8 @@ class SpeechClassifier1(nn.Module):
     def forward(self,
         speech_features, # [N x B x C]
         ):
+        # Perturbation (from so-vits-svc 5.0)
+        speech_features = speech_features + torch.randn_like(speech_features) * 1
         x = self.positional_encoding(speech_features)
         x = self.transformer_encoder(x)
         logits = self.lrelu(self.decoder(x))
