@@ -1,0 +1,6 @@
+config:
+  model:
+    speech_emb_size: 768
+    hidden_dim: 384
+    dropout: 0.0
+    n_layers: 6
