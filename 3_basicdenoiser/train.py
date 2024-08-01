@@ -34,6 +34,6 @@ if __name__ == '__main__':
             'n_layers': 6,
         },
     },)
-    trainer = L.Trainer(max_steps=14000)
+    trainer = L.Trainer(max_steps=20000)
     trainer.fit(model=lmodel, train_dataloaders=train_loader,
         val_dataloaders=val_loader, ckpt_path='last')

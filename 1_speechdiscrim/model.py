@@ -25,7 +25,8 @@ class SpeechClassifier1(nn.Module):
         speech_features, # [N x B x C]
         ):
         # Perturbation (from so-vits-svc 5.0)
-        speech_features = speech_features + torch.randn_like(speech_features) * 1
+        # Average std of a speech feature is 0.33
+        speech_features = speech_features + torch.randn_like(speech_features) * 0.03
         x = self.positional_encoding(speech_features)
         x = self.transformer_encoder(x)
         logits = self.lrelu(self.decoder(x))

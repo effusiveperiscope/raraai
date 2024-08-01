@@ -120,7 +120,7 @@ def make_histogram(l, epoch, name, n_speakers=1, by_epoch=True, ckpt_folder = ''
     plt.close()
 
 def make_confusion(y_gt, y_pred, name, epoch, label_encoder, ckpt_folder=''):
-    plt.figure()
+    plt.figure(figsize=(24,24))
     ticklabels = label_encoder.inverse_transform(np.unique(
         np.concatenate((np.array(y_gt), np.array(y_pred)))))
 

@@ -1,6 +1,6 @@
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
-from augment.noise import GaussianNoise
+from augment.noise import GaussianNoise, PerlinNoise
 from augment.pca import PCAPerturbation
 from augment.bias import BiasPerturbation
 import torch
@@ -17,14 +17,17 @@ class SpeechFeatureDataset(Dataset):
         self.dataset = dataset
         self.gn = GaussianNoise()
         self.pca = PCAPerturbation()
+        self.pn = PerlinNoise(inner_module=self.pca)
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
         clean = torch.Tensor(self.dataset[idx]['rvc_features'])
-        _, noisy, _ = self.gn.process_features(None, clean)
-        _, noisy, _ = self.pca.process_features(None, noisy)
+        # Apply perlin noise scaled PCA perturbation
+        _, noisy, _ = self.pn.process_features(None, clean)
+        # Apply gaussian noise
+        _, noisy, _ = self.gn.process_features(None, noisy)
         return clean.squeeze(), noisy.squeeze()
 
 def collate_fn(batch):

@@ -26,14 +26,14 @@ def train():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    draw_interval = 5
+    draw_interval = 2
     log_interval = 1
-    save_interval = 5
+    save_interval = 2
     upperb = 16
-    # model_name = 'full'
-    # data_folder = 'dataset_over5min.parquet'
-    model_name = 'test_100'
-    data_folder = 'dataset_100.parquet'
+    model_name = 'full'
+    data_folder = 'dataset_over5min.parquet'
+    # model_name = 'test_2000'
+    # data_folder = 'dataset_2000.parquet'
     warmstart_ckpt = None
 
     train_dataset = SpeechClassDataset0(split='train', data_path=data_folder)
@@ -44,7 +44,7 @@ def train():
         n_speakers=train_dataset.n_speakers)
 
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
 
     # file stuff
     default_ckpt_folder = model_name
@@ -85,6 +85,7 @@ def train():
             start_epoch = 0
             best_acc = 0.0
     else:
+        info(f"warmstart from {warmstart_ckpt}")
         _, _, _, model = load_checkpoint(conf, warmstart_ckpt, strict=False)
         start_epoch = 0
         best_acc = 0.0
