@@ -9,10 +9,11 @@ if __name__ == '__main__':
             'data_path': 'dataset_unconditional_50.parquet'
         },
         'train': {
-            'lr': 3e-4
+            'lr': 3e-5,
+            'align_begin_epoch': 50
         },
         'model': {
-            'bottleneck_size': 32
+            'bottleneck_size': 128
         }
     }
 
@@ -31,7 +32,8 @@ if __name__ == '__main__':
     lmodel = LitModel(
         config=config
     )
-    trainer = L.Trainer(max_steps=20000)
+    trainer = L.Trainer(max_steps=20000,
+        gradient_clip_val=5, gradient_clip_algorithm='value')
     trainer.fit(model=lmodel, train_dataloaders=train_loader,
         val_dataloaders=val_loader,
         ckpt_path='last')

@@ -3,3 +3,5 @@
 **/.ipynb_checkpoints
 **/*.pt
 **/*.ckpt
+**/lightning_logs
+**/*.png

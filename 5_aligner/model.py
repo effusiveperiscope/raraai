@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from commons import sequence_mask, generate_path, convert_pad_shape
 from mambapy.mamba import Mamba, MambaConfig
+from flows import FlowDecoder
 import monotonic_align
 import math
 
@@ -25,7 +26,7 @@ class MambaBlock(nn.Module):
             d_state=16,
             d_conv=4,
             expand_factor=2,
-            n_layers=2
+            n_layers=4
         )
         self.mamba = Mamba(mamba_config)
         self.ln1 = nn.LayerNorm(n_embed)
@@ -45,19 +46,25 @@ class EncoderBlock(nn.Module):
         num_groups = 8
     ):
         super().__init__()
-        self.ff1 = nn.Linear(in_channels, out_channels)
+        self.ffn = nn.Sequential(
+            nn.Linear(in_channels, out_channels),
+            nn.SiLU(),
+            nn.Linear(out_channels, out_channels),
+            nn.SiLU(),
+        )
         self.silu = nn.SiLU()
-        self.conv = nn.Conv1d(in_channels=out_channels, out_channels=out_channels,
+        self.conv = nn.Conv1d(in_channels=in_channels, out_channels=in_channels,
                 kernel_size=5, padding=2)
         self.groupnorm = nn.GroupNorm(
             num_groups=num_groups, num_channels=out_channels)
 
     def forward(self, x):
-        x = self.ff1(x)
-        x = self.silu(x)
         x = rearrange(x, 'b n c -> b c n')
         x = x + self.conv(x)
         x = self.silu(x)
+        x = rearrange(x, 'b c n -> b n c')
+        x = self.ffn(x)
+        x = rearrange(x, 'b n c -> b c n')
         x = self.groupnorm(x)
         x = rearrange(x, 'b c n -> b n c')
         return x
@@ -71,34 +78,35 @@ class SimpleAlignmentModel(nn.Module):
         self,
         decoder_input_channels = 512,
         speech_input_channels = 768,
-        hidden_channels = 512,
-        bottleneck_channels = 64,
+        hidden_channels = 256,
+        bottleneck_channels = 128,
         num_heads = 8
     ):
         super().__init__()
         self.hidden_channels = hidden_channels
+        self.speech_input_channels = speech_input_channels
         self.aligner_stats = nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
+            MambaBlock(hidden_channels, hidden_channels),
             nn.SiLU(),
             nn.Linear(hidden_channels, hidden_channels),
             nn.SiLU(),
-            nn.Linear(hidden_channels, hidden_channels*2),
+            nn.Linear(hidden_channels, speech_input_channels*2),
         )
         self.aligner_norm = nn.GroupNorm(8, hidden_channels*2)
         
         # In the future these can be "smarter" models
-        self.latent_encoder = EncoderBlock(
-            speech_input_channels, hidden_channels)
-        self.latent_decoder = MambaBlock(
-            hidden_channels, speech_input_channels)
+        #self.latent_encoder = MambaBlock(
+        #    speech_input_channels, hidden_channels)
+        self.latent_decoder = FlowDecoder(
+            in_channels = speech_input_channels,
+            hidden_channels=hidden_channels)
 
         self.in_decoder_proj = nn.Linear(decoder_input_channels, hidden_channels)
-        self.in_speech_proj = nn.Linear(speech_input_channels, hidden_channels)
         
         self.bottleneck_attn_decoder = EncoderBlock(
             hidden_channels, bottleneck_channels)
         self.bottleneck_attn_speech = EncoderBlock(
-            hidden_channels, bottleneck_channels)
+            speech_input_channels, bottleneck_channels)
         self.q_proj = EncoderBlock(bottleneck_channels, bottleneck_channels)
         self.k_proj = EncoderBlock(bottleneck_channels, bottleneck_channels)
         self.v_proj = EncoderBlock(bottleneck_channels, bottleneck_channels)
@@ -112,10 +120,8 @@ class SimpleAlignmentModel(nn.Module):
 
     # TODO: add speaker embeddings
 
-    def forward(self, x, x_lens, z, z_lens, spk=None):
+    def forward(self, x, x_lens, z, z_lens, infer=False, spk=None):
         x = self.in_decoder_proj(x)
-        latent_feats = self.latent_encoder(z)
-        z = self.in_speech_proj(z)
 
         bottle_x = self.bottleneck_attn_decoder(x)
         bottle_z = self.bottleneck_attn_speech(z)
@@ -126,13 +132,10 @@ class SimpleAlignmentModel(nn.Module):
         )
         x = x + self.attn_proj(attn_output)
         x_stats = self.aligner_stats(x)
-        x_stats = rearrange(x_stats, 'b n c -> b c n')
-        x_stats = self.aligner_norm(x_stats)
-        x_stats = rearrange(x_stats, 'b c n -> b n c')
 
         # stats (b, n, c*2)
-        encoder_means = x_stats[:,:,:self.hidden_channels]
-        encoder_logs = x_stats[:,:,self.hidden_channels:]
+        encoder_means = x_stats[:,:,:self.speech_input_channels]
+        encoder_logs = x_stats[:,:,self.speech_input_channels:]
 
         # Alignment
         x_m = rearrange(encoder_means, 'b n c -> b c n')
@@ -170,10 +173,19 @@ class SimpleAlignmentModel(nn.Module):
             attn.squeeze(1).transpose(1, 2), x_logs.transpose(1, 2)).transpose(
                 1, 2)
 
-        true_decoded = self.latent_decoder(latent_feats)
-        sampled_latent = (
-            align_m + torch.exp(align_logs) * torch.randn_like(align_m) * z_mask
-            ).transpose(1,2)
-        pred_decoded = self.latent_decoder(sampled_latent)
+        # TODO No speaker conditioning (yet?)...
 
-        return align_m, align_logs, latent_feats, true_decoded, pred_decoded
+        if not infer:
+            # Input - true speech features (z), results in latent
+            decoded, logdet = self.latent_decoder(
+                z, z_mask)
+        else:
+            # Inverted transformation.
+            # Input - latent, results in synthesized speech features (?)
+            sampled_latent = (
+                align_m + torch.exp(align_logs) * torch.randn_like(align_m) * z_mask
+                )
+            decoded, logdet = self.latent_decoder(
+                sampled_latent, z_mask, reverse=True)
+
+        return align_m, align_logs, decoded, logdet
