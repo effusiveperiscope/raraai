@@ -1,4 +1,4 @@
-exp_name: "test-multi-with-summary"
+exp_name: "test-multi-mixed-gender-with-summary"
 model:
   n_speakers: 12
 train:

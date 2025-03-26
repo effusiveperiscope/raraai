@@ -4,6 +4,7 @@ from dataset import MyDataset, train_val_split, collate_fn, collate_fn_multispk
 from torch.optim import AdamW
 from omegaconf import OmegaConf
 from tqdm import tqdm
+from utils import subsample_features
 import torch
 import torch.nn.functional as F
 import os
@@ -49,15 +50,7 @@ class Trainer:
             _, embed, feat, embed_mask, feat_mask = batch
 
         with self.accelerator.autocast():
-
-            # randomly subsample feat along the sequence dimension
-            subsample_frac = config.train.feat_summary_subsample
-            feat_seq_len = feat.shape[1]
-            max_subsample_len = int(feat_seq_len * subsample_frac)
-            subsample_len = torch.randint(1, max_subsample_len + 1, (1,)).item()
-            start_idx = torch.randint(0, feat_seq_len - subsample_len + 1, (1,)).item()
-            subsampled_feat = feat[:, start_idx:start_idx + subsample_len]
-
+            subsampled_feat = subsample_features(feat, config.train.feat_summary_subsample)
             summary = self.model.summarize(subsampled_feat)
             feat_pred = self.model(embed, embed_mask, 
                 sid=torch.tensor(spk_ids).to(self.device) if self.is_multispk else None,
