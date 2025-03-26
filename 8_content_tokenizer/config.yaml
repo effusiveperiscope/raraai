@@ -1,0 +1,8 @@
+exp_name: "test-rarity-with-summary"
+model:
+  n_speakers: 1
+train:
+  batch_size: 4
+  learning_rate: 1e-4
+  num_epochs: 200
+  feat_summary_subsample: 0.5

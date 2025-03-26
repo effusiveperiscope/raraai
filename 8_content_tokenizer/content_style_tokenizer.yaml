@@ -1,0 +1,6 @@
+codebook_size: 8192 # VQ Codebook Size
+hidden_size: 1024 # Representations Dim
+codebook_dim: 8
+vocos_dim: 384
+vocos_intermediate_dim: 2048
+vocos_num_layers: 12
