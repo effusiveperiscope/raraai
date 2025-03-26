@@ -13,28 +13,33 @@ class MyDataset(Dataset):
         self.spk_set = set()
         for i in range(len(self.filelist)):
             line = self.filelist[i].strip().split("|")
-            if self.config.model.n_speakers > 1:
+            if self.config.train.override_sid is not None:
+                pass
+            elif self.config.model.n_speakers > 1:
                 wav_path, spk, embed_path, feat_path = line
                 self.spk_set.add(spk)
 
-        self.spk_id_mapping = {}
-        for i, spk in enumerate(sorted(list(self.spk_set))):
-            self.spk_id_mapping[spk] = i
-        print(self.spk_id_mapping)
+                self.spk_id_mapping = {}
+                for i, spk in enumerate(sorted(list(self.spk_set))):
+                    self.spk_id_mapping[spk] = i
+                print(self.spk_id_mapping)
 
     def __len__(self):
         return len(self.filelist)
 
     def __getitem__(self, idx):
         line = self.filelist[idx].strip().split("|")
-        if self.config.model.n_speakers > 1:
+        if self.config.train.override_sid is not None:
+            wav_path, embed_path, feat_path = line
+            spk_id = self.config.train.override_sid
+        elif self.config.model.n_speakers > 1:
             wav_path, spk, embed_path, feat_path = line
             spk_id = self.spk_id_mapping[spk]
         else:
             wav_path, embed_path, feat_path = line
         embed = torch.load(embed_path) # [1, T, 1024]
         feat = torch.load(feat_path) # [1, T, 768]
-        if self.config.model.n_speakers > 1:
+        if self.config.model.n_speakers > 1 or self.config.train.override_sid is not None:
             return wav_path, embed, feat, spk_id
         else:
             return wav_path, embed, feat

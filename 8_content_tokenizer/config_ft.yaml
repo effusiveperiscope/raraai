@@ -1,0 +1,9 @@
+exp_name: "test-rarity-ft"
+model:
+  n_speakers: 12
+train:
+  batch_size: 4
+  learning_rate: 5e-5
+  num_epochs: 200
+  feat_summary_subsample: 0.5
+  override_sid: 7 # Force multispeaker with all speaker IDs set to this

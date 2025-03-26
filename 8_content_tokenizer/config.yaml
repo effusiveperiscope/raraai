@@ -1,4 +1,4 @@
-exp_name: "test-rarity-with-summary"
+exp_name: "test-rarity-ft"
 model:
   n_speakers: 1
 train:

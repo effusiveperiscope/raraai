@@ -18,7 +18,8 @@ class Trainer:
         self.dataset = MyDataset(filelist, config=config)
         self.train_dataset, self.val_dataset = train_val_split(self.dataset)
 
-        self.is_multispk = config.model.n_speakers > 1
+        self.is_multispk = (config.model.n_speakers > 1 or 
+            config.train.override_sid is not None)
         self.train_dataloader = torch.utils.data.DataLoader(
             self.train_dataset, batch_size=config.train.batch_size, shuffle=True,
             collate_fn=collate_fn_multispk if self.is_multispk else collate_fn)
@@ -52,6 +53,8 @@ class Trainer:
         with self.accelerator.autocast():
             subsampled_feat = subsample_features(feat, config.train.feat_summary_subsample)
             summary = self.model.summarize(subsampled_feat)
+            if self.config.train.override_sid is not None:
+                spk_ids = torch.ones(feat.size(0), dtype=torch.long).to(self.device) * self.config.train.override_sid
             feat_pred = self.model(embed, embed_mask, 
                 sid=torch.tensor(spk_ids).to(self.device) if self.is_multispk else None,
                 summary=summary)
