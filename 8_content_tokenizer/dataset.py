@@ -22,7 +22,7 @@ class MyDataset(Dataset):
                 self.spk_id_mapping = {}
                 for i, spk in enumerate(sorted(list(self.spk_set))):
                     self.spk_id_mapping[spk] = i
-                print(self.spk_id_mapping)
+        print(self.spk_id_mapping)
 
     def __len__(self):
         return len(self.filelist)
