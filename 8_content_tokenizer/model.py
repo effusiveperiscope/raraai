@@ -174,27 +174,54 @@ def count_parameters(model):
         return f"{total_params / 1e9:.2f} B"  # Billions
 
 class SpeechFeatureSummarizer(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, dropout: float = 0.1):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+        self.in_proj = nn.Linear(input_dim, hidden_dim)
+        self.convs = nn.ModuleList([
+            self.block(hidden_dim, dropout, kernel_size=11),
+            self.block(hidden_dim, dropout, kernel_size=7),
+            self.block(hidden_dim, dropout, kernel_size=5),
+            self.block(hidden_dim, dropout, kernel_size=3),
+        ])
+        self.fcs = nn.ModuleList([
+            nn.Linear(hidden_dim, hidden_dim) for _ in range(4)
+        ])
+        self.out_proj = nn.Linear(hidden_dim, output_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.activ = nn.ReLU()
+
+    def block(self, hidden_dim: int, dropout: float = 0.1, kernel_size: int = 3,):
+        return nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=hidden_dim),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-            nn.ReLU()
+            nn.Dropout(dropout),
         )
-    
+
     def forward(self, x):
         """
         x: Tensor of shape (batch_size, seq_len, feature_dim)
         """
-        x = self.mlp(x)  # Transform features at each timestep
+        x = self.in_proj(x)
+
+        x = x.transpose(1, 2)  # (batch_size, feature_dim, seq_len)
+        for i, conv in enumerate(self.convs):
+            x = x + conv(x)
+
+            x = x.transpose(1, 2)
+            x = self.fcs[i](x)
+            x = self.norm(x)
+            x = self.activ(x)
+            x = x.transpose(1, 2)
+
+        x = x.transpose(1, 2)
+
         x = torch.mean(x, dim=1)  # Average pooling over time
+        x = self.out_proj(x)
         return x  # Output shape: (batch_size, output_dim)
 
 class TokenConvertModel(nn.Module):
-    def __init__(self, vocab_size=32, 
+    def __init__(self, 
         in_dim=1024,
         hidden_dim=768, output_dim=768,
         summary_dim=768,
