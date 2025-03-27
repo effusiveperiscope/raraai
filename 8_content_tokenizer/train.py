@@ -68,6 +68,12 @@ class Trainer:
     def train_epoch(self):
         self.model.train()
         epoch_loss = 0.0
+
+        if self.config.train.freeze_bottom_layers is not None:
+            for i in range(self.config.train.freeze_bottom_layers):
+                for param in self.model.conformers[i].parameters():
+                    param.requires_grad = False
+    
         for batch in tqdm(self.train_dataloader, desc=f"train Epoch {self.epoch}"):
             loss = self.step(batch, train=True)
             epoch_loss += loss.item()
