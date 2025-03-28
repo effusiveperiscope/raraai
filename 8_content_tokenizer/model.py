@@ -1,3 +1,4 @@
+from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -222,28 +223,24 @@ class SpeechFeatureSummarizer(nn.Module):
 
 class TokenConvertModel(nn.Module):
     def __init__(self, 
-        in_dim=1024,
-        hidden_dim=768, output_dim=768,
-        summary_dim=768,
-        n_layers=6, dropout_p=0.1,
-        n_spk=12):
+        config: OmegaConf):
         super(TokenConvertModel, self).__init__()
-        self.in_proj = nn.Linear(in_dim, hidden_dim)
-        self.summarizer = SpeechFeatureSummarizer(output_dim, summary_dim, hidden_dim)
+        self.in_proj = nn.Linear(config.in_dim, config.hidden_dim)
+        self.summarizer = SpeechFeatureSummarizer(config.output_dim, config.summary_dim, config.hidden_dim)
         self.conformers = nn.ModuleList([
             ConformerBlock(
-                d_model=hidden_dim,
+                d_model=config.hidden_dim,
                 num_heads=8,
                 ff_expansion_factor=4,
                 conv_expansion_factor=2,
                 conv_kernel_size=31,
-                ff_dropout_p=dropout_p,
-                conv_dropout_p=dropout_p,
-                mha_dropout_p=dropout_p
-            ) for _ in range(n_layers)
+                ff_dropout_p=config.dropout_p,
+                conv_dropout_p=config.dropout_p,
+                mha_dropout_p=config.dropout_p
+            ) for _ in range(config.n_layers)
         ])
-        self.fc = nn.Linear(hidden_dim, output_dim)
-        self.spk_emb = nn.Embedding(n_spk, hidden_dim)
+        self.fc = nn.Linear(config.hidden_dim, config.output_dim)
+        self.spk_emb = nn.Embedding(config.n_spk, config.hidden_dim)
 
     def summarize(self, x):
         return self.summarizer(x)

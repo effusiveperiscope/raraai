@@ -13,7 +13,7 @@ import re
 
 class Trainer:
     def __init__(self, filelist: str, config: OmegaConf):
-        self.model = TokenConvertModel()
+        self.model = TokenConvertModel(config=config.model)
         self.config = config
         self.optimizer = AdamW(self.model.parameters(), lr=config.train.learning_rate)
         self.dataset = MyDataset(filelist, config=config)
@@ -98,7 +98,8 @@ class Trainer:
             "epoch": self.epoch,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "spk_mapping": self.dataset.spk_id_mapping if self.is_multispk else {}}, path)
+            "spk_mapping": self.dataset.spk_id_mapping if self.is_multispk else {},
+            "config": self.config.to_yaml()}, path)
         print(f"Saved {path}")
 
     def load(self, path):    
@@ -106,6 +107,7 @@ class Trainer:
         self.model.load_state_dict(state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.epoch = state["epoch"]
+        self.dataset.spk_id_mapping = state["spk_mapping"]
         return state
 
     def train(self, autoload=False, pretrained_ckpt=None):
