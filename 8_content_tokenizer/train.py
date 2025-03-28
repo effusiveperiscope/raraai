@@ -18,7 +18,8 @@ class Trainer:
         self.optimizer = AdamW(self.model.parameters(), lr=config.train.learning_rate)
         self.dataset = MyDataset(filelist, config=config)
 
-        self.train_dataset, self.val_dataset = train_val_split(self.dataset)
+        self.train_dataset, self.val_dataset = train_val_split(self.dataset, 
+            val_split=config.train.val_split, random_seed=config.train.random_seed)
 
         self.is_multispk = (config.model.n_speakers > 1 or 
             config.train.override_sid is not None)

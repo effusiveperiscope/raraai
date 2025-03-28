@@ -6,3 +6,5 @@ train:
   learning_rate: 1e-4
   num_epochs: 200
   feat_summary_subsample: 0.5
+  val_split: 0.1
+  random_seed: 42
