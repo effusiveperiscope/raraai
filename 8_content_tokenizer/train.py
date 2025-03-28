@@ -99,6 +99,7 @@ class Trainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "spk_mapping": self.dataset.spk_id_mapping if self.is_multispk else {}}, path)
+        print(f"Saved {path}")
 
     def load(self, path):    
         state = torch.load(path, weights_only=True)

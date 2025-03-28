@@ -1,0 +1,7 @@
+hf_search_repos: ['therealvul/RVCv2']
+hf_regex_filters: {
+  'therealvul/RVCv2': 'Titan'
+}
+record_dir: 'recordings'
+output_dir: 'outputs'
+converters_dir: 'converters'

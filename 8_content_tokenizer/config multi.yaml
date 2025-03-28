@@ -1,4 +1,4 @@
-exp_name: "test-multi-w-conv"
+exp_name: "multi2"
 model:
   n_speakers: 12
 train:

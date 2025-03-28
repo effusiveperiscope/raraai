@@ -2,4 +2,13 @@ Mane6_*
 Test*
 ckpts
 checkpoints
+tests/*
 Male_5
+MultiPt2_Content
+recordings
+outputs
+converters
+*.wav
+*.flac
+*_mapping.json
+*_mapping.txt
