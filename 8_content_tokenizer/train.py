@@ -2,6 +2,7 @@ from accelerate import Accelerator
 from model import TokenConvertModel, count_parameters
 from dataset import MyDataset, train_val_split, collate_fn, collate_fn_multispk
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from omegaconf import OmegaConf
 from tqdm import tqdm
 from utils import subsample_features
@@ -16,6 +17,8 @@ class Trainer:
         self.model = TokenConvertModel(config=config.model)
         self.config = config
         self.optimizer = AdamW(self.model.parameters(), lr=config.train.learning_rate)
+        self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, 
+        T_0=config.train.cosine_t_zero, T_mult=config.train.cosine_t_mult)
         self.dataset = MyDataset(filelist, config=config)
 
         self.train_dataset, self.val_dataset = train_val_split(self.dataset, 
@@ -65,6 +68,7 @@ class Trainer:
             if train:
                 self.accelerator.backward(loss)
                 self.optimizer.step()
+                self.scheduler.step()
 
         return loss
 
@@ -99,7 +103,7 @@ class Trainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "spk_mapping": self.dataset.spk_id_mapping if self.is_multispk else {},
-            "config": self.config.to_yaml()}, path)
+    "config": self.config.to_yaml()}, path)
         print(f"Saved {path}")
 
     def load(self, path):    
