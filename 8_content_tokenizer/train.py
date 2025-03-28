@@ -35,6 +35,7 @@ class Trainer:
 
         accelerator = Accelerator(
             mixed_precision="fp16",
+            gradient_accumulation_steps=config.train.gradient_accumulation_steps
         )
         self.model, self.optimizer, self.train_dataloader, self.val_dataloader = accelerator.prepare(
             self.model, self.optimizer, self.train_dataloader, self.val_dataloader

@@ -1,4 +1,4 @@
-exp_name: "multi_v2"
+exp_name: "mixed_v2"
 model:
   in_dim: 1024
   hidden_dim: 768
@@ -16,3 +16,6 @@ train:
   random_seed: 42
   cosine_t_zero: 5
   cosine_t_mult: 2
+  gradient_accumulation_steps: 2
+  override_sid: null
+  freeze_bottom_layers: null

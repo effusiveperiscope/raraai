@@ -226,7 +226,8 @@ class TokenConvertModel(nn.Module):
         config: OmegaConf):
         super(TokenConvertModel, self).__init__()
         self.in_proj = nn.Linear(config.in_dim, config.hidden_dim)
-        self.summarizer = SpeechFeatureSummarizer(config.output_dim, config.summary_dim, config.hidden_dim)
+        self.summarizer = SpeechFeatureSummarizer(config.output_dim, config.summary_dim, config.hidden_dim,
+            dropout=config.dropout_p)
         self.conformers = nn.ModuleList([
             ConformerBlock(
                 d_model=config.hidden_dim,
@@ -240,7 +241,7 @@ class TokenConvertModel(nn.Module):
             ) for _ in range(config.n_layers)
         ])
         self.fc = nn.Linear(config.hidden_dim, config.output_dim)
-        self.spk_emb = nn.Embedding(config.n_spk, config.hidden_dim)
+        self.spk_emb = nn.Embedding(config.n_speakers, config.hidden_dim)
 
     def summarize(self, x):
         return self.summarizer(x)
