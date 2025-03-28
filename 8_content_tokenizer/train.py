@@ -7,6 +7,7 @@ from tqdm import tqdm
 from utils import subsample_features
 import torch
 import torch.nn.functional as F
+import json
 import os
 import re
 
@@ -16,6 +17,7 @@ class Trainer:
         self.config = config
         self.optimizer = AdamW(self.model.parameters(), lr=config.train.learning_rate)
         self.dataset = MyDataset(filelist, config=config)
+
         self.train_dataset, self.val_dataset = train_val_split(self.dataset)
 
         self.is_multispk = (config.model.n_speakers > 1 or 
@@ -94,7 +96,8 @@ class Trainer:
         torch.save({
             "epoch": self.epoch,
             "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict()}, path)
+            "optimizer": self.optimizer.state_dict(),
+            "spk_mapping": self.dataset.spk_id_mapping if self.is_multispk else {}}, path)
 
     def load(self, path):    
         state = torch.load(path, weights_only=True)
