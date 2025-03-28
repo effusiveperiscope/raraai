@@ -1,6 +1,7 @@
 from svc_helper.svc.rvc import RVCModel
 from huggingface_hub import hf_hub_download
 from model import create_model
+from utils import pad_to_multiple
 import argparse
 import yaml
 import soundfile as sf
@@ -27,7 +28,7 @@ def test():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    model_path = 'best_voice_conversion_model2.pt'
+    model_path = 'best_voice_conversion_model.pt'
     model = create_model(config)
     device="cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
@@ -40,7 +41,10 @@ def test():
     def feature_transform(t):
         orig_dtype = t.dtype
         t = t.to(torch.float) # Use full precision for model for now
-        print(t.shape)
+        seq_len = t.shape[1]
+        t, _ = pad_to_multiple(t, 4)
+
+        #import pdb; pdb.set_trace()
         encoded = model.encode(t)
         #import pdb; pdb.set_trace()
         output = model.decode(encoded, speaker_id=torch.tensor(spk_id).unsqueeze(0).to(device))
@@ -49,16 +53,22 @@ def test():
         mae_loss = torch.mean(torch.abs(t - output))
         print(f"MAE Loss: {mae_loss.item()}")
 
+        output = output[:,:seq_len,:]
+
         return output
 
     def feature_cycle(t):
         orig_dtype = t.dtype
         t = t.to(torch.float)
+        seq_len = t.shape[1]
+        t, _ = pad_to_multiple(t, 4)
         encoded = model.encode(t)
         output = model.decode(encoded, speaker_id=torch.tensor(0).unsqueeze(0).to(device))
         encoded = model.encode(output)
         output = model.decode(encoded, speaker_id=torch.tensor(spk_id).unsqueeze(0).to(device))
         output = output.to(orig_dtype)
+
+        output = output[:,:seq_len,:]
         return output
 
     # 0. Base case

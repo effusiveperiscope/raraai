@@ -108,7 +108,7 @@ def train_model(model, train_dataset, val_dataset, batch_size=32, epochs=50, sta
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "best_voice_conversion_model2.pt")
+            torch.save(model.state_dict(), "best_voice_conversion_model.pt")
             print(f"Model saved with validation loss: {val_loss:.6f}")
     
     print("Training completed!")
@@ -155,7 +155,7 @@ def main():
     parser.add_argument("--config_file", help="config file for create_model")
     parser.add_argument("--filelist", help="training data filelist",
         default="TestMultiFeatures2.list")
-    parser.add_argument("--pretrained", help="pretrained model")
+    parser.add_argument("--pretrained", help="pretrained model", default=None)
     parser.add_argument("--stage", help="stage", default=1) # 1: pretrain, 2: cycle consistency
     args = parser.parse_args()
 
@@ -165,9 +165,12 @@ def main():
     # 1. Create model
     model = create_model(config)
     
-    if os.path.exists(args.pretrained):
-        model.load_state_dict(torch.load(args.pretrained))
-        print(f"Model loaded from {args.pretrained}")
+    if args.pretrained is not None:
+        if os.path.exists(args.pretrained):
+            model.load_state_dict(torch.load(args.pretrained))
+            print(f"Model loaded from {args.pretrained}")
+        else:
+            raise Exception(f"Pretrained model not found at {args.pretrained}")
     
     # 2. Prepare your data
     max_seq_len = config['max_seq_len']
@@ -191,7 +194,7 @@ def main():
     )
     
     # 4. Train model
-    if args.stage == 1:
+    if args.stage == '1':
         trained_model = train_model(model, train_dataset, val_dataset,
             batch_size=config['stage1_batch_size'], epochs=config['stage1_epochs'], 
             stage=1, config=config)

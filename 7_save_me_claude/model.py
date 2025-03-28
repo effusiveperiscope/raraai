@@ -4,7 +4,9 @@ import torch.nn.functional as F
 import math
 import numpy as np
 import random
+from utils import pad_to_multiple
 from tqdm import tqdm
+from modules.conformer import ConformerBlock
 
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len=5000):
@@ -114,16 +116,28 @@ class TransformerBlock(nn.Module):
         return x
 
 class SpeechEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, bottleneck_dim, n_layers=6, n_heads=8, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, bottleneck_dim,
+         n_layers=6, n_heads=8, dropout=0.1,
+         downsample_factor = 4):
         super().__init__()
         self.input_projection = nn.Linear(input_dim, hidden_dim)
         self.pos_encoding = RotaryPositionalEmbedding(hidden_dim)
         self.dropout = nn.Dropout(dropout)
+
+        # We'll split the blocks in half
+        assert n_layers % 2 == 0
         
+        self.initial_blocks = nn.ModuleList([
+            TransformerBlock(hidden_dim, n_heads, dropout)
+            for _ in range(n_layers // 2)
+        ])
+        self.downsample = nn.Conv1d(hidden_dim, hidden_dim,
+         kernel_size=downsample_factor*2, stride=downsample_factor, padding=downsample_factor//2)
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(hidden_dim, n_heads, dropout)
-            for _ in range(n_layers)
+            for _ in range(n_layers // 2)
         ])
+
         self.bottleneck = nn.Sequential(nn.Linear(hidden_dim, bottleneck_dim),
             nn.LayerNorm(bottleneck_dim),
             nn.GELU(),)
@@ -142,10 +156,23 @@ class SpeechEncoder(nn.Module):
         x = x.transpose(0, 1)
         
         # Apply transformer blocks
+        for block in self.initial_blocks:
+            x = block(x, mask) # [seq_len, batch_size, hidden_dim]
+
+        # Revert to [batch_size, seq_len, hidden_dim]
+        x = x.transpose(0, 1)
+
+        # Downsample to [seq_len / downsample_factor, batch_size, hidden_dim]
+        x = self.downsample(x.transpose(1, 2)).transpose(1, 2)
+
+        # Revert to [seq_len / downsample_factor, batch_size, hidden_dim]
+        x = x.transpose(0, 1)
+
+        # Apply transformer blocks
         for block in self.transformer_blocks:
             x = block(x, mask)
         
-        # Revert to [batch_size, seq_len, hidden_dim]
+        # Revert to [batch_size, seq_len / downsample_factor, hidden_dim]
         x = x.transpose(0, 1)
 
         # Bottleneck layer
@@ -154,7 +181,8 @@ class SpeechEncoder(nn.Module):
         return x
 
 class SpeechDecoder(nn.Module):
-    def __init__(self, hidden_dim, output_dim, bottleneck_dim, speaker_dim, n_layers=6, n_heads=8, dropout=0.1):
+    def __init__(self, hidden_dim, output_dim, bottleneck_dim, speaker_dim,
+        n_layers=6, n_heads=8, dropout=0.1, upsample_factor = 4):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.speaker_dim = speaker_dim
@@ -167,17 +195,26 @@ class SpeechDecoder(nn.Module):
         # Speaker embedding projection
         self.speaker_projection = nn.Linear(speaker_dim, hidden_dim)
         
+        assert n_layers % 2 == 0
+
         # Transformer blocks
+        self.initial_blocks = nn.ModuleList([
+            TransformerBlock(hidden_dim, n_heads, dropout)
+            for _ in range(n_layers // 2)
+        ])
+        self.upsample = nn.ConvTranspose1d(hidden_dim, hidden_dim,
+            kernel_size=upsample_factor*2, stride=upsample_factor,
+            padding=upsample_factor//2, output_padding=upsample_factor % 2)
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(hidden_dim, n_heads, dropout)
-            for _ in range(n_layers)
+            for _ in range(n_layers // 2)
         ])
         
         # Output projection
         self.output_projection = nn.Linear(hidden_dim, output_dim)
         
     def forward(self, bottleneck_representation, speaker_embedding, mask=None):
-        # bottleneck_representation: [batch_size, seq_len, bottleneck_dim]
+        # bottleneck_representation: [batch_size, seq_len / upsample_factor, bottleneck_dim]
         # speaker_embedding: [batch_size, speaker_dim]
 
         # Bottleneck layer
@@ -186,14 +223,27 @@ class SpeechDecoder(nn.Module):
         # Project speaker embedding and expand
         batch_size, seq_len, _ = hidden_representation.shape
         speaker_proj = self.speaker_projection(speaker_embedding)  # [batch_size, hidden_dim]
-        speaker_proj = speaker_proj.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len, hidden_dim]
+        speaker_proj = speaker_proj.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len / upsample_factor, hidden_dim]
         
         # Combine hidden representation with speaker information
         x = hidden_representation + speaker_proj  # Simple addition, could be concatenation + projection
         
-        # Rearrange for transformer: [seq_len, batch_size, hidden_dim]
+        # Rearrange for transformer: [seq_len / upsample_factor, batch_size, hidden_dim]
         x = x.transpose(0, 1)
         
+        # Apply transformer blocks
+        for block in self.initial_blocks:
+            x = block(x, mask)
+
+        # Revert to [batch_size, seq_len / upsample_factor, hidden_dim]
+        x = x.transpose(0, 1)
+
+        # Upsample
+        x = self.upsample(x.transpose(1, 2)).transpose(1, 2)
+
+        # Revert to [seq_len, batch_size, hidden_dim]
+        x = x.transpose(0, 1)
+
         # Apply transformer blocks
         for block in self.transformer_blocks:
             x = block(x, mask)
@@ -251,6 +301,7 @@ class VoiceConversionModel(nn.Module):
         decoder_layers=config.get("decoder_layers", 6)
         n_heads=config.get("n_heads", 8)
         dropout=config.get("dropout", 0.1)
+        sample_factor=config.get("sample_factor", 4)
         
         # Speech encoder
         self.encoder = SpeechEncoder(
@@ -259,7 +310,8 @@ class VoiceConversionModel(nn.Module):
             bottleneck_dim=bottleneck_dim,
             n_layers=encoder_layers,
             n_heads=n_heads,
-            dropout=dropout
+            dropout=dropout,
+            downsample_factor=sample_factor
         )
         
         # Speech decoder
@@ -270,7 +322,8 @@ class VoiceConversionModel(nn.Module):
             speaker_dim=speaker_dim,
             n_layers=decoder_layers,
             n_heads=n_heads,
-            dropout=dropout
+            dropout=dropout,
+            upsample_factor=sample_factor
         )
         
         # Speaker encoder (for training and inference)
@@ -380,6 +433,9 @@ class VoiceConversionTrainer:
                 - speech: [batch_size, seq_len, input_dim]
                 - speaker_id: [batch_size]
                 - reference_speech: [batch_size, ref_seq_len, input_dim] (optional)
+            use_speaker_id: Use speaker ID instead of reference speech
+            stage: 1 or 2
+            speaker_id_set: List of speaker IDs in training data
         """
         speech = batch["speech"].to(self.device)
         
@@ -394,8 +450,11 @@ class VoiceConversionTrainer:
         
         # Forward pass
         self.optimizer.zero_grad()
+        # speech: [batch_size, seq_len, output_dim]
+        speech, _ = pad_to_multiple(speech, self.config["sample_factor"])
         encoded = self.model.encode(speech)
         output = self.model.decode(encoded, speaker_id, reference_speech)
+        
         # Reconstruction loss
         loss = F.mse_loss(output, speech)
 
@@ -431,11 +490,13 @@ class VoiceConversionTrainer:
             speaker_id.dtype)
 
         # Forward pass with different speaker
-        output_diff = self.model.decode(encoded, different_ids, None)
-        output_reconstructed = self.model(output_diff, speaker_id)
+        with torch.no_grad():
+            # Don't train decoder on cyclic task
+            output_diff = self.model.decode(encoded, different_ids, None)
+        encoded_reconstructed = self.model.encode(output_diff)
 
-        # Cyclic consistency
-        cyclic_loss = F.mse_loss(output_reconstructed, speech) * self.config['cyclic_lr_coef']
+        # Cyclic consistency of latents
+        cyclic_loss = F.mse_loss(encoded_reconstructed, encoded) * self.config['cyclic_lr_coef']
         return cyclic_loss
     
     def train_epoch(self, dataloader, use_speaker_id=True, stage=1, speaker_ids_set=None):
@@ -470,6 +531,7 @@ class VoiceConversionTrainer:
         with torch.no_grad():
             for batch in tqdm(dataloader, total=len(dataloader)):
                 speech = batch["speech"].to(self.device)
+                speech, _ = pad_to_multiple(speech, self.config["sample_factor"])
                 
                 if use_speaker_id:
                     speaker_id = batch["speaker_id"].to(self.device)
