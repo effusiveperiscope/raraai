@@ -1,0 +1,74 @@
+train:
+  exp_name: "twilight"
+  learning_rate: 0.0001
+  batch_size: 1
+  val_split: 0.1
+  random_seed: 42
+  gradient_accumulation_steps: 8
+  num_epochs: 1000
+  epoch_save_interval: 5
+  keep_n_checkpoints: 5
+  max_seq_len: 800
+features:
+  use_normed_whisper: true
+  whisper_stats_path: "whisper_stats.pt"
+  hubert_stats_path: "hubert_large_stat.npz"
+  want: ["content_interp_pitch", "content_tokens", "acoustic_codes"]
+encoder:
+  codes: 32
+  hidden_dim: 768
+  n_layers: 3
+  n_heads: 8
+  dropout: 0.1  
+  out_dim: 768
+decoder: # Targets DAC
+  vocab_size: 1025 # 1024 + 1
+  num_codebooks: 9
+  pad_token_id: 1024
+  bos_token_id: 1024
+  hidden_size: 768
+coco:
+  coco_type: content_style  # content, style, or content_style
+  downsample_rate: 4        # The original frame rate is 50 Hz, downsample to 12.5 Hz
+  codebook_size: 16384
+  hidden_size: 1024         # Representations Dim
+  codebook_dim: 8
+  encoder:
+    vocos_dim: 384
+    vocos_intermediate_dim: 2048
+    vocos_num_layers: 12
+  use_normed_whisper: true
+  whisper_stats_path: models/svc/vevosing/config/whisper_stats.pt
+  whisper_dim: 1024
+  chromagram_dim: 24
+vevo:
+  bias: true
+  code_dim: 1024
+  codebook_num: 1
+  codebook_size: 32
+  dec_block_dilations:
+  - 1
+  - 1
+  dec_block_kernel_size: 3
+  dec_kernel_size: 3
+  dec_ratios:
+  - 1
+  - 1
+  dec_strides:
+  - 1
+  - 1
+  decode_channels: 1024
+  enc_block_dilations:
+  - 1
+  - 1
+  enc_block_kernel_size: 3
+  enc_kernel_size: 3
+  enc_ratios:
+  - 1
+  - 1
+  enc_strides:
+  - 1
+  - 1
+  encode_channels: 1024
+  input_channels: 1024
+  output_channels: 1024

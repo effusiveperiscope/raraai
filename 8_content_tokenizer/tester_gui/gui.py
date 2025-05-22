@@ -20,13 +20,16 @@ import re
 import os
 import soundfile as sf
 
+GUI_CONFIG = "gui_config.yaml"
+MODEL_CONFIG = "config.yaml"
+
 class Gui(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RVC With Content Tokenizer Tester")
         self.setGeometry(100, 100, 800, 900)
 
-        self.config = OmegaConf.load("gui_config.yaml")
+        self.config = OmegaConf.load(GUI_CONFIG)
 
         if not os.path.exists(self.config.record_dir):
             os.makedirs(self.config.record_dir)
@@ -38,7 +41,7 @@ class Gui(QMainWindow):
 
     def initSystem(self):
         self.content_tokenizer = ContentTokenizer()
-        self.model = TokenConvertModel()
+        self.model = TokenConvertModel(OmegaConf.load(MODEL_CONFIG).model)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = self.model.to(self.device)
         self.rvc_model = RVCModel()
