@@ -1,0 +1,74 @@
+model:
+  input_size: 128 # mels
+  hidden_size: 384
+  latent_dim: 128
+  dim_head: 64
+  num_heads: 8
+  ff_mult: 2
+  conv_expansion_factor: 2
+  conv_kernel_size: 7
+  attn_dropout: 0.
+  ff_dropout: 0.
+  conv_dropout: 0.
+
+  sampling_ratio: 8 # should match encoder/decoder
+
+  encoder: # total downsampling is 8x
+    conv_kernel_sizes: [4, 4, 3, 3]
+    conv_strides: [2, 2, 2, 1]
+    conv_paddings: [1, 1, 1, 1]
+    downsample_ratio: [2, 2, 2, 1]
+
+  decoder: # total upsampling is 8x
+    conv_kernel_sizes: [3, 3, 4, 4]
+    conv_strides: [1, 2, 2, 2]
+    conv_paddings: [1, 1, 1, 1]
+    conv_output_padding: [0, 1, 0, 0]
+    pitch_conditioning: False
+
+  flows:
+    num_blocks: 4
+    hidden_size: 512
+
+train:
+  lr: 1e-5
+  min_lr: 1e-6
+  weight_decay: 0.01
+  warmup_steps: 6000
+  total_steps: 200000
+  max_epochs: 1000
+
+  # KL divergence annealing - epochs
+  flow_start: 0 # epochs before using normalizing flows. help build latent space
+  kl_start: 0
+  kl_end: 1000
+  kl_max: 0.001
+
+  # for initializing from a vae-only model
+  # to stabilize flow training
+  train_only_flows_end: 0 # epochs
+
+  exp_name: test
+  nsfhifigan_config: nsfhifigan/ft_hifigan.yaml
+  filelist: filelists/train_wtitan.txt
+
+  max_len: 1024
+  batch_size: 12
+  shuffle: true
+  num_workers: 2
+  pin_memory: false
+
+  log_var_min: -30
+  log_var_max: 20
+
+  mel_pad_value: 0.0
+  apply_random_volume: true # Enable/disable the augmentation
+  # Target peak level for initial normalization (e.g., 0.95 = -0.45 dBFS)
+  target_peak_norm: 0.95
+  # Range for random gain adjustment in dB relative to the normalized peak
+  random_volume_db_range: [-3.0, 3.0] # e.g., +/- 3 dB
+
+  precision: 16-mixed
+  save_top_k: 3
+val:
+  filelist: filelists/val_wtitan.txt

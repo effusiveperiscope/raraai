@@ -1,0 +1,5 @@
+data/pitchflowvae
+data/dummy folder
+checkpoints
+logs
+*.ckpt

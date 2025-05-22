@@ -1,0 +1,101 @@
+model:
+  input_size: 128 # mels
+  hidden_size: 384
+  latent_dim: 128
+  dim_head: 64
+  num_heads: 8
+  ff_mult: 2
+  conv_expansion_factor: 2
+  conv_kernel_size: 7
+  attn_dropout: 0.
+  ff_dropout: 0.
+  conv_dropout: 0.
+
+  sampling_ratio: 8 # should match encoder/decoder
+
+  z_tanh_max: 8 # tanh clamping statistics for latent space
+  z_logvar_tanh_max: 3
+
+  encoder: # total downsampling is 8x
+    conv_kernel_sizes: [4, 4, 3, 3]
+    conv_strides: [2, 2, 2, 1]
+    conv_paddings: [1, 1, 1, 1]
+    downsample_ratio: [2, 2, 2, 1]
+
+  decoder: # total upsampling is 8x
+    conv_kernel_sizes: [3, 3, 4, 4]
+    conv_strides: [1, 2, 2, 2]
+    conv_paddings: [1, 1, 1, 1]
+    conv_output_padding: [0, 1, 0, 0]
+    noise_layers: [True, True, True, True]
+    pitch_conditioning: True
+
+  flows:
+    num_blocks: 6
+    hidden_size: 768
+  
+  discriminator:
+    channel_sizes: [128, 256, 512, 1024]
+    kernel_sizes: [4, 4, 4, 4, 4]
+    strides: [2, 2, 2, 2, 1]
+    paddings: [1, 1, 1, 1, 1]
+    use_attention: True
+
+stats: # log mel spectrogram stats from training dataset
+  mean: -5.235337
+  std: 2.524157
+
+train:
+  lr: 1e-5
+  min_lr: 1e-7
+  weight_decay: 0.01
+  warmup_steps: 10000
+  total_steps: 400000
+  max_epochs: 1000
+  vae_only_end: 60 # allow vae to train before gan
+
+  lam_recon: 2.0
+  lam_fm: 0.05
+  lam_gen: 0.1
+  lam_disc: 0.1
+
+  # GAN
+  alpha: 0.1 # for label smoothing
+  pitch_noise_std: 0.1177 # noise augmentation for pitch conditioning
+  train_only_disc_end: 0 # epochs
+  disc_noise_std: 0.01 # augmentation for discriminator input
+  time_mask_prob: 0.1
+  freq_mask_prob: 0.1
+  jitter_prob: 0.2
+
+  gen_every: 1 # steps
+  disc_every: 3 # steps
+
+  # KL divergence annealing - epochs
+  flow_start: 0 # epochs before using normalizing flows. help build latent space
+  kl_start: 0
+  kl_end: 100
+  kl_max: 0.1
+
+  exp_name: vaegan_v2
+  nsfhifigan_config: nsfhifigan/ft_hifigan.yaml
+  filelist: data/pitchflowvae/train.txt
+
+  min_len: 256
+  max_len: 1024
+  batch_size: 6
+  shuffle: true
+  num_workers: 2
+  pin_memory: false
+
+  log_var_min: -30
+  log_var_max: 20
+
+  mel_pad_value: 0.0
+  normalize_audio: True
+  random_mel_energy_muls: [0.5, 2.0]
+
+  precision: 16-mixed
+  save_top_k: 3
+val:
+  filelist: data/pitchflowvae/val.txt

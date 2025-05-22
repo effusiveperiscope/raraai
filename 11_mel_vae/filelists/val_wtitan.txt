@@ -1,0 +1,527 @@
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_06_15_Ashleigh Ball_Neutral_Noisy__all the bu-.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_20_02_Sandalwood_Rap Singing___He'll always be there..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00298.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00115.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00287.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00125.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_20_01_Pinkie_Happy Singing___Right now!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00238.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00071.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00184.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00314.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_14_03_Fluttershy_Rap Singing___One shot!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_11_31_Rainbow_Happy Singing___Yeah..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00268.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_12_37_Sunset Shimmer_Happy Singing___I feel the way, feel the way that you do too..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_18_20_Rainbow_Happy Singing___I feel abso-absolutely amazing..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00282.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_44_28_Rarity_Rap Singing___That dream..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00117.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_45_07_Sunset Shimmer_Happy Singing___Anything..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00237.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00008.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00210.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_21_51_Sandalwood_Rap Singing___He's the one who knows what's at stake..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00159.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_06_53_Rainbow_Happy Singing___From moment to moment..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00106.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00327.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00198.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00165.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_16_07_Countess Coloratura_Happy Singing_Noisy__Just like the magic inside of you..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00294.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00295.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00004.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00087.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00203.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00283.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00230.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00195.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00252.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00287.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00179.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00322.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_21_58_Sunset Shimmer_Happy Singing___It's okay..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00353.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00143.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00008.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_07_07_Autumn Blaze_Happy Singing_Noisy__But with no way to speak my thoughts I got super bored..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00254.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00186.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00115.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00050.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00147.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_08_00_Applejack_Happy Singing___That's okay, we gotta build up steam..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_48_14_Twilight_Happy Singing_Noisy__We're livin'..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00203.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00267.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00024.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_13_32_Sunset Shimmer_Happy Singing___Feel the way that you do, too..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00277.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00248.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00023.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00119.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00068.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00079.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00223.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00303.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00259.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_10_42_Rainbow_Happy Singing___All I need's inside of me..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_12_01_Pinkie_Happy Singing_Noisy__Don't you agree_.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00050.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_04_49_Applejack_Happy Singing_Noisy__Hi!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00220.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_36_29_Rarity_Happy Singing___Plan!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00203.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_14_40_Rainbow_Happy Singing___I feel abso-absolutely amazing!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00301.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_20_55_Rainbow_Happy Singing___I was born to break free..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00103.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_06_53_Flash Sentry_Happy Singing___The supporting man in your world all for Equestria Girls!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_19_30_Rainbow_Happy Singing_Noisy__Ey ey sippin' on lemonade. Shinin' bright but....flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00192.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00046.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00178.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_37_34_Sunset Shimmer_Happy Singing_Noisy__V.I.P. cause E.G.'s on this yacht!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00250.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00312.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_06_24_Applejack_Happy Singing___Oh, keepin' busy. Oh, keepin' busy is keepin' good..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00174.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00263.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00069.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00168.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_11_34_Applejack_Happy Singing___I got fun to share!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00375.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00068.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_03_34_Autumn Blaze_Happy Singing_Noisy__Sometimes you've gotta let it rain!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00078.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_09_14_Fluttershy_Happy Singing_Noisy__O' nooooooooooooo....flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00332.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00152.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00045.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_30_04_Rainbow_Happy Singing___We can do anything!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00213.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_21_17_Sandalwood_Rap Singing___He is the one, he'll never be fake!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00336.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00184.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00164.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00322.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00166.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_27_30_Rainbow_Happy Singing___Roads open. All..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_50_20_Twilight_Happy Singing___Make 'em shine bright!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00259.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00280.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00214.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00379.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00331.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_34_12_Rainbow_Rap Singing___Give it everything you got. A little hard work, a little bit of sweat..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00041.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00356.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_14_37_SuZ_Happy Singing___True, true!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00234.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00180.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00347.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_01_14_KLo_Happy Singing___True, true original!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_06_33_Countess Coloratura_Happy Singing_Noisy__Just like the magic inside of you..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00331.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_31_05_Rarity_Happy Singing___Cause it's all all all all good..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00211.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_34_20_Rainbow_Rap Singing___You got a dream!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_00_46_Flash Sentry_Happy Singing___So into you..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00085.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00166.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00229.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_05_25_Countess Coloratura_Happy Singing_Noisy__Just like the magic inside of you. And now I see those colors right before my eyes..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_20_09_Pinkie_Happy Singing___Show!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00034.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00109.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00328.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00040.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00023.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00083.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00288.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_24_59_Rarity_Happy Singing_Noisy__Hey, hey, hey, hands in the air. Oh, oh, oh, wind in our hair, we're..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00080.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00197.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00198.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_07_23_Fluttershy_Happy Singing_Noisy__I think we're all alone..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_22_08_Applejack_Happy Singing___Ooh..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00320.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_08_12_Sunset Shimmer_Happy Singing___There's sun behind those gray clouds, you know..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00204.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_00_07_Rainbow_Happy Singing___Motion..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00008.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_07_15_Fluttershy_Happy Singing_Noisy__When we're chillin' with friends!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00003.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00124.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00168.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00290.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_09_25_Applejack_Happy Singing___Oh!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00187.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00004.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00180.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00227.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_14_01_Flash Sentry_Happy Singing___You!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00283.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00328.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00066.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00220.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_07_21_Autumn Blaze_Happy Singing_Noisy__Spoiler alert, we'd quickly learned that words could be a curse..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_16_36_Rainbow_Happy Singing___Gonna break free, yeah, I'm running..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_14_16_Fluttershy_Happy Singing___That's okay!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_22_29_Fluttershy_Happy Singing_Noisy__More..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00121.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_18_04_Ashleigh Ball_Happy Singing___In this moment all roads open. Gonna break free. Yeah I'm running out of breath, sorry..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_20_55_Pinkie_Rap Singing___Give it everything you got!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00171.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_emphasis_00177.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_emphasis_00071.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_44_01_Rarity_Happy Singing___Dreams!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_23_13_Applejack_Happy Singing___Time!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00125.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00124.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00103.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00197.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00072.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00264.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00037.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00091.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_13_58_Pinkie_Rap Singing_Noisy__Little boats are drifting by, seagulls up in the sky, We're a picture of perfection as we wave to th.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00013.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_26_26_Rainbow_Happy Singing___Shining like gold!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00075.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_00_29_Rainbow_Happy Singing___I have so much more to say.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_05_58_Rainbow_Happy Singing___But I live in slow motion..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_10_21_Applejack_Happy Singing___Mr. rooster!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_13_04_Fluttershy_Happy Singing___On the road..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00042.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00344.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_02_33_Applejack_Happy Singing___Light up our dreams!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_05_48_Fluttershy_Happy Singing_Noisy__Hey, hey, hey, hands in the air..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_essentials_00004.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00155.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_05_58_Applejack_Happy Singing___Fun to share!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00063.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00142.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00123.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_essentials_00036.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00311.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00057.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_11_22_Rainbow_Happy Singing___Come on and go with the flow, gonna..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_47_56_Sunset Shimmer_Happy Singing___Show on the road!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00014.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_29_01_Rarity_Rap Singing_Noisy__That's right!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00312.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_12_11_Applejack_Happy Singing___Call me crazy, misunderstood..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Find The Magic\00_01_04_Adagio Dazzle_Sad Singing___Let's find..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00108.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_29_28_Rarity_Happy Singing_Noisy__Don't you agree_.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_15_40_Rainbow_Happy Singing___Cause it's all, all, all, all good..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00023.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_10_49_Sunset Shimmer_Happy Singing___True, true original..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00040.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00096.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00067.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00002.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_45_19_Sunset Shimmer_Happy Singing___That's okay!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00013.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00180.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00175.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00112.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00298.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00088.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_15_46_Ashleigh Ball_Neutral_Noisy__Ah, flossin' on 'em..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00078.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00332.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_17_59_Rainbow_Happy Singing_Noisy__Hey, hey, hey, hands in the air..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00196.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00119.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00166.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00377.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00178.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_whisper_00123.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00198.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00015.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00242.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00057.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00307.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00152.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00234.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00085.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00283.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00001.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_36_18_Rarity_Rap Singing___Gotta see that dream!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_22_24_Rarity_Happy Singing___I feel abso-absolutely amazing..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00375.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00012.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00150.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00136.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00318.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00164.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00170.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_27_04_Rainbow_Happy Singing___Time to get the show on the road!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00282.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00096.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_07_11_Fluttershy_Happy Singing___I feel abso-absolutely amazing!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00172.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00283.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00130.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00347.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_whisper_00221.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_essentials_00013.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00285.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_15_13_SuZ_Happy Singing___True, true original!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00009.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00126.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_06_32_Flash Sentry_Happy Singing___Someone you can count on..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00001.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00157.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00157.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00252.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00081.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00259.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_28_25_Rainbow_Happy Singing___Shinin' like gold!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00306.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00300.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00294.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00345.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00162.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00152.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00350.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_03_43_KLo_Happy Singing___True, true original, dare to be who you are meant to be..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00343.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_08_27_Rainbow_Happy Singing___Feel it in my heartbeat, the time is now and I won't hold back, hold back..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00374.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00083.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00278.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_51_38_Twilight_Happy Singing___On the road!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00371.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00218.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_12_30_Rainbow_Happy Singing___Cause it's all, all, all, all good..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00159.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00128.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_06_48_Applejack_Rap Singing___See that dream!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00357.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00110.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00355.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_09_09_Countess Coloratura_Happy Singing_Noisy__Throw off the veil, it's finally time..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_18_43_Rainbow_Happy Singing_Noisy__Hoppin' on so float along cause EG's on this yacht..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00001.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_46_59_Sunset Shimmer_Happy Singing___Make 'em shine bright!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00219.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_15_25_Fluttershy_Happy Singing___Nah..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00140.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00211.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00133.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00341.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_00_18_Flash Sentry_Happy Singing___If I could be the wind under your wings..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00034.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00311.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_03_56_Fluttershy_Happy Singing_Noisy__I like my pets..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00272.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_10_41_Fluttershy_Happy Singing_Noisy__I'm more than shy..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00302.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00278.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00168.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00164.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_06_23_Fluttershy_Happy Singing_Noisy__This moment never ends..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00067.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_28_57_Rarity_Happy Singing_Noisy__V-I-P, cause EG's on this yacht!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00078.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_07_23_Rainbow_Happy Singing___But time cannot hold me..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_30_06_Kazumi Evans_Happy Singing___I feel abso-absolutely, fuck..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00174.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00364.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_11_20_Flash Sentry_Happy Singing___The supporting man in your world, all for Equestria Girls..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_06_40_Countess Coloratura_Happy Singing_Noisy__I'm here to show you who I am..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_06_25_Applejack_Rap Singing___A number one team..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00369.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_whisper_00062.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_07_27_Applejack_Happy Singing___A job well done by the break of dawn..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_27_24_Rarity_Happy Singing___I feel abso-absolutely amazing!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00341.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_21_44_Pinkie_Rap Singing___Show on the road!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00148.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00267.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00237.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00357.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00037.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00069.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00209.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_emphasis_00198.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00085.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00257.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00024.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_03_50_Applejack_Happy Singing___The early bird gets the worm!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_14_58_SuZ_Happy Singing___Do your thing!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00058.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_46_44_Twilight_Rap Singing_Noisy__The wind is blowing and we're feeling real fly!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00117.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_24_30_Pinkie_Happy Singing___Bright as the sun, shining like gold..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_03_29_Flash Sentry_Happy Singing___I'm just here to cheer you on..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00125.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_03_06_Flash Sentry_Happy Singing___The supporting man in your world, all for Equestria Girls!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_31_15_Rarity_Happy Singing_Noisy__When we're chillin' with friends!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00245.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_05_57_Fluttershy_Happy Singing_Noisy__See..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00082.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00373.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00197.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_07_17_Flash Sentry_Happy Singing___I live to cheer you oh-.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_whisper_00163.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00354.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00063.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00212.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00307.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00248.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00184.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_essentials_00034.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00144.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_whisper_00121.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_16_36_Autumn Blaze_Tired_Noisy__I can do it better..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00179.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00299.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_27_47_Rarity_Happy Singing___Cause it's all, all, all, all good!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_essentials_00017.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00221.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_emphasis_00040.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_26_29_Applejack_Happy Singing___Keeping busy is keeping good..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00078.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00197.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00201.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00190.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00048.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_01_10_Applejack_Happy Singing___Hey!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00032.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_08_05_Rainbow_Happy Singing___Holding back from day to day..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00006.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00219.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_04_06_Rainbow_Happy Singing___But I live in slow motion..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_00_00_Sunset Shimmer_Happy Singing___Everything feels..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_20_18_Pinkie_Happy Singing___Now!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00215.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00364.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00023.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00325.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00102.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_16_57_Fluttershy_Rap Singing___Oh!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00103.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00118.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00101.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_enunciated_00188.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00249.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00206.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00363.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00375.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00057.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00104.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Run And Break Free\00_23_14_Rainbow_Happy Singing___Watch me yeah, yeah, I'm running..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00301.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00056.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00089.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00192.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00136.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00155.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_42_04_Twilight_Happy Singing_Noisy__VIP, cause EG's on this yacht!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00267.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_19_23_Rainbow_Happy Singing_Noisy__Wind in our hair..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00046.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Five To Nine\00_03_45_Applejack_Happy Singing___Rise and shine, I'm feeling fine, wake up!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00152.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00140.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_03_06_KLo_Happy Singing___You're the true, true, true original..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00192.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00004.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_52_56_Twilight_Happy Singing___Can!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_15_37_Autumn Blaze_Happy Singing_Noisy__No matter how hard I schooled them, fear of hurt is still what ruled them..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_19_50_Sunset Shimmer_Happy Singing___But you gotta let it in..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00256.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00309.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_happy_00128.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00037.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00013.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00034.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_confused_00233.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_11_30_Fluttershy_Happy Singing___Turn on the light!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00119.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_laughing_00285.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Find The Magic\00_02_07_Adagio Dazzle_Sad Singing___Ooh..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_39_37_Twilight_Happy Singing___Cause it's all, all, all, all good..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Let It Rain\00_19_27_Sunset Shimmer_Happy Singing___Let it rain..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00167.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00003.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00290.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00338.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_36_41_Rarity_Happy Singing___Make 'em shine bright!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00342.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00058.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00039.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_25_49_Rainbow_Happy Singing___Light up our dreams!.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_14_03_Fluttershy_Happy Singing_Noisy__I'm not just shy..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_emphasis_00055.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00299.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00024.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00178.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_whisper_00166.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_default_00166.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00298.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00159.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_emphasis_00150.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_00141.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00076.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_01_13_Autumn Blaze_Happy Singing_Noisy__No, you can't give up your laughter, cause you're scared of a little pain. It's a lesson that the Ki.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00140.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_essentials_00021.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\So Much More To Me\00_22_57_Fluttershy_Happy Singing_Noisy__There's so much more to me..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_00258.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_laughing_00231.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00308.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_30_25_Rarity_Happy Singing_Noisy__Hi!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00048.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00019.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00047.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_happy_00216.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00253.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00166.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_default_emphasis_00200.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_25_37_Rarity_Happy Singing_Noisy__V.I.P. cause E.G.'s on this yacht..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00025.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00178.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_08_15_Applejack_Happy Singing___Bright as the sun!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00205.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_confused_00149.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_default_00098.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_sad_00204.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\A Kirin Tale\00_05_11_Autumn Blaze_Happy Singing_Noisy__La la la la la la!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00361.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_18_00_Countess Coloratura_Happy Singing_Noisy__Just like the magic inside of you..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_sad_00228.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00250.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_default_emphasis_00077.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_08_53_Fluttershy_Happy Singing_Noisy__Dolphins!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00307.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00372.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_happy_00017.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_sad_00305.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_sad_00312.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_54_59_Twilight_Happy Singing___Sun..flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Coloratura Recordings\00_01_07_Countess Coloratura_Happy Singing_Noisy__And put my heart out on the line..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00198.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\True Original\00_09_17_Pinkie_Happy Singing___True, true original..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_whisper_00059.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\I'm On A Yacht\00_08_29_Fluttershy_Happy Singing_Noisy__Don't you agree_.flac
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Cheer You On\00_04_41_Flash Sentry_Happy Singing___Your wings..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00210.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00310.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex04_laughing_00241.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_whisper_00101.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00266.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\Get The Show On The Road\00_07_28_Applejack_Happy Singing___On the road!.flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_confused_00249.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_laughing_00115.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex03_enunciated_00270.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_confused_00350.wav
+D:\MEGASyncDownloads\Master file 2\Songs\Extra\TrueExport\Studio Recordings\All Good\00_37_50_Twilight_Happy Singing___Let me show you how it goes..flac
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_enunciated_00326.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex01_happy_00099.wav
+D:\DataAugmentation\TITAN-Medium-Dataset\ex02_enunciated_00119.wav
