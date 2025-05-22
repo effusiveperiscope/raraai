@@ -1,0 +1,7 @@
+exp_name: condensed
+train:
+  lr: 1e-5
+  batch_size: 4
+  filelist: data/condensed/train.txt
+  val_filelist: data/condensed/val.txt
+  epochs: 100
