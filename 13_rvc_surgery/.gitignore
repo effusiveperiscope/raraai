@@ -2,3 +2,4 @@ checkpoints
 data
 lightning_logs
 *.txt
+tests/*.pth
