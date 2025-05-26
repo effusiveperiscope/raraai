@@ -1,5 +1,6 @@
 import os
 import random
+import numpy as np
 from omegaconf import OmegaConf
 import torch
 from torch.utils.data import Dataset
@@ -8,6 +9,13 @@ import torch.nn.functional as F
 class FeatureDataset(Dataset):
     def __init__(self, config: OmegaConf, is_train=True):
         self.feature_dir = os.path.dirname(config.train.filelist)
+        self.hubert_stats_path = config.data.get('hubert_stats_path', 
+            'hubert_large_stat.npz')
+
+        stat = np.load(self.hubert_stats_path)
+        self.hubert_feat_norm_mean = torch.tensor(stat["mean"])
+        self.hubert_feat_norm_std = torch.tensor(stat["std"])
+
         self.files = []
 
         log_ons = False
@@ -45,8 +53,13 @@ class FeatureDataset(Dataset):
 
         # Load full-length tensors
         wave = torch.load(os.path.join(load_dir, basename + '.wave'))
-        rvc_feat = torch.load(os.path.join(load_dir, basename + '.rvc_feat')).squeeze(0)
-        whisp_feat = torch.load(os.path.join(load_dir, basename + '.whisp_feat')).squeeze(0)
+        vevo_feat = torch.load(os.path.join(load_dir, basename + '.vevo_quantized')).squeeze(0)
+
+        # Normalize Vevo feat
+        vevo_feat = (
+            (vevo_feat - self.hubert_feat_norm_mean.to(vevo_feat.device)) /
+             self.hubert_feat_norm_std.to(vevo_feat.device))
+
         pitch = torch.load(os.path.join(load_dir, basename + '.pitch')).squeeze(0)
         pitch_fine = torch.load(os.path.join(load_dir, basename + '.pitch_fine')).squeeze(0)
 
@@ -62,8 +75,7 @@ class FeatureDataset(Dataset):
 
         item_dict = {
             'wave': wave[start_sample:end_sample],
-            'rvc_feat': rvc_feat[start_frame:end_frame],
-            'whisp_feat': whisp_feat[start_frame:end_frame],
+            'vevo_feat': vevo_feat[start_frame:end_frame],
             'pitch': pitch[start_frame:end_frame],
             'pitch_fine': pitch_fine[start_frame:end_frame],
             'sid': sid
@@ -153,8 +165,7 @@ class FeatureCollator:
     def __call__(self, batch):
         if not batch:
             return {
-                'rvc_feat': torch.empty((0, 0, 0)),
-                'whisp_feat': torch.empty((0, 0, 0)),
+                'vevo_feat': torch.empty((0, 0, 0)),
                 'pitch': torch.empty((0, 0)),
                 'pitch_fine': torch.empty((0, 0)),
                 'spec': torch.empty((0,0,0)),
@@ -165,8 +176,7 @@ class FeatureCollator:
         num_items = len(batch)
 
         # 1. Extract all individual feature sequences
-        rvc_feats_list = [item['rvc_feat'] for item in batch]
-        whisp_feats_list = [item['whisp_feat'] for item in batch]
+        vevo_feats_list = [item['vevo_feat'] for item in batch]
         pitch_list = [item['pitch'] for item in batch]
         pitch_fine_list = [item['pitch_fine'] for item in batch]
         spec_list = [item.get('spec') for item in batch]
@@ -177,8 +187,7 @@ class FeatureCollator:
         lengths = torch.tensor([p.size(0) for p in pitch_list], dtype=torch.long)
 
         # 3. Determine feature dimensions (D_x) and dtypes from the batch
-        D_rvc, dtype_rvc = self._get_dim_and_dtype(rvc_feats_list)
-        D_whisp, dtype_whisp = self._get_dim_and_dtype(whisp_feats_list)
+        D_vevo, dtype_vevo = self._get_dim_and_dtype(vevo_feats_list)
         D_spec, dtype_spec = self._get_dim_and_dtype(spec_list)
         _, dtype_pitch = self._get_dim_and_dtype(pitch_list, default_dtype=torch.float)
         _, dtype_pf = self._get_dim_and_dtype(pitch_fine_list, default_dtype=torch.float)
@@ -187,7 +196,7 @@ class FeatureCollator:
         # 4. Calculate global_max_len for frame-level features (rvc, whisp, pitch, pitch_fine, spec)
         global_max_len = 0
         seqs_for_frame_len_calc = []
-        for lst in [rvc_feats_list, whisp_feats_list, pitch_list, pitch_fine_list, spec_list]:
+        for lst in [vevo_feats_list, pitch_list, pitch_fine_list, spec_list]:
             seqs_for_frame_len_calc.extend(s for s in lst if s is not None and hasattr(s, 'size') and s.ndim > 0)
         
         if seqs_for_frame_len_calc:
@@ -207,14 +216,12 @@ class FeatureCollator:
 
         # 6. Pad and stack frame-level features
         if global_max_len == 0 and num_items > 0 : # All frame features are empty or not present
-            rvc_feats_batch = torch.zeros((num_items, 0, D_rvc), dtype=dtype_rvc)
-            whisp_feats_batch = torch.zeros((num_items, 0, D_whisp), dtype=dtype_whisp)
+            vevo_feats_batch = torch.zeros((num_items, 0, D_vevo), dtype=dtype_vevo)
             pitch_batch = torch.zeros((num_items, 0), dtype=dtype_pitch)
             pitch_fine_batch = torch.zeros((num_items, 0), dtype=dtype_pf)
             spec_batch = torch.zeros((num_items, 0, D_spec), dtype=dtype_spec)
         elif num_items > 0:
-            rvc_feats_batch = self._pad_sequences(rvc_feats_list, global_max_len, D_rvc, dtype_rvc, feature_name="rvc_feat")
-            whisp_feats_batch = self._pad_sequences(whisp_feats_list, global_max_len, D_whisp, dtype_whisp, feature_name="whisp_feat")
+            vevo_feats_batch = self._pad_sequences(vevo_feats_list, global_max_len, D_vevo, dtype_vevo, feature_name="vevo_feat")
             pitch_batch = self._pad_sequences(pitch_list, global_max_len, 0, dtype_pitch, is_1d=True, feature_name="pitch")
             pitch_fine_batch = self._pad_sequences(pitch_fine_list, global_max_len, 0, dtype_pf, is_1d=True, feature_name="pitch_fine")
             spec_batch = self._pad_sequences(spec_list, global_max_len, D_spec, dtype_spec, feature_name="spec")
@@ -230,8 +237,7 @@ class FeatureCollator:
             pass # Should not reach here
 
         return {
-            'rvc_feat': rvc_feats_batch,
-            'whisp_feat': whisp_feats_batch,
+            'vevo_feat': vevo_feats_batch,
             'pitch': pitch_batch,
             'pitch_fine': pitch_fine_batch,
             'spec': spec_batch,

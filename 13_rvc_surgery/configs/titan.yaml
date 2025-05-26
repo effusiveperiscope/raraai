@@ -1,10 +1,10 @@
-exp_name: specialized
+exp_name: titan
 train:
-  lr: 1e-6
+  lr: 1e-5
   lr_stage2: 1e-5
-  batch_size: 4
-  filelist: data/specialized/train.txt
-  val_filelist: data/specialized/val.txt
+  batch_size: 12
+  filelist: data/titan/train.txt
+  val_filelist: data/titan/val.txt
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
@@ -30,6 +30,7 @@ model:
 data:
   hop_length: 480
   segment_size: 17280
+  max_len: 480000
   n_fft: 2048
   num_mels: 128
   sampling_rate: 48000

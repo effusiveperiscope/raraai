@@ -10,8 +10,9 @@ import os
 sys.excepthook = lambda exc_type, exc_value, exc_traceback: pdb.post_mortem(exc_traceback)
 
 RVC_CKPT = 'tests/RarityTitan.pth'
-TEST_AUDIO = 'tests/test_speech2.flac'
+TEST_AUDIO = 'tests/test_ood.wav'
 NEW_CKPT = 'checkpoints/specialized/best-checkpoint-v1.ckpt'
+SUFFIX = 'ood'
 
 state = torch.load(RVC_CKPT)
 model = SynthesizerTrnMs768NSFsid(*state['config'], is_half=True)
@@ -29,6 +30,9 @@ my_feats = MyFeatures()
 feats = my_feats.get_features(data_16k)
 lens = torch.tensor([feats['rvc_feat'].shape[1]]).to('cuda')
 
+feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['rvc_feat'].shape[1]]
+feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['rvc_feat'].shape[1]]
+
 # Baseline
 with torch.no_grad():
     o, x_mask, z_stats = model.infer(
@@ -38,7 +42,7 @@ with torch.no_grad():
         feats['pitch_fine'].to('cuda'),
         torch.tensor([0]).to('cuda'))
     o_np = o.squeeze().cpu().float().numpy()
-    sf.write('tests/out.wav', o_np, 48000)
+    sf.write(f'tests/out{SUFFIX}.wav', o_np, 48000)
 
 # New (using whisper)
 basename = NEW_CKPT.removeprefix('checkpoints').replace('/', '_')[1:]
@@ -59,4 +63,4 @@ with torch.no_grad():
         feats['pitch_fine'].to('cuda'),
         torch.tensor([0]).to('cuda'))
     o_np = o.squeeze().cpu().float().numpy()
-    sf.write(f'tests/out_{basename}.wav', o_np, 48000)
+    sf.write(f'tests/out_{basename+SUFFIX}.wav', o_np, 48000)

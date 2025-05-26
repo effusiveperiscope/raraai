@@ -3,3 +3,8 @@ data
 lightning_logs
 *.txt
 tests/*.pth
+vevo_ckpts
+outputs
+recordings
+logs
+tests/*.wav

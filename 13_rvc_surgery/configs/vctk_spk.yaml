@@ -1,13 +1,14 @@
-exp_name: specialized
+exp_name: vctk_keep_posterior_spk
 train:
-  lr: 1e-6
+  lr: 1e-5
   lr_stage2: 1e-5
-  batch_size: 4
-  filelist: data/specialized/train.txt
-  val_filelist: data/specialized/val.txt
+  batch_size: 12 # works for 16 GB
+  filelist: data/vctk/train.txt
+  val_filelist: data/vctk/val.txt
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
+  freeze_prior: False
 model:
   spec_channels: 1025
   segment_size: 32
@@ -24,15 +25,18 @@ model:
   upsample_rates: [12, 10, 2, 2]
   upsample_initial_channel: 512
   upsample_kernel_sizes: [24, 20, 4, 4]
-  spk_embed_dim: 109
+  spk_embed_dim: 110
   gin_channels: 256
   sr: 48000
+  spk_class_n_layers: 4
 data:
   hop_length: 480
   segment_size: 17280
+  max_len: 480000
   n_fft: 2048
   num_mels: 128
   sampling_rate: 48000
   win_size: 2048
   fmin: 0
   fmax: null
+  num_workers: 4

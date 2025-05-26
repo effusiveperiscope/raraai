@@ -13,6 +13,10 @@ if __name__ == '__main__':
     parser.add_argument('--val_fraction', type=float, default=0.05)
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--shuffle_seed', type=int, default=42)
+    parser.add_argument('--do_48k', action='store_true') # Needed for stage 2
+    
+    # 16k (default) is for stage 1 training - KL Div from teacher
+    # 48k is for stage 2 training - E2E RVC training
 
     args = parser.parse_args()
     with open(args.filelist, 'r', encoding='utf-8') as f:
@@ -27,28 +31,50 @@ if __name__ == '__main__':
     val_lines = lines[-int(len(lines) * args.val_fraction):]
     train_lines = lines[:-int(len(lines) * args.val_fraction)]
 
-    my_feats = MyFeatures()
+    my_feats = MyFeatures(
+        extract_hubert=False, extract_whisper=False, extract_vevo=True)
 
+    is_multispk = False
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
+        if 'longform' in line:
+            # These are for longform in Expresso - will cause OOM
+            continue
+        if '|' in line:
+            if not is_multispk:
+                print('=== Multispeaker filelist detected! ===')
+            is_multispk = True
+            split = line.split('|')
+            line = split[0]
+            sid = split[1]
         if not os.path.exists(line):
             print(f'File not found: {line}')
             continue
         data, _ = librosa.load(line, sr=16000)
-        features = my_feats.get_features(data)
+        data_48k, _ = librosa.load(line, sr=48000)
+        features = my_feats.get_features(data, data_48k)
 
         basename = os.path.basename(line)
+
+        if os.path.exists(os.path.join(args.output_dir, basename+'.vevo_quantized')):
+            continue
+
         torch.save(
-            features['rvc_feat'],
-            os.path.join(args.output_dir, basename+'.rvc_feat'))
-        torch.save(
-            features['whisp_feat'],
-            os.path.join(args.output_dir, basename+'.whisp_feat'))
+            features['vevo_quantized'],
+            os.path.join(args.output_dir, basename+'.vevo_quantized'))
         torch.save(
             features['pitch'],
             os.path.join(args.output_dir, basename+'.pitch'))
         torch.save(
             features['pitch_fine'],
             os.path.join(args.output_dir, basename+'.pitch_fine'))
+
+        if args.do_48k:
+            torch.save(
+                features['spec'],
+                os.path.join(args.output_dir, basename+'.spec'))
+            torch.save(
+                features['wave'],
+                os.path.join(args.output_dir, basename+'.wave'))
 
     with open(os.path.join(args.output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(train_lines))

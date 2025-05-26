@@ -1,6 +1,8 @@
-# Stage 2. E2E training with RVC objectives
+# Stage 2. E2E training with RVC objectives + Speaker Classification Disentanglement
 from svc_helper.svc.rvc.lib.infer_pack.models import SynthesizerTrnMs768NSFsid, MultiPeriodDiscriminatorV2
+from modeling.grl import grad_reverse
 from dataset import FeatureCollator, FeatureDataset
+from modeling.spk_classifier import SpeakerClassifier
 from rvc_losses import feature_loss, discriminator_loss, generator_loss, kl_loss
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 import torch.nn.functional as F
@@ -15,19 +17,44 @@ import sys
 sys.excepthook = lambda exc_type, exc_value, exc_traceback: print(exc_type, exc_value, exc_traceback) or pdb.post_mortem(exc_traceback)
 
 class RVCTrainingModule(pl.LightningModule):
-    def __init__(self, net_g : SynthesizerTrnMs768NSFsid, net_d: MultiPeriodDiscriminatorV2, config : OmegaConf):
+    def __init__(self, 
+        net_g : SynthesizerTrnMs768NSFsid, 
+        net_d: MultiPeriodDiscriminatorV2, config : OmegaConf):
         super().__init__()
         self.net_g = net_g
         self.net_d = net_d
+        self.spk_classifier = SpeakerClassifier(
+            inter_channels=config.model.inter_channels, 
+            num_speakers=config.model.spk_embed_dim,
+            n_layers=config.model.spk_class_n_layers
+        )
         self.config = config
         self.automatic_optimization = False
 
     def on_train_start(self):
-        if self.config.train.freeze_prior:
+        if self.config.train.get('freeze_prior', False):
             print('=== Freezing prior encoder ===')
             for param in self.net_g.enc_p.parameters():
                 param.requires_grad = False
         return super().on_train_start()
+
+    def on_train_epoch_start(self):
+        if self.current_epoch < self.config.train.get('freeze_all_but_spk_for', 0):
+            print('=== Freezing all but speaker encoder ===')
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.spk_classifier.parameters():
+                param.requires_grad = True
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+        else:
+            for param in self.net_g.parameters():
+                param.requires_grad = True
+            for param in self.spk_classifier.parameters():
+                param.requires_grad = True
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+        return super().on_train_epoch_start()
 
     def step(self, batch, batch_idx, is_train=True):
         x = batch
@@ -80,14 +107,19 @@ class RVCTrainingModule(pl.LightningModule):
         # incomplete length corresponding to mel specs
         # whereas the original wave gets the full subsegment length
 
-        # Discriminator
-        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave.unsqueeze(1), y_hat.detach())
-        loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+        freeze_all_but_spk = self.current_epoch < self.config.train.get('freeze_all_but_spk_for', 0)
 
-        if is_train:
-            disc_optim.zero_grad()
-            self.manual_backward(loss_disc)
-            disc_optim.step()
+        if not freeze_all_but_spk:
+            # Discriminator
+            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave.unsqueeze(1), y_hat.detach())
+            loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+
+            if is_train:
+                disc_optim.zero_grad()
+                self.manual_backward(loss_disc)
+                disc_optim.step()
+        else:
+            loss_disc = torch.tensor(0.0)
 
         # Generator
         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave.unsqueeze(1), y_hat)
@@ -95,39 +127,45 @@ class RVCTrainingModule(pl.LightningModule):
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * self.config.train.lam_kl
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, _ = generator_loss(y_d_hat_g)
-        loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
+        loss_spk = F.cross_entropy(self.spk_classifier(
+            grad_reverse(m_p, self.config.train.lam_grl)), sids) * self.config.train.lam_spk
+        loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl + loss_spk
 
         if is_train:
             gen_optim.zero_grad()
             self.manual_backward(loss_gen_all)
             gen_optim.step()
 
-        return loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm
+        return loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk
 
     def training_step(self, batch, batch_idx):
-        loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm = self.step(batch, batch_idx)
+        loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk = self.step(batch, batch_idx)
 
         self.log('gen_loss', loss_gen_all, prog_bar=True, logger=True)
         self.log('mel_loss', loss_mel, logger=True)
         self.log('kl_loss', loss_kl, logger=True)
         self.log('disc_loss', loss_disc, prog_bar=True, logger=True)
         self.log('fm_loss', loss_fm, logger=True)
+        self.log('spk_loss', loss_spk, logger=True)
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def validation_step(self, *args, **kwargs):
-        loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm = self.step(*args, **kwargs, is_train=False)
+        loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk = self.step(*args, **kwargs, is_train=False)
 
         self.log('val_gen_loss', loss_gen_all, on_epoch=True, prog_bar=True, logger=True)
         self.log('val_mel_loss', loss_mel, on_epoch=True, logger=True)
         self.log('val_kl_loss', loss_kl, on_epoch=True, logger=True)
         self.log('val_disc_loss', loss_disc, on_epoch=True, prog_bar=True, logger=True)
         self.log('val_fm_loss', loss_fm, on_epoch=True, logger=True)
+        self.log('val_spk_loss', loss_spk, on_epoch=True, logger=True)
         self.log('val_loss', loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm, on_epoch=True, prog_bar=True, logger=True)
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def configure_optimizers(self):
         disc_optim = torch.optim.AdamW(self.net_d.parameters(), lr=self.config.train.lr_stage2)
-        gen_optim = torch.optim.AdamW(self.net_g.parameters(), lr=self.config.train.lr_stage2)
+        gen_optim = torch.optim.AdamW(
+            list(self.net_g.parameters()) +
+            list(self.spk_classifier.parameters()), lr=self.config.train.lr_stage2)
         return [disc_optim, gen_optim], []
 
 if __name__ == '__main__':
@@ -226,7 +264,7 @@ if __name__ == '__main__':
         val_dataset,
         batch_size=config.train.batch_size,
         collate_fn=collator,
-        num_workers=config.data.num_workers
+        num_workers=9
     )
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(

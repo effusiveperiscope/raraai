@@ -1,6 +1,7 @@
 # Stage 2. E2E training with RVC objectives
-from svc_helper.svc.rvc.lib.infer_pack.models import SynthesizerTrnMs768NSFsid, MultiPeriodDiscriminatorV2
-from dataset import FeatureCollator, FeatureDataset
+from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from modeling.my_rvc import VevoSynthesizer
+from dataset_vevo import FeatureCollator, FeatureDataset
 from rvc_losses import feature_loss, discriminator_loss, generator_loss, kl_loss
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 import torch.nn.functional as F
@@ -15,7 +16,7 @@ import sys
 sys.excepthook = lambda exc_type, exc_value, exc_traceback: print(exc_type, exc_value, exc_traceback) or pdb.post_mortem(exc_traceback)
 
 class RVCTrainingModule(pl.LightningModule):
-    def __init__(self, net_g : SynthesizerTrnMs768NSFsid, net_d: MultiPeriodDiscriminatorV2, config : OmegaConf):
+    def __init__(self, net_g : VevoSynthesizer, net_d: MultiPeriodDiscriminatorV2, config : OmegaConf):
         super().__init__()
         self.net_g = net_g
         self.net_d = net_d
@@ -28,10 +29,28 @@ class RVCTrainingModule(pl.LightningModule):
             for param in self.net_g.enc_p.parameters():
                 param.requires_grad = False
         return super().on_train_start()
+    
+    def on_train_epoch_start(self):
+        if self.current_epoch < self.config.train.get('freeze_all_but_encs_for', 0):
+            print('=== Freezing all but encoders ===')
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_q.parameters():
+                param.requires_grad = True
+        else:
+            for param in self.net_g.parameters():
+                param.requires_grad = True
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+        return super().on_train_epoch_start()
 
     def step(self, batch, batch_idx, is_train=True):
         x = batch
-        whisp_feat = x['whisp_feat']
+        vevo_feat = x['vevo_feat']
         pitch = x['pitch']
         pitch_fine = x['pitch_fine']
         lens = x['lengths']
@@ -45,7 +64,7 @@ class RVCTrainingModule(pl.LightningModule):
 
         y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q) = (
             self.net_g(
-                whisp_feat, lens, 
+                vevo_feat, lens, 
                 pitch, pitch_fine,
                 rearrange(spec, 'b t d -> b d t'), lens,
                 sids
@@ -80,11 +99,13 @@ class RVCTrainingModule(pl.LightningModule):
         # incomplete length corresponding to mel specs
         # whereas the original wave gets the full subsegment length
 
+        all_but_encs_frozen = self.current_epoch < self.config.train.get('freeze_all_but_encs_for', 0)
+
         # Discriminator
         y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave.unsqueeze(1), y_hat.detach())
         loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
-        if is_train:
+        if is_train and not all_but_encs_frozen:
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
             disc_optim.step()
@@ -136,7 +157,6 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='config.yaml')
     parser.add_argument('--gen_ckpt', type=str, default=None) # RVC G_ checkpoint
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
-    parser.add_argument('--stage1_ckpt', type=str, default=None) # lightning checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None) # transfer learning
     parser.add_argument('--version', type=int, default=None, help='tensorboard log version')
@@ -146,16 +166,15 @@ if __name__ == '__main__':
     config = OmegaConf.load(args.config)
 
     if args.gen_ckpt is not None:
-        if args.disc_ckpt is None or args.stage1_ckpt is None:
+        if args.disc_ckpt is None:
             print('Error: disc_ckpt and stage1_ckpt are required')
             exit(1)
 
         print('Using RVC G_ checkpoint: {}'.format(args.gen_ckpt))
         print('Using RVC D_ checkpoint: {}'.format(args.disc_ckpt))
-        print('Using stage1 lightning checkpoint: {}'.format(args.stage1_ckpt))
 
         gen_state = torch.load(args.gen_ckpt, map_location='cpu')
-        net_g = SynthesizerTrnMs768NSFsid(**config.model, is_half=True)
+        net_g = VevoSynthesizer(**config.model, is_half=True)
 
         state_dict = gen_state['model']
         submodule_prefix = 'enc_p.' # We are replacing the prior encoder
@@ -164,27 +183,18 @@ if __name__ == '__main__':
             if not k.startswith(submodule_prefix)
         }
         gen_state['model'] = state_dict
-        net_g.load_state_dict(gen_state['model'], strict=False)
+        load_state_dict_mismatch(net_g, gen_state['model'])
 
         disc_state = torch.load(args.disc_ckpt, map_location='cpu')
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
         net_d.load_state_dict(disc_state['model'])
-
-        stage1_state = torch.load(args.stage1_ckpt, map_location='cpu')['state_dict']
-        submodule_prefix = 'student_enc.'
-        submodule_state_dict = {
-            k[len(submodule_prefix):]: v 
-            for k, v in stage1_state.items() 
-            if k.startswith(submodule_prefix)
-        }
-        net_g.enc_p.load_state_dict(submodule_state_dict)
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
-        net_g = SynthesizerTrnMs768NSFsid(**config.model, is_half=True)
+        net_g = VevoSynthesizer(**config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
-        net_g = SynthesizerTrnMs768NSFsid(**config.model, is_half=True)
+        net_g = VevoSynthesizer(**config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
         state = torch.load(args.transfer_from, map_location='cpu')['state_dict']
         submodule_prefix = 'net_g.'
@@ -204,8 +214,10 @@ if __name__ == '__main__':
         net_d.load_state_dict(state_dict, strict=False)
     else:
         print('!!! Warning: No checkpoint provided. Training from scratch. !!!')
-        net_g = SynthesizerTrnMs768NSFsid(**config.model, is_half=True)
+        net_g = VevoSynthesizer(**config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    training_module = RVCTrainingModule(net_g, net_d, config)
+
 
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name+'_stage2',
@@ -237,8 +249,6 @@ if __name__ == '__main__':
         mode='min',
         save_last=True
     )
-
-    training_module = RVCTrainingModule(net_g, net_d, config)
 
     trainer = pl.Trainer(
         max_epochs=config.train.epochs,

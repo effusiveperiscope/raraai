@@ -6,6 +6,10 @@ import pytorch_lightning as pl
 from omegaconf import OmegaConf
 from dataset import FeatureDataset, FeatureCollator
 
+import pdb
+import sys
+sys.excepthook = lambda exc_type, exc_value, exc_traceback: print(exc_type, exc_value, exc_traceback) or pdb.post_mortem(exc_traceback)
+
 class TrainingModule(pl.LightningModule):
     def __init__(self, teacher_enc, student_enc, config : OmegaConf):
         super().__init__()
@@ -68,9 +72,16 @@ if __name__ == '__main__':
     config = OmegaConf.load(args.config)
 
     state = torch.load(args.from_rvc)
-    model = SynthesizerTrnMs768NSFsid(*state['config'], is_half=True)
-    del model.enc_q
-    model.load_state_dict(state['weight'])
+    if 'config' in state.keys():
+        # This is a compact checkpoint that doesn't have the full model
+        model = SynthesizerTrnMs768NSFsid(*state['config'], is_half=True)
+        del model.enc_q
+        model.load_state_dict(state['weight'])
+    else:
+        # This is a full RVC generator checkpoint
+        model = SynthesizerTrnMs768NSFsid(**config.model, is_half=True)
+        model.load_state_dict(state['model'])
+
     teacher_enc = model.enc_p
     student_enc = deepcopy(teacher_enc)
 
