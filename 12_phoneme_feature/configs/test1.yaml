@@ -1,0 +1,42 @@
+train:
+  exp_name: "test1"
+  epochs: 10000
+  batch_size: 8
+  warmup_iters: 1000
+  learning_rate: 1e-5
+  filelist: data/test/filelist_test1.txt
+  val_frac: 0.05
+  phoneme_hint_prob: 0.5
+  num_workers: 4
+  seed: 42
+
+  lam_ctc: 1.0
+  lam_recon: 1.0
+  lam_kl: 1.0
+  lam_spk: 1.0
+model:
+  whisper_channels: 512
+  inter_channels: 192
+  phonemes_count: 43
+  n_spk: 11
+  space_id: 39
+  pad_id: 43
+  vae_dim: 16
+  base_encoder:
+    n_head: 8
+    num_layers: 6
+  phoneme_hint_encoder:
+    n_head: 4
+    num_layers: 2
+  phone_tower:
+    n_head: 8
+    num_layers: 4
+  vae_tower:
+    n_head: 6
+    num_layers: 2
+  decoder:
+    n_head: 8
+    num_layers: 8
+  speaker_classifier:
+    n_head: 4
+    num_layers: 6

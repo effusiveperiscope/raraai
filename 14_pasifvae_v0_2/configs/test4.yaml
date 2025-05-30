@@ -1,0 +1,81 @@
+train:
+  exp_name: test4_v0_2
+  filelist: data/filelist.txt
+  batch_size: 6
+  seed: 42
+  val_frac: 0.05
+  num_workers: 4
+  epochs: 1000
+  
+  learning_rate: 3e-5
+  warmup_steps: 4000
+  max_steps: 100000
+  gradient_clip_norm: 1.0
+  
+  # Loss weights (start with these, then schedule)
+  reconstruction_weight: 1.0
+  phoneme_loss_weight: 1.0
+
+  speaker_adversarial_start: 20000 # no point in running until sane outputs are produced
+  # give some time to warm up before adding GRL
+  speaker_adversarial_weight: 0.1
+
+  orthogonality_weight: 0.1
+  
+  # VAE scheduling
+  kl_annealing_start: 20000
+  kl_annealing_end: 80000  # Gradually increase KL weight
+  kl_loss_weight_init: 0.0  # Start low, increase gradually
+  kl_loss_weight_max: 0.5
+  
+  # Speaker adversarial scheduling
+  grl_lambda_start: 0.0
+  grl_lambda_max: 1.0
+  grl_schedule_start: 20000
+  grl_schedule_end: 50000
+model:
+  whisper_dim: 512   # Whisper base feature dim
+  n_phonemes: 43     # Standard phoneme set size
+  n_speakers: 22     # Adjust based on your dataset
+  latent_dim: 64     # Small bottleneck to prevent speaker leakage
+  d_spk: 256 # speaker embedding dim
+  
+  # Special tokens
+  bos_token_id: 43
+  pad_token_id: 44
+  eos_token_id: 45
+
+  encoder:
+    d_model: 192
+    num_heads: 8
+    d_ff: 2048
+    conv_kernel_size: 31  # Conformer conv kernel
+    dropout: 0.2
+    num_layers: 12
+
+  phoneme_decoder:
+    num_heads: 8
+    d_ff: 2048
+    dropout: 0.4
+    num_layers: 6
+
+  prior_encoder:
+    num_heads: 8
+    d_ff: 2048
+    dropout: 0.1
+    num_layers: 2  # Lighter since it's just for VAE bottleneck
+
+  decoder:
+    d_model: 192
+    num_heads: 8
+    d_ff: 2048
+    dropout: 0.1
+    num_layers: 8  # 4 layers each for in_decoder_half and spk_decoder_half
+
+  spk_classifier:
+    d_model: 128  # Smaller since it's adversarial
+    num_heads: 4
+    d_ff: 1024
+    conv_kernel_size: 15
+    dropout: 0.2  # Higher dropout for regularization
+    num_layers: 4
