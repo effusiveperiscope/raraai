@@ -50,9 +50,6 @@ class Encoder(nn.Module):
         )
         self.phoneme_proj = nn.Linear(
             config.model.d_encoder, config.model.n_phonemes + 3) # bos, pad, eos
-        self.pitch_proj = nn.Linear(
-            1, config.model.d_encoder
-        )
 
         self.prior_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
@@ -205,13 +202,12 @@ class Decoder(nn.Module):
             tgt_key_padding_mask=~z_mask, memory_key_padding_mask=~phones_mask)
         # this is where you would extract features
 
-        gamma, beta = self.spk_cond(self.spk_emb(spk_id).unsqueeze(1))
-        y = y * gamma + beta
-
         if pitch is not None:
-            # Coarse pitch from RVC
             gamma, beta = self.pitch_film(pitch.unsqueeze(2))
-            y = y * gamma + beta
+            y = y + (y * gamma + beta)
+
+        gamma, beta = self.spk_cond(self.spk_emb(spk_id).unsqueeze(1))
+        y = y + (y * gamma + beta)
 
         y = self.spk_decoder_half(y, y, 
             tgt_key_padding_mask=~z_mask, memory_key_padding_mask=~z_mask)

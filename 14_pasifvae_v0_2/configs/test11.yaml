@@ -1,7 +1,7 @@
 train:
-  exp_name: test10_v0_2
-  filelist: data/filelist.txt
-  batch_size: 4
+  exp_name: test11_v0_2
+  filelist: data/test/filelist.txt
+  batch_size: 8
   seed: 42
   val_frac: 0.05
   num_workers: 4
@@ -53,7 +53,7 @@ model:
     num_heads: 8
     d_ff: 2048
     dropout: 0.4
-    num_layers: 6
+    num_layers: 5
 
   prior_encoder:
     num_heads: 8
@@ -66,7 +66,7 @@ model:
     num_heads: 8
     d_ff: 2048
     dropout: 0.1
-    num_layers: 12  # 6 layers each for in_decoder_half and spk_decoder_half
+    num_layers: 10  # 5 layers each for in_decoder_half and spk_decoder_half
 
   spk_classifier:
     d_model: 192  

@@ -45,7 +45,7 @@ class FeatureDataset(Dataset):
         whisper = rearrange(whisper, "1 C T -> 1 T C")
 
         pitch = pitch[:whisper.shape[1]] # Pitch is expected to be same length as whisper
-        return whisper, torch.from_numpy(phones), torch.from_numpy(pitch), int(spk_id), basename
+        return whisper, torch.from_numpy(phones), torch.from_numpy(pitch).to(whisper.dtype), int(spk_id), basename
 
 class FeatureCollator:
     def __init__(self, config):
