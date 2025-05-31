@@ -31,25 +31,15 @@ class Encoder(nn.Module):
     def __init__(self, config: OmegaConf):
         super(Encoder, self).__init__()
         self.in_proj = nn.Linear(
-            config.model.whisper_dim, config.model.encoder.d_model)
-        self.base_encoder = ConformerEncoder(
-            encoder_layer=ConformerBlock(
-                d_model=config.model.encoder.d_model,
-                num_heads=config.model.encoder.num_heads,
-                d_ff=config.model.encoder.d_ff,
-                conv_kernel_size=config.model.encoder.conv_kernel_size,
-                dropout=config.model.encoder.dropout
-            ),
-            num_layers=config.model.encoder.num_layers
-        )
+            config.model.whisper_dim, config.model.d_encoder)
 
         self.sipe = SinusoidalPositionalEncoding(
-            config.model.encoder.d_model)
+            config.model.d_encoder)
         self.phoneme_emb = nn.Embedding(
-            config.model.n_phonemes + 3, config.model.encoder.d_model)
+            config.model.n_phonemes + 3, config.model.d_encoder)
         self.phoneme_head = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
-                d_model=config.model.encoder.d_model,
+                d_model=config.model.d_encoder,
                 nhead=config.model.phoneme_decoder.num_heads,
                 dim_feedforward=config.model.phoneme_decoder.d_ff,
                 dropout=config.model.phoneme_decoder.dropout,
@@ -59,11 +49,14 @@ class Encoder(nn.Module):
             num_layers=config.model.phoneme_decoder.num_layers
         )
         self.phoneme_proj = nn.Linear(
-            config.model.encoder.d_model, config.model.n_phonemes + 3) # bos, pad, eos
+            config.model.d_encoder, config.model.n_phonemes + 3) # bos, pad, eos
+        self.pitch_proj = nn.Linear(
+            1, config.model.d_encoder
+        )
 
         self.prior_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
-                d_model=config.model.encoder.d_model,
+                d_model=config.model.d_encoder,
                 nhead=config.model.prior_encoder.num_heads,
                 dim_feedforward=config.model.prior_encoder.d_ff,
                 dropout=config.model.prior_encoder.dropout,
@@ -73,7 +66,7 @@ class Encoder(nn.Module):
             num_layers=config.model.prior_encoder.num_layers
         )
         self.prior_proj = nn.Linear(
-            config.model.encoder.d_model, config.model.latent_dim * 2
+            config.model.d_encoder, config.model.latent_dim * 2
         )
 
         self.bos_token_id = config.model.bos_token_id
@@ -81,8 +74,7 @@ class Encoder(nn.Module):
         self.eos_token_id = config.model.eos_token_id
 
     def forward(self, x, x_mask, tgt, tgt_mask):
-        x = self.in_proj(x)
-        x = self.base_encoder(x, src_key_padding_mask=~x_mask)
+        x = self.in_proj(x) * x_mask.unsqueeze(-1)
 
         tgt = self.phoneme_emb(tgt)
         tgt = self.sipe(tgt) # Add position information to phonemes
@@ -91,7 +83,7 @@ class Encoder(nn.Module):
             tgt_key_padding_mask=~tgt_mask, memory_key_padding_mask=~x_mask)
         phone_logits = self.phoneme_proj(phone)
 
-        prior = self.prior_encoder(x)
+        prior = self.prior_encoder(x, src_key_padding_mask=~x_mask)
         prior = self.prior_proj(prior)
         m_p, log_var_p = prior.chunk(2, dim=-1)
 
@@ -178,6 +170,11 @@ class Decoder(nn.Module):
             config.model.n_phonemes + 3,
             config.model.decoder.d_model
         )
+        self.phone_proj2 = nn.Linear(
+            config.model.decoder.d_model,
+            config.model.decoder.d_model
+        )
+        self.pitch_film = FiLMGenerator(1, config.model.decoder.d_model)
         self.spk_decoder_half = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
                 d_model=config.model.decoder.d_model,
@@ -194,12 +191,14 @@ class Decoder(nn.Module):
             config.model.whisper_dim
         )
 
-    def forward(self, z, z_mask, phone_logits, phones_mask, spk_id):
+    def forward(self, z, z_mask, phone_logits, phones_mask, spk_id, pitch=None):
         z = self.in_proj(z)
         z_orig = z
 
-        phone_feats = self.phone_proj(phone_logits)
-        phone_feats = self.sipe(phone_feats) # Add position information to phoneme features
+        phone_feats = self.phone_proj(phone_logits.detach())
+        phone_feats = self.sipe(phone_feats)
+        phone_feats = self.phone_proj2(phone_feats)
+
         z = self.sipe(z) # Add position information to latent for decoding
 
         y = self.in_decoder_half(z, phone_feats, 
@@ -209,10 +208,15 @@ class Decoder(nn.Module):
         gamma, beta = self.spk_cond(self.spk_emb(spk_id).unsqueeze(1))
         y = y * gamma + beta
 
+        if pitch is not None:
+            # Coarse pitch from RVC
+            gamma, beta = self.pitch_film(pitch.unsqueeze(2))
+            y = y * gamma + beta
+
         y = self.spk_decoder_half(y, y, 
             tgt_key_padding_mask=~z_mask, memory_key_padding_mask=~z_mask)
         y = self.out_proj(y)
-        return y
+        return y 
 
 class SpeakerClassifier(nn.Module):
     def __init__(self, config):
@@ -251,13 +255,13 @@ class PASIFVAE(nn.Module):
         self.spk_classifier = SpeakerClassifier(config)
         self.config = config
 
-    def forward(self, x, x_mask, tgt, tgt_mask, spk_id, grl_lambda=0.0):
+    def forward(self, x, x_mask, tgt, tgt_mask, spk_id, pitch=None, grl_lambda=0.0):
         phone_logits, m_p, log_var_p = self.encoder(x, x_mask, tgt, tgt_mask)
 
         # Sample from prior
         z = m_p + torch.randn_like(m_p) * torch.exp(log_var_p / 2)
 
-        y = self.decoder(z, x_mask, phone_logits, tgt_mask, spk_id)
+        y = self.decoder(z, x_mask, phone_logits, tgt_mask, spk_id, pitch=pitch)
 
         m_p_segments, segment_mask = random_subsample_segments(m_p, x_mask,
             min_segment_len=self.config.model.spk_classifier.min_segment_len,

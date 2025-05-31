@@ -44,6 +44,7 @@ class TrainingModule(pl.LightningModule):
     def step(self, batch, batch_idx, is_train=True):
         whisper = batch['whisper']
         phones = batch['phones']
+        pitches = batch['pitches']
         spk_id = batch['spk_ids']
         whisper_mask = batch['whisper_mask']
         phones_mask = batch['phones_mask']
@@ -100,9 +101,8 @@ class TrainingModule(pl.LightningModule):
             new_phones,
             new_phones_mask,
             spk_id,
-            self.grl_lambda)
-
-
+            pitch=pitches,
+            grl_lambda=self.grl_lambda)
 
         recon_loss = nn.L1Loss()(y, whisper)
         phone_ce_loss = nn.CrossEntropyLoss(

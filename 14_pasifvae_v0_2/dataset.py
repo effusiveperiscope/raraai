@@ -1,5 +1,6 @@
 import os
 import random
+from einops import rearrange
 import numpy as np
 from omegaconf import OmegaConf
 import torch
@@ -31,11 +32,20 @@ class FeatureDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, index):
-        whisper, phones, spk_id = self.files[index].split("|")
+        whisper, phones, pitch, spk_id = self.files[index].split("|")
         basename = os.path.basename(whisper).removesuffix("_whisper.npy")
         whisper = np.load(whisper) # (1, T, C)
         phones = np.load(phones) # (T2,)
-        return torch.from_numpy(whisper), torch.from_numpy(phones), int(spk_id), basename
+        pitch = np.load(pitch) # (Tp, )
+
+        # RVC expects whisper seq dim to be interpolated up 2x
+        whisper = torch.from_numpy(whisper)
+        whisper = rearrange(whisper, "1 T C -> 1 C T")
+        whisper = F.interpolate(whisper, scale_factor=2)
+        whisper = rearrange(whisper, "1 C T -> 1 T C")
+
+        pitch = pitch[:whisper.shape[1]] # Pitch is expected to be same length as whisper
+        return whisper, torch.from_numpy(phones), torch.from_numpy(pitch), int(spk_id), basename
 
 class FeatureCollator:
     def __init__(self, config):
@@ -48,7 +58,7 @@ class FeatureCollator:
         Collate function for DataLoader.
         
         Args:
-            batch: List of tuples (whisper, phones, spk_id) from FeatureDataset
+            batch: List of tuples (whisper, phones, pitches, spk_id) from FeatureDataset
         
         Returns:
             dict containing:
@@ -60,7 +70,7 @@ class FeatureCollator:
                 - whisper_mask: [B, T_max] boolean mask (True for valid positions)
                 - phones_mask: [B, T2_max] boolean mask (True for valid positions)
         """
-        whisper_list, phones_list, spk_ids, basenames = zip(*batch)
+        whisper_list, phones_list, pitches_list, spk_ids, basenames = zip(*batch)
         
         # Convert to lists and get original lengths
         whisper_lengths = torch.tensor([w.shape[1] for w in whisper_list], dtype=torch.long)  # T dimension
@@ -70,6 +80,9 @@ class FeatureCollator:
         # Handle whisper features: [1, T, C] -> [T, C] for padding, then back to [B, T, C]
         whisper_squeezed = [w.squeeze(0) for w in whisper_list]  # Remove batch dim: [T, C]
         whisper_padded = pad_sequence(whisper_squeezed, batch_first=True, padding_value=0)  # [B, T_max, C]
+        
+        # Pad pitches
+        pitches_padded = pad_sequence(pitches_list, batch_first=True, padding_value=0)
         
         # Handle phone sequences: [T2] -> [B, T2_max]
         phones_padded = pad_sequence(phones_list, batch_first=True, padding_value=self.config.model.pad_token_id)  # [B, T2_max]
@@ -86,6 +99,7 @@ class FeatureCollator:
         return {
             'whisper': whisper_padded,           # [B, T_max, C]
             'phones': phones_padded,             # [B, T2_max]
+            'pitches': pitches_padded,           # [B, T_max]
             'spk_ids': spk_ids,                  # [B]
             'whisper_lengths': whisper_lengths,  # [B]
             'phones_lengths': phones_lengths,    # [B]

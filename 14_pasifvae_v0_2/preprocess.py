@@ -57,25 +57,26 @@ for line in tqdm(lines, total=len(lines), desc="Preprocessing"):
     def make_filename(suffix):
         return os.path.join(args.output_dir, f"{spk_name}_{os.path.basename(path).split('.')[0]}_{suffix}.npy")
     output_filelist.append(
-        f"{make_filename('whisper')}|{make_filename('phones')}|{spk_id}\n"
+        f"{make_filename('whisper')}|{make_filename('phones')}|{make_filename('pitch')}|{spk_id}\n"
     )
 
     if '\\' in text: # this should not be in transcription
         import pdb; pdb.set_trace()
-    print(text)
     phones_ids = my_feats.get_phonemes_ids(text)
     np.save(
         make_filename("phones"), phones_ids)
 
-    if os.path.exists(make_filename("whisper")):
+    if os.path.exists(make_filename("whisper")) and os.path.exists(make_filename("pitch")):
         continue
 
     audio, _ = librosa.load(path, sr=MyFeatures.expected_sample_rate)
     with torch.no_grad():
         whisper_features = my_feats.get_whisper_features(audio).cpu().numpy()
-
+        pitch = my_feats.get_pitch(audio)
     np.save(
         make_filename("whisper"), whisper_features)
+    np.save(
+        make_filename("pitch"), pitch)
 
 with open(os.path.join(args.output_dir, "filelist.txt"), "w", encoding="utf-8") as f:
     f.writelines(output_filelist)

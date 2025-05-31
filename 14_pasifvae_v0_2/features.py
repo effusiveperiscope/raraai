@@ -1,7 +1,8 @@
 from transformers import WhisperFeatureExtractor, WhisperModel
 from g2p.g2p_arpabet import G2PConverter, DefaultG2PFallback
+from svc_helper.pitch.rmvpe import RMVPEModel
 from omegaconf import OmegaConf
-import numpy
+import numpy as np
 import torch
 
 class MyFeatures:
@@ -10,7 +11,14 @@ class MyFeatures:
     def __init__(self, no_whisper=False):
         if not no_whisper:
             self.init_whisper()
+            self.init_rmvpe()
         self.init_g2p()
+
+    def init_rmvpe(self):
+        self.rmvpe_model = RMVPEModel(
+            device=torch.device('cuda'),
+            hop_length = 160 
+        )
 
     def init_whisper(self):
         model_name = "openai/whisper-base"
@@ -42,7 +50,7 @@ class MyFeatures:
     def ids_to_phonemes(self, ids):
         return [(self.vocab[i] if i < len(self.g2p.phonemes) else "<unk>") for i in ids]
 
-    def get_whisper_features(self, audio: numpy.ndarray):
+    def get_whisper_features(self, audio: np.ndarray):
         inputs = self.feature_extractor(audio, 
             sampling_rate=MyFeatures.expected_sample_rate, return_tensors="pt",
             return_attention_mask=True)
@@ -54,6 +62,10 @@ class MyFeatures:
             hidden_states = hidden_states[:, :feature_len, :]
         return hidden_states
 
+    def get_pitch(self, audio: np.ndarray) -> np.ndarray:
+        f0 = self.rmvpe_model.extract_pitch(audio)
+        return f0
+
 if __name__ == "__main__":
     import librosa
     features = MyFeatures()
@@ -63,3 +75,4 @@ if __name__ == "__main__":
     print(features.get_whisper_features(audio).shape)
     print(phones)
     print(features.get_phonemes_ids(test_text))
+    print(features.get_pitch(audio).shape)
