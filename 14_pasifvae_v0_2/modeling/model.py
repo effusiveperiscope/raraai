@@ -204,9 +204,11 @@ class Decoder(nn.Module):
 
         if pitch is not None:
             gamma, beta = self.pitch_film(pitch.unsqueeze(2))
+            gamma = torch.tanh(gamma)
             y = y + (y * gamma + beta)
 
         gamma, beta = self.spk_cond(self.spk_emb(spk_id).unsqueeze(1))
+        gamma = torch.tanh(gamma)
         y = y + (y * gamma + beta)
 
         y = self.spk_decoder_half(y, y, 
