@@ -152,17 +152,7 @@ class Decoder(nn.Module):
             config.model.decoder.d_model)
         self.spk_emb = nn.Embedding(config.model.n_speakers, config.model.d_spk)
         self.spk_cond = FiLMGenerator(config.model.d_spk, config.model.decoder.d_model)
-        self.in_decoder_half = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(
-                d_model=config.model.decoder.d_model,
-                nhead=config.model.decoder.num_heads,
-                dim_feedforward=config.model.decoder.d_ff,
-                dropout=config.model.decoder.dropout,
-                activation='gelu',
-                batch_first=True
-            ),
-            num_layers=config.model.decoder.num_layers // 2
-        )
+
         self.phone_proj = nn.Linear(
             config.model.n_phonemes + 3,
             config.model.decoder.d_model
@@ -172,7 +162,7 @@ class Decoder(nn.Module):
             config.model.decoder.d_model
         )
         self.pitch_film = FiLMGenerator(1, config.model.decoder.d_model)
-        self.spk_decoder_half = nn.TransformerDecoder(
+        self.in_decoder = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
                 d_model=config.model.decoder.d_model,
                 nhead=config.model.decoder.num_heads,
@@ -181,7 +171,29 @@ class Decoder(nn.Module):
                 activation='gelu',
                 batch_first=True
             ),
-            num_layers=config.model.decoder.num_layers // 2
+            num_layers=config.model.decoder.in_layers
+        )
+        self.spk_decoder = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(
+                d_model=config.model.decoder.d_model,
+                nhead=config.model.decoder.num_heads,
+                dim_feedforward=config.model.decoder.d_ff,
+                dropout=config.model.decoder.dropout,
+                activation='gelu',
+                batch_first=True
+            ),
+            num_layers=config.model.decoder.spk_layers
+        )
+        self.pitch_decoder = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(
+                d_model=config.model.decoder.d_model,
+                nhead=config.model.decoder.num_heads,
+                dim_feedforward=config.model.decoder.d_ff,
+                dropout=config.model.decoder.dropout,
+                activation='gelu',
+                batch_first=True
+            ),
+            num_layers=config.model.decoder.pitch_layers
         )
         self.out_proj = nn.Linear(
             config.model.decoder.d_model,
@@ -198,20 +210,22 @@ class Decoder(nn.Module):
 
         z = self.sipe(z) # Add position information to latent for decoding
 
-        y = self.in_decoder_half(z, phone_feats, 
+        y = self.in_decoder(z, phone_feats, 
             tgt_key_padding_mask=~z_mask, memory_key_padding_mask=~phones_mask)
         # this is where you would extract features
 
-        if pitch is not None:
-            gamma, beta = self.pitch_film(pitch.unsqueeze(2))
-            gamma = torch.tanh(gamma)
-            y = y + (y * gamma + beta)
-
         gamma, beta = self.spk_cond(self.spk_emb(spk_id).unsqueeze(1))
-        gamma = torch.tanh(gamma)
         y = y + (y * gamma + beta)
 
-        y = self.spk_decoder_half(y, y, 
+        y = self.spk_decoder(y, y, 
+            tgt_key_padding_mask=~z_mask, memory_key_padding_mask=~z_mask)
+
+        if pitch is not None:
+            pitch = pitch.log()
+            gamma, beta = self.pitch_film(pitch.unsqueeze(2))
+            y = y + (y * gamma + beta)
+
+        y = self.pitch_decoder(y, y, 
             tgt_key_padding_mask=~z_mask, memory_key_padding_mask=~z_mask)
         y = self.out_proj(y)
         return y 

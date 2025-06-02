@@ -101,7 +101,7 @@ class TrainingModule(pl.LightningModule):
             new_phones,
             new_phones_mask,
             spk_id,
-            pitch=pitches,
+            pitch=pitches if self.config.model.pitch_cond else None,
             grl_lambda=self.grl_lambda)
 
         recon_loss = nn.L1Loss()(y, whisper)
