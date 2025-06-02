@@ -47,8 +47,11 @@ class MyFeatures:
     def get_phonemes_ids(self, text: str):
         return [self.g2p_phones_to_ids[phone] for phone in self.get_phonemes(text)]
 
+    def num_phonemes(self):
+        return len(self.vocab)
+
     def ids_to_phonemes(self, ids):
-        return [(self.vocab[i] if i < len(self.g2p.phonemes) else "<unk>") for i in ids]
+        return [(self.vocab[i] if i < len(self.vocab) else "<unk>") for i in ids]
 
     def get_whisper_features(self, audio: np.ndarray):
         inputs = self.feature_extractor(audio, 

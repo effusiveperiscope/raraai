@@ -86,6 +86,14 @@ class Encoder(nn.Module):
 
         return phone_logits, m_p, log_var_p
 
+    def prior_only(self, x, x_mask):
+        x = self.in_proj(x) * x_mask.unsqueeze(-1)
+        prior = self.prior_encoder(x, src_key_padding_mask=~x_mask)
+        prior = self.prior_proj(prior)
+        m_p, log_var_p = prior.chunk(2, dim=-1)
+        return m_p, log_var_p
+
+
     @torch.no_grad()
     def generate_phonemes(self, memory, memory_mask, max_len):
         """Autoregressive phoneme generation"""
@@ -266,6 +274,15 @@ class PASIFVAE(nn.Module):
         self.decoder = Decoder(config)
         self.spk_classifier = SpeakerClassifier(config)
         self.config = config
+
+    def force_phonemes(self, x, x_mask, phoneme_logits, phones_mask, spk_id, pitch=None, grl_lambda=0.0):
+        m_p, log_var_p = self.encoder.prior_only(x, x_mask)
+
+        # Sample from prior
+        z = m_p + torch.randn_like(m_p) * torch.exp(log_var_p / 2)
+
+        y = self.decoder(z, x_mask, phoneme_logits, phones_mask, spk_id, pitch=pitch)
+        return y
 
     def forward(self, x, x_mask, tgt, tgt_mask, spk_id, pitch=None, grl_lambda=0.0):
         phone_logits, m_p, log_var_p = self.encoder(x, x_mask, tgt, tgt_mask)

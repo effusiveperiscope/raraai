@@ -5,6 +5,7 @@ import seaborn as sns
 import io
 from PIL import Image # For converting plot to image array
 import torch.nn as nn
+import torch.nn.functional as F
 import random
 
 def random_subsample_segments(m_p: torch.Tensor,
@@ -255,4 +256,102 @@ def visualize_phoneme_probabilities(
          ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
 
     plt.tight_layout() # Adjust plot to prevent labels from overlapping
+    plt.show()
+
+def compare_tensors_heatmap(tensor1, tensor2, title1='Tensor 1', title2='Tensor 2', cmap='viridis'):
+    """
+    Visual heatmap comparison of two tensors with shape [1, T, C].
+
+    Each tensor is shown as a 2D heatmap: time (T) x channels (C)
+
+    Parameters:
+    - tensor1, tensor2: numpy arrays or torch tensors with shape [1, T, C]
+    - title1, title2: Titles for the heatmaps
+    - cmap: Colormap to use
+    """
+    # Convert to numpy if using torch
+    if hasattr(tensor1, 'detach'):
+        tensor1 = tensor1.detach().cpu().numpy()
+    if hasattr(tensor2, 'detach'):
+        tensor2 = tensor2.detach().cpu().numpy()
+
+    # Check shape
+    assert tensor1.shape == tensor2.shape, "Tensors must have the same shape"
+    assert tensor1.ndim == 3 and tensor1.shape[0] == 1, "Shape must be [1, T, C]"
+
+    # Squeeze batch dimension
+    tensor1 = tensor1[0]  # shape: [T, C]
+    tensor2 = tensor2[0]  # shape: [T, C]
+
+    # Plot heatmaps
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    im1 = axes[0].imshow(tensor1.T, aspect='auto', cmap=cmap)
+    axes[0].set_title(title1)
+    axes[0].set_ylabel('Channels')
+    axes[0].set_xlabel('Time')
+    fig.colorbar(im1, ax=axes[0])
+
+    im2 = axes[1].imshow(tensor2.T, aspect='auto', cmap=cmap)
+    axes[1].set_title(title2)
+    axes[1].set_ylabel('Channels')
+    axes[1].set_xlabel('Time')
+    fig.colorbar(im2, ax=axes[1])
+
+    plt.suptitle('Tensor Comparison (Heatmaps)')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+
+def generate_one_hot_logits(B, T, num_classes, dtype=torch.float32, device='cpu'):
+    """
+    Generates a one-hot logits tensor of shape [B, T, num_classes].
+    
+    Args:
+        B (int): Batch size.
+        T (int): Sequence length.
+        num_classes (int): Number of classes.
+        dtype (torch.dtype): Data type of the output tensor.
+        device (str or torch.device): Device to place the tensor on.
+
+    Returns:
+        torch.Tensor: A [B, T, num_classes] tensor with one-hot "logits".
+    """
+    # Randomly select one class index per [B, T]
+    class_indices = torch.randint(0, num_classes, (B, T), device=device)
+    
+    # Create one-hot encoded tensor
+    one_hot = torch.nn.functional.one_hot(class_indices, num_classes=num_classes)
+    
+    # Convert to float "logits" tensor
+    logits = one_hot.to(dtype)
+
+    return logits, class_indices
+
+def plot_logits_1(logits: torch.Tensor, class_labels: list, title: str = "Class Probabilities"):
+    """
+    Plots probabilities from logits using matplotlib.
+
+    Args:
+        logits (torch.Tensor): A tensor of shape [1, num_classes] containing logits.
+        class_labels (list): A list of class label strings of length equal to num_classes.
+        title (str): Title of the plot.
+    """
+    if logits.ndim != 2 or logits.shape[0] != 1:
+        raise ValueError("logits must be of shape [1, num_classes]")
+
+    if logits.shape[1] != len(class_labels):
+        raise ValueError("Number of class labels must match number of logits")
+
+    # Convert logits to probabilities using softmax
+    probabilities = F.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.bar(class_labels, probabilities, color='skyblue')
+    plt.xlabel("Class Labels")
+    plt.ylabel("Probability")
+    plt.title(title)
+    plt.ylim(0, probabilities.max() * 1.1)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
     plt.show()
