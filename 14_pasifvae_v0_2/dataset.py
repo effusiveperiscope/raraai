@@ -38,7 +38,7 @@ class FeatureDataset(Dataset):
         phones = np.load(phones) # (T2,)
         pitch = np.load(pitch) # (Tp, )
 
-        # RVC expects whisper seq dim to be interpolated up 2x
+        # RVC expects speech feature seq dim to be interpolated up 2x
         whisper = torch.from_numpy(whisper)
         whisper = rearrange(whisper, "1 T C -> 1 C T")
         whisper = F.interpolate(whisper, scale_factor=2)
