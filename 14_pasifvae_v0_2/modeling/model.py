@@ -70,20 +70,25 @@ class Encoder(nn.Module):
         self.pad_token_id = config.model.pad_token_id
         self.eos_token_id = config.model.eos_token_id
 
+    def generate(self, x, x_mask, max_len=100): # generate using greedy decoding
+        x = self.in_proj(x) * x_mask.unsqueeze(-1)
+        phone_logits, phone_hidden, generated_tokens = self.generate_phonemes(x, ~x_mask, max_len=max_len)  # Fixed mask inversion
+        prior = self.prior_encoder(x, src_key_padding_mask=~x_mask)
+        prior = self.prior_proj(prior)
+        m_p, log_var_p = prior.chunk(2, dim=-1)
+        return phone_logits, m_p, log_var_p
+
     def forward(self, x, x_mask, tgt, tgt_mask):
         x = self.in_proj(x) * x_mask.unsqueeze(-1)
-
         tgt = self.phoneme_emb(tgt)
         tgt = self.sipe(tgt) # Add position information to phonemes
         phone = self.phoneme_head(tgt, x, 
             tgt_mask=generate_causal_mask(tgt.size(1)).to(tgt.device),
             tgt_key_padding_mask=~tgt_mask, memory_key_padding_mask=~x_mask)
         phone_logits = self.phoneme_proj(phone)
-
         prior = self.prior_encoder(x, src_key_padding_mask=~x_mask)
         prior = self.prior_proj(prior)
         m_p, log_var_p = prior.chunk(2, dim=-1)
-
         return phone_logits, m_p, log_var_p
 
     def prior_only(self, x, x_mask):
@@ -93,59 +98,66 @@ class Encoder(nn.Module):
         m_p, log_var_p = prior.chunk(2, dim=-1)
         return m_p, log_var_p
 
-
     @torch.no_grad()
     def generate_phonemes(self, memory, memory_mask, max_len):
         """Autoregressive phoneme generation"""
         batch_size = memory.size(0)
         device = memory.device
         
-        # Start with BOS token
-        generated = torch.full((batch_size, 1), self.bos_token_id, 
-                              dtype=torch.long, device=device)
+        # Start with BOS token - keep as token IDs initially
+        generated_ids = torch.full((batch_size, 1), self.bos_token_id, 
+                                dtype=torch.long, device=device)
         
-        # Store all hidden states for decoder
+        # Store all hidden states and logits
         all_hidden = []
+        all_logits = []
         
         for step in range(max_len - 1):
+            # Convert current sequence to embeddings
+            generated_emb = self.phoneme_emb(generated_ids)
+            generated_emb = self.sipe(generated_emb)
+            
             # Create causal mask for current sequence
-            tgt_mask = generate_causal_mask(generated.size(1)).to(device)
+            tgt_mask = generate_causal_mask(generated_emb.size(1)).to(device)
             
             # Forward pass
             hidden = self.phoneme_head(
-                generated, memory,
+                generated_emb, memory,
                 tgt_mask=tgt_mask,
-                memory_key_padding_mask=memory_mask
+                memory_key_padding_mask=memory_mask  # Already inverted in generate()
             )
             
             # Get logits for last token
             logits = self.phoneme_proj(hidden[:, -1:])  # [B, 1, vocab_size]
-            
-            # Sample next token (you can use different strategies here)
-            next_token = torch.argmax(logits, dim=-1)  # Greedy
-            # Or: next_token = torch.multinomial(torch.softmax(logits/temperature, -1).squeeze(1), 1)
-            
-            # Append to sequence
-            generated = torch.cat([generated, next_token], dim=1)
+            all_logits.append(logits)
             all_hidden.append(hidden[:, -1:])
             
-            # Check for EOS (optional early stopping)
-            if (next_token == self.eos_token_id).all():
+            # Sample next token ID (not embedding!)
+            next_token_id = torch.argmax(logits, dim=-1).squeeze(-1)  # [B, 1] -> [B]
+            
+            # Debug print
+            #print(f"Step {step}: Generated token IDs: {next_token_id}")
+            
+            # Append to sequence (as token IDs)
+            generated_ids = torch.cat([generated_ids, next_token_id.unsqueeze(1)], dim=1)
+            
+            # Check for EOS (now comparing token IDs correctly)
+            if hasattr(self, 'eos_token_id') and (next_token_id == self.eos_token_id).all():
+                print(f"EOS reached at step {step}")
                 break
         
-        # Concatenate all hidden states
-        phone_hidden = torch.cat(all_hidden, dim=1)
+        # Concatenate all logits and hidden states
+        phone_logits = torch.cat(all_logits, dim=1)  # [B, seq_len-1, vocab_size]
+        phone_hidden = torch.cat(all_hidden, dim=1)  # [B, seq_len-1, hidden_size]
         
-        # Final forward pass to get all logits (for consistency)
-        tgt_mask = generate_causal_mask(generated.size(1)).to(device)
-        final_hidden = self.phoneme_head(
-            generated, memory,
-            tgt_mask=tgt_mask,
-            memory_key_padding_mask=memory_mask
-        )
-        final_logits = self.phoneme_proj(final_hidden)
+        # Add BOS logits (dummy - could be zeros or compute separately)
+        bos_logits = torch.zeros(batch_size, 1, phone_logits.size(-1), device=device)
+        phone_logits = torch.cat([bos_logits, phone_logits], dim=1)
         
-        return final_logits, final_hidden, generated
+        # Convert final token sequence to embeddings for consistency
+        final_generated_emb = self.phoneme_emb(generated_ids)
+        
+        return phone_logits, phone_hidden, generated_ids  # Return token IDs instead of embeddings
 
 class Decoder(nn.Module):
     def __init__(self, config):
@@ -274,6 +286,15 @@ class PASIFVAE(nn.Module):
         self.decoder = Decoder(config)
         self.spk_classifier = SpeakerClassifier(config)
         self.config = config
+
+    def generate(self, x, x_mask, spk_id, pitch=None, max_len=100):
+        phoneme_logits, m_p, log_var_p = self.encoder.generate(x, x_mask, max_len=max_len)
+        # Sample from prior
+        z = m_p + torch.randn_like(m_p) * torch.exp(log_var_p / 2)
+
+        phones_mask = torch.full((phoneme_logits.shape[0], phoneme_logits.shape[1]), True, dtype=torch.bool, device=phoneme_logits.device)
+        y = self.decoder(z, x_mask, phoneme_logits, phones_mask, spk_id, pitch=pitch)
+        return y, phoneme_logits
 
     def force_phonemes(self, x, x_mask, phoneme_logits, phones_mask, spk_id, pitch=None, grl_lambda=0.0):
         m_p, log_var_p = self.encoder.prior_only(x, x_mask)

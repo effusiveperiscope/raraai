@@ -82,34 +82,35 @@ for batch in loader:
 
     print(f"Correct phonemes: { my_feats.ids_to_phonemes(phones.squeeze().tolist()) }")
 
-    y, phone_logits, spk_logits, m_p, log_var_p = model(
-        whisper, whisper_mask, new_phones, new_phones_mask, spk_id)
-    recon_loss = F.l1_loss(y, whisper)
-    print(f"Recon loss with correct speaker: {recon_loss.item()}")
-    print(f"Correct speaker is: {spk_labels[spk_id.item()]}")
+    with torch.no_grad():
+        y, phone_logits, spk_logits, m_p, log_var_p = model(
+            whisper, whisper_mask, new_phones, new_phones_mask, spk_id)
+        recon_loss = F.l1_loss(y, whisper)
+        print(f"Recon loss with correct speaker: {recon_loss.item()}")
+        print(f"Correct speaker is: {spk_labels[spk_id.item()]}")
 
-    # plot_logits_1(spk_logits, spk_labels, title="Speaker Logits")
+        # plot_logits_1(spk_logits, spk_labels, title="Speaker Logits")
 
-    print(" -- incorrect speaker test -- ")
-    y, phone_logits, spk_logits, m_p, log_var_p = model(
-        whisper, whisper_mask, phones, phones_mask, spk_id - 1 if spk_id != 0 else torch.tensor([1], dtype=torch.long, device=phones.device))
-    recon_loss = F.l1_loss(y, whisper)
-    print(f"Recon loss with incorrect speaker: {recon_loss.item()}")
+        print(" -- incorrect speaker test -- ")
+        y, phone_logits, spk_logits, m_p, log_var_p = model(
+            whisper, whisper_mask, phones, phones_mask, spk_id - 1 if spk_id != 0 else torch.tensor([1], dtype=torch.long, device=phones.device))
+        recon_loss = F.l1_loss(y, whisper)
+        print(f"Recon loss with incorrect speaker: {recon_loss.item()}")
 
-    print(" -- incorrect phonemes test --")
-    random_phones, ids = generate_one_hot_logits(B=1, T=phones.shape[1], num_classes=config.model.n_phonemes + 3)
-    print(f"Random phonemes: { my_feats.ids_to_phonemes(ids.squeeze().tolist()) }")
-    y = model.force_phonemes(whisper, whisper_mask, 
-        random_phones,
-        phones_mask, spk_id)
-    recon_loss = F.l1_loss(y, whisper)
-    print(f"Recon loss with random phonemes: {recon_loss.item()}")
+        print(" -- incorrect phonemes test --")
+        random_phones, ids = generate_one_hot_logits(B=1, T=phones.shape[1], num_classes=config.model.n_phonemes + 3)
+        print(f"Random phonemes: { my_feats.ids_to_phonemes(ids.squeeze().tolist()) }")
+        y = model.force_phonemes(whisper, whisper_mask, 
+            random_phones,
+            phones_mask, spk_id)
+        recon_loss = F.l1_loss(y, whisper)
+        print(f"Recon loss with random phonemes: {recon_loss.item()}")
 
-    print("-- combined test --")
-    y = model.force_phonemes(whisper, whisper_mask, 
-        random_phones,
-        phones_mask, spk_id - 1 if spk_id != 0 else torch.tensor([1], dtype=torch.long, device=phones.device))
-    recon_loss = F.l1_loss(y, whisper)
-    print(f"Recon loss with random phonemes and incorrect speaker: {recon_loss.item()}")
+        print("-- combined test --")
+        y = model.force_phonemes(whisper, whisper_mask, 
+            random_phones,
+            phones_mask, spk_id - 1 if spk_id != 0 else torch.tensor([1], dtype=torch.long, device=phones.device))
+        recon_loss = F.l1_loss(y, whisper)
+        print(f"Recon loss with random phonemes and incorrect speaker: {recon_loss.item()}")
 
     # compare_tensors_heatmap(whisper, y, title1='Whisper', title2='Reconstructed')
