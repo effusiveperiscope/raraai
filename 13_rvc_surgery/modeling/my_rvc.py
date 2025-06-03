@@ -226,10 +226,11 @@ class AltSynthesizer(nn.Module):
         nsff0: torch.Tensor,
         sid: torch.Tensor,
         rate: Optional[torch.Tensor] = None,
+        noise_scale: float = 0.66666,
     ):
         g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
+        m_p, logs_p, x_mask, pre_spk_x = self.enc_p(phone, pitch, phone_lengths, g=g)
+        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale) * x_mask
         if rate is not None:
             head = int(z_p.shape[2] * (1.0 - rate.item()))
             z_p = z_p[:, :, head:]

@@ -26,7 +26,8 @@ class MainWindow(QMainWindow):
         gui.addFileInput(AudioFileInput())
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Coarse Transpose", id='coarse', min=-24, max=24, default=0))
-        gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=110, default=0))
+        gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
+        gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=config.model.spk_embed_dim - 1, default=0))
         # TODO - pitch smooth
         gui.addInference(Inference(
             info=InferenceInfo(sr=48000, extension='flac'),
@@ -35,7 +36,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(gui.build())
 
         my_feats = MyFeatures(
-            extract_hubert=False, extract_whisper=False, extract_vevo=True)
+            extract_hubert=False, extract_whisper=True, extract_vevo=False)
         self.my_feats = my_feats
 
         self.hubert_stats_path = config.data.get('hubert_stats_path', 
@@ -83,13 +84,8 @@ class MainWindow(QMainWindow):
         for file in files:
             data_16k, _ = librosa.load(file, sr=16000)
             feats = self.my_feats.get_features(data_16k)
-            lens = torch.tensor([feats['vevo_quantized'].shape[1]]).to('cuda')
+            lens = torch.tensor([feats['whisp_feat'].shape[1]]).to('cuda')
 
-            # Normalize features
-            feats['vevo_quantized'] = (
-                (feats['vevo_quantized'] - self.hubert_feat_norm_mean.to(feats['vevo_quantized'].device)) /
-                self.hubert_feat_norm_std.to(feats['vevo_quantized'].device))
-            
             # Tranpsose
             feats['pitch_fine'] = feats['pitch_fine'] * (2 ** (transpose / 12))
             # Experiment with different coarse transpose relative to fine
@@ -97,16 +93,17 @@ class MainWindow(QMainWindow):
                 (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
 
             # Truncate
-            feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['vevo_quantized'].shape[1]]
-            feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['vevo_quantized'].shape[1]]
+            feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
+            feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
 
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    feats['vevo_quantized'].half(), 
+                    feats['whisp_feat'].half(), 
                     lens, 
                     feats['pitch'].to('cuda'), 
                     feats['pitch_fine'].to('cuda'),
-                    torch.tensor([data['sid']]).to('cuda'))
+                    torch.tensor([data['sid']]).to('cuda'),
+                    noise_scale = data['noise'])
                 o_np = o.squeeze().cpu().float().numpy()
                 out.append(AudioResult(
                     label=os.path.basename(file)+data['model_labels'][0],
@@ -116,7 +113,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/titan_spk.yaml')
+    config = OmegaConf.load('configs/titan_spk_v3.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()

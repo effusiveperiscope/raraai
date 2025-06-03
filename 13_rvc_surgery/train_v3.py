@@ -78,11 +78,15 @@ class RVCTrainingModule(pl.LightningModule):
 
         disc_optim, gen_optim = self.optimizers()
 
+        # Data augmentation with gaussian noise
+        whisp_aug = whisp_feat + torch.randn_like(whisp_feat) * self.config.train.whisper_aug_scale
+        spec_aug = spec + torch.randn_like(spec) * self.config.train.spec_aug_scale
+
         y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q), x = (
             self.net_g(
-                whisp_feat, lens, 
+                whisp_aug, lens, 
                 pitch, pitch_fine,
-                rearrange(spec, 'b t d -> b d t'), lens,
+                rearrange(spec_aug, 'b t d -> b d t'), lens,
                 sids
             )
         )
@@ -180,8 +184,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/titan_spk_v3.yaml')
-    parser.add_argument('--gen_ckpt', type=str, default='tests/f0G48k.pth') # RVC G_ checkpoint
-    parser.add_argument('--disc_ckpt', type=str, default='tests/f0D48k.pth') # RVC D_ checkpoint
+    parser.add_argument('--gen_ckpt', type=str, default=None) # RVC G_ checkpoint
+    parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None) # transfer learning
     parser.add_argument('--version', type=int, default=None, help='tensorboard log version')
@@ -205,11 +209,13 @@ if __name__ == '__main__':
         disc_state = torch.load(args.disc_ckpt, map_location='cpu')
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
         net_d.load_state_dict(disc_state['model'])
+        training_module = RVCTrainingModule(net_g, net_d, config)
 
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
         net_g = AltSynthesizer(**config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+        training_module = RVCTrainingModule(net_g, net_d, config)
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
         net_g = AltSynthesizer(**config.model, is_half=True)
@@ -230,10 +236,19 @@ if __name__ == '__main__':
             if k.startswith(submodule_prefix)
         }
         net_d.load_state_dict(state_dict, strict=False)
+        training_module = RVCTrainingModule(net_g, net_d, config)
+        submodule_prefix = 'spk_clf.'
+        state_dict = {
+            k[len(submodule_prefix):]: v 
+            for k, v in state.items() 
+            if k.startswith(submodule_prefix)
+        }
+        training_module.spk_clf.load_state_dict(state_dict, strict=False)
     else:
         print('!!! Warning: No checkpoint provided. Training from scratch. !!!')
         net_g = AltSynthesizer(**config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+        training_module = RVCTrainingModule(net_g, net_d, config)
 
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name+'_stage2',
@@ -259,14 +274,12 @@ if __name__ == '__main__':
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='val_loss',
-        dirpath=f'checkpoints/{config.exp_name}_stage2',
+        dirpath=f'checkpoints/{config.exp_name}',
         filename='best-checkpoint',
         save_top_k=2,
         mode='min',
         save_last=True
     )
-
-    training_module = RVCTrainingModule(net_g, net_d, config)
 
     trainer = pl.Trainer(
         max_epochs=config.train.epochs,
