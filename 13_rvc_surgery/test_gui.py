@@ -3,7 +3,7 @@ from PyQt5.QtCore import pyqtRemoveInputHook
 from PyQt5.QtWidgets import QApplication, QMainWindow
 import librosa
 import numpy as np
-from modeling.my_rvc import VevoSynthesizer
+from modeling.my_rvc import AltSynthesizer
 from logging import getLogger
 from svc_helper.gui import *
 from omegaconf import OmegaConf
@@ -12,7 +12,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/titan_spk_vevo_stage2'
+CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
@@ -25,6 +25,7 @@ class MainWindow(QMainWindow):
             get_checkpoints=self.getCheckpoints, load_checkpoint=self.loadCheckpoint))
         gui.addFileInput(AudioFileInput())
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
+        gui.addParam(IntParam(label="Coarse Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=110, default=0))
         # TODO - pitch smooth
         gui.addInference(Inference(
@@ -52,7 +53,7 @@ class MainWindow(QMainWindow):
         logger.info(f'Loading checkpoint {checkpoint_name}')
         checkpoint_path = os.path.join(CHECKPOINTS_ROOT, checkpoint_name)
         # Points to a lightning checkpoint
-        self.net_g = VevoSynthesizer(**self.config.model, is_half=True)
+        self.net_g = AltSynthesizer(**self.config.model, is_half=True)
 
         state = torch.load(checkpoint_path, map_location='cpu')['state_dict']
         submodule_prefix = 'net_g.'
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
 
     def inferAction(self, data: dict):
         transpose = data['transpose']
+        coarse = data['coarse']
         files = data['audio_files']['files']
 
         if not hasattr(self, 'net_g'):
@@ -90,7 +92,9 @@ class MainWindow(QMainWindow):
             
             # Tranpsose
             feats['pitch_fine'] = feats['pitch_fine'] * (2 ** (transpose / 12))
-            feats['pitch'] = self.my_feats.f0_to_coarse(feats['pitch_fine'].squeeze(0))
+            # Experiment with different coarse transpose relative to fine
+            feats['pitch'] = self.my_feats.f0_to_coarse(
+                (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
 
             # Truncate
             feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['vevo_quantized'].shape[1]]
