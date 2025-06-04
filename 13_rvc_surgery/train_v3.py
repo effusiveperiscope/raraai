@@ -254,9 +254,9 @@ class RVCTrainingModule(pl.LightningModule):
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def configure_optimizers(self):
-        disc_optim = torch.optim.AdamW(self.net_d.parameters(), lr=self.config.train.lr, betas=(0.5, 0.999))
+        disc_optim = torch.optim.AdamW(self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
         gen_optim = torch.optim.AdamW(
-            chain(self.net_g.parameters(), self.spk_clf.parameters()), lr=self.config.train.lr, betas=(0.5, 0.999))
+            chain(self.net_g.parameters(), self.spk_clf.parameters()), lr=self.config.train.lr, betas=(0.9, 0.999))
         return [disc_optim, gen_optim], []
 
 if __name__ == '__main__':
