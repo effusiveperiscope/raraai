@@ -31,6 +31,23 @@ class RVCTrainingModule(pl.LightningModule):
         self.automatic_optimization = False
 
     def on_train_start(self):
+        if self.config.train.get('finetune', False):
+            print('=== Finetune mode ===')
+            # Finetune freezes prior before speaker conditioning 
+            for param in self.net_g.parameters():
+                param.requires_grad = True
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+            for param in self.spk_clf.parameters():
+                param.requires_grad = True
+
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = False
+            for param in self.net_g.enc_p.cond_g.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_p.proj.parameters():
+                param.requires_grad = True
+
         if self.config.train.get('freeze_prior', False):
             print('=== Freezing prior encoder ===')
             for param in self.net_g.enc_p.parameters():
@@ -38,31 +55,35 @@ class RVCTrainingModule(pl.LightningModule):
         return super().on_train_start()
 
     def on_train_epoch_start(self):
-        if self.current_epoch < self.config.train.stage1_train:
-            # Retrain prior encoder for speaker invariance
-            # + train speaker classifier
-            # Also need to train posterior to match new speaker targets
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-            for param in self.net_d.parameters():
-                param.requires_grad = False
+        # - this was only for retraining titan base model for whisper -
 
-            for param in self.net_g.enc_p.parameters():
-                param.requires_grad = True
-            for param in self.net_g.enc_q.parameters():
-                param.requires_grad = True
-            for param in self.net_g.emb_g.parameters():
-                param.requires_grad = True
-            for param in self.spk_clf.parameters():
-                param.requires_grad = True
-        else:
-            # Enable all
-            for param in self.net_g.parameters():
-                param.requires_grad = True
-            for param in self.net_d.parameters():
-                param.requires_grad = True
-            for param in self.spk_clf.parameters():
-                param.requires_grad = True
+        # if self.current_epoch < self.config.train.stage1_train:
+        #     # Retrain prior encoder for speaker invariance
+        #     # + train speaker classifier
+        #     # Also need to train posterior to match new speaker targets
+        #     for param in self.net_g.parameters():
+        #         param.requires_grad = False
+        #     for param in self.net_d.parameters():
+        #         param.requires_grad = False
+
+        #     for param in self.net_g.enc_p.parameters():
+        #         param.requires_grad = True
+        #     for param in self.net_g.enc_q.parameters():
+        #         param.requires_grad = True
+        #     for param in self.net_g.emb_g.parameters():
+        #         param.requires_grad = True
+        #     for param in self.spk_clf.parameters():
+        #         param.requires_grad = True
+        # else:
+        #     # Enable all
+        #     for param in self.net_g.parameters():
+        #         param.requires_grad = True
+        #     for param in self.net_d.parameters():
+        #         param.requires_grad = True
+        #     for param in self.spk_clf.parameters():
+        #         param.requires_grad = True
+
+        pass
 
     def step(self, batch, batch_idx, is_train=True):
         x = batch
@@ -73,6 +94,7 @@ class RVCTrainingModule(pl.LightningModule):
         spec = x['spec']
         wave = x['wave']
         sids = x['sids']
+        lengths = x['lengths']
 
         assert spec is not None and wave is not None and len(spec) > 0
 
@@ -139,7 +161,7 @@ class RVCTrainingModule(pl.LightningModule):
         loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
             self.config.train.label_alpha)
 
-        if is_train and self.current_epoch >= self.config.train.stage1_train:
+        if is_train and self.current_epoch >= self.config.train.get('stage1_train', 0):
             # Stage 1 will have no grad for the discriminator
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
@@ -168,13 +190,38 @@ class RVCTrainingModule(pl.LightningModule):
         else:
             g_norm = 0
 
-        return (
-            loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk, 
-            d_norm, g_norm)
+        ret = {
+            'loss_gen_all': loss_gen_all,
+            'loss_mel': loss_mel,
+            'loss_kl': loss_kl,
+            'loss_disc': loss_disc,
+            'loss_fm': loss_fm, 
+            'loss_spk': loss_spk,
+            'd_norm': d_norm,
+            'g_norm': g_norm
+        }
+
+        if not is_train and batch_idx == 0:
+            audio = y_hat[0].cpu()
+            self.logger.experiment.add_audio(
+                tag='gen_audio',
+                snd_tensor=audio,
+                global_step=self.global_step,
+                sample_rate=self.config.data.sampling_rate
+            )
+
+        return ret
 
     def training_step(self, batch, batch_idx):
-        (loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk,
-            d_norm, g_norm) = self.step(batch, batch_idx)
+        out = self.step(batch, batch_idx)
+        loss_gen_all = out['loss_gen_all']
+        loss_mel = out['loss_mel']
+        loss_kl = out['loss_kl']
+        loss_disc = out['loss_disc']
+        loss_fm = out['loss_fm']
+        loss_spk = out['loss_spk']
+        d_norm = out['d_norm']
+        g_norm = out['g_norm']
 
         self.log('gen_loss', loss_gen_all, prog_bar=True, logger=True)
         self.log('mel_loss', loss_mel, logger=True)
@@ -186,9 +233,16 @@ class RVCTrainingModule(pl.LightningModule):
         self.log('g_norm', g_norm, logger=True)
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
-    def validation_step(self, *args, **kwargs):
-        (loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk,
-            d_norm, g_norm) = self.step(*args, **kwargs, is_train=False)
+    def validation_step(self, batch, batch_idx):
+        out = self.step(batch, batch_idx, is_train=False)
+        loss_gen_all = out['loss_gen_all']
+        loss_mel = out['loss_mel']
+        loss_kl = out['loss_kl']
+        loss_disc = out['loss_disc']
+        loss_fm = out['loss_fm']
+        loss_spk = out['loss_spk']
+        d_norm = out['d_norm']
+        g_norm = out['g_norm']
 
         self.log('val_gen_loss', loss_gen_all, on_epoch=True, prog_bar=True, logger=True)
         self.log('val_mel_loss', loss_mel, on_epoch=True, logger=True)
@@ -312,5 +366,6 @@ if __name__ == '__main__':
         logger=logger,
         precision='16-mixed',
         callbacks=[checkpoint_callback],
+        # detect_anomaly=True
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
