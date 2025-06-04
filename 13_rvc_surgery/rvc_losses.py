@@ -12,14 +12,14 @@ def feature_loss(fmap_r, fmap_g):
     return loss * 2
 
 
-def discriminator_loss(disc_real_outputs, disc_generated_outputs):
+def discriminator_loss(disc_real_outputs, disc_generated_outputs, label_alpha):
     loss = 0
     r_losses = []
     g_losses = []
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
         dr = dr.float()
         dg = dg.float()
-        r_loss = torch.mean((1 - dr) ** 2)
+        r_loss = torch.mean(((1 - label_alpha) - dr) ** 2)
         g_loss = torch.mean(dg**2)
         loss += r_loss + g_loss
         r_losses.append(r_loss.item())

@@ -34,7 +34,7 @@ if __name__ == '__main__':
     # my_feats = MyFeatures(
         # extract_hubert=True, extract_whisper=True, extract_vevo=False)
     my_feats = MyFeatures(
-        extract_hubert=False, extract_whisper=False, extract_vevo=False)
+        extract_hubert=False, extract_whisper=True, extract_vevo=False)
 
     is_multispk = False
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
@@ -60,9 +60,10 @@ if __name__ == '__main__':
         features = my_feats.get_features(data, data_48k)
 
         if not os.path.exists(os.path.join(args.output_dir, basename+'.whisp_feat')):
-            torch.save(
-                features['rvc_feat'],
-                os.path.join(args.output_dir, basename+'.rvc_feat'))
+            if 'rvc_feat' in features:
+                torch.save(
+                    features['rvc_feat'],
+                    os.path.join(args.output_dir, basename+'.rvc_feat'))
             torch.save(
                 features['whisp_feat'],
                 os.path.join(args.output_dir, basename+'.whisp_feat'))

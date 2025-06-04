@@ -1,4 +1,4 @@
-exp_name: titan_spk_v3_aug
+exp_name: titan_spk_v3_aug2
 train:
   lr: 1e-5
   batch_size: 10

@@ -12,7 +12,8 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
+CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_aug2'
+#CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):

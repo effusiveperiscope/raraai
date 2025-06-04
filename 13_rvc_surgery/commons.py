@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 def slice_segments_general(x, ids_str, segment_size=4, pad_value=0.0):
     """
@@ -59,3 +60,33 @@ def load_state_dict_mismatch(model, state_dict):
             print(f"{key}: checkpoint shape = {shape_ckpt}, model shape = {shape_model}")
 
     model.load_state_dict(filtered_state_dict, strict=False)
+
+def smooth_random_amplitude_modulation(spectrogram: torch.Tensor, 
+                                       min_gain: float = 0.7, 
+                                       max_gain: float = 1.3, 
+                                       points: int = 64) -> torch.Tensor:
+    """
+    Apply smooth, random amplitude modulation over time to a spectrogram.
+    
+    Args:
+        spectrogram (torch.Tensor): Tensor of shape [B, Time, Channels].
+        min_gain (float): Minimum multiplicative gain.
+        max_gain (float): Maximum multiplicative gain.
+        points (int): Number of points in the low-res gain curve.
+    
+    Returns:
+        torch.Tensor: Modulated spectrogram.
+    """
+    B, T, C = spectrogram.shape
+
+    # Create low-res gain curve and reshape to [B, 1, points]
+    low_res_gains = torch.rand(B, 1, points, device=spectrogram.device) * (max_gain - min_gain) + min_gain
+
+    # Interpolate to [B, 1, T] (Time dimension)
+    gain_curve = F.interpolate(low_res_gains, size=T, mode='linear', align_corners=True)
+
+    # Reshape to [B, T, 1] for broadcasting over channels
+    gain_curve = gain_curve.permute(0, 2, 1)
+
+    # Apply gain
+    return spectrogram * gain_curve

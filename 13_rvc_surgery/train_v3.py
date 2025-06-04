@@ -7,7 +7,7 @@ from dataset import FeatureCollator, FeatureDataset
 from rvc_losses import feature_loss, discriminator_loss, generator_loss, kl_loss
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 import torch.nn.functional as F
-from commons import slice_segments_general, load_state_dict_mismatch
+from commons import slice_segments_general, load_state_dict_mismatch, smooth_random_amplitude_modulation
 from omegaconf import OmegaConf
 import pytorch_lightning as pl
 import torch
@@ -78,9 +78,17 @@ class RVCTrainingModule(pl.LightningModule):
 
         disc_optim, gen_optim = self.optimizers()
 
-        # Data augmentation with gaussian noise
+        # --- Data augmentation ---
+        # Speech feature noise
         whisp_aug = whisp_feat + torch.randn_like(whisp_feat) * self.config.train.whisper_aug_scale
-        spec_aug = spec + torch.randn_like(spec) * self.config.train.spec_aug_scale
+        # Spec power modulation
+        spec_aug = smooth_random_amplitude_modulation(spec, 
+            min_gain=self.config.train.spec_am_min,
+            max_gain=self.config.train.spec_am_max,
+            points=self.config.train.spec_am_points
+        )
+        # Spec noise
+        spec_aug = spec_aug + torch.randn_like(spec_aug) * self.config.train.spec_aug_scale
 
         y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q), x = (
             self.net_g(
@@ -124,13 +132,17 @@ class RVCTrainingModule(pl.LightningModule):
 
         # Discriminator
         y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave.unsqueeze(1), y_hat.detach())
-        loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+        loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
+            self.config.train.label_alpha)
 
         if is_train and self.current_epoch > self.config.train.stage1_train:
             # Stage 1 will have no grad for the discriminator
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
+            d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 10_000.)
             disc_optim.step()
+        else:
+            d_norm = 0
 
         # Generator
         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave.unsqueeze(1), y_hat)
@@ -147,12 +159,18 @@ class RVCTrainingModule(pl.LightningModule):
         if is_train:
             gen_optim.zero_grad()
             self.manual_backward(loss_gen_all)
+            g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 10_000.)
             gen_optim.step()
+        else:
+            g_norm = 0
 
-        return loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk
+        return (
+            loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk, 
+            d_norm, g_norm)
 
     def training_step(self, batch, batch_idx):
-        loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk = self.step(batch, batch_idx)
+        (loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk,
+            d_norm, g_norm) = self.step(batch, batch_idx)
 
         self.log('gen_loss', loss_gen_all, prog_bar=True, logger=True)
         self.log('mel_loss', loss_mel, logger=True)
@@ -160,10 +178,13 @@ class RVCTrainingModule(pl.LightningModule):
         self.log('disc_loss', loss_disc, prog_bar=True, logger=True)
         self.log('fm_loss', loss_fm, logger=True)
         self.log('spk_loss', loss_spk, logger=True)
+        self.log('d_norm', d_norm, logger=True)
+        self.log('g_norm', g_norm, logger=True)
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def validation_step(self, *args, **kwargs):
-        loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk = self.step(*args, **kwargs, is_train=False)
+        (loss_gen_all, loss_mel, loss_kl, loss_disc, loss_fm, loss_spk,
+            d_norm, g_norm) = self.step(*args, **kwargs, is_train=False)
 
         self.log('val_gen_loss', loss_gen_all, on_epoch=True, prog_bar=True, logger=True)
         self.log('val_mel_loss', loss_mel, on_epoch=True, logger=True)
@@ -175,9 +196,9 @@ class RVCTrainingModule(pl.LightningModule):
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def configure_optimizers(self):
-        disc_optim = torch.optim.AdamW(self.net_d.parameters(), lr=self.config.train.lr)
+        disc_optim = torch.optim.AdamW(self.net_d.parameters(), lr=self.config.train.lr, betas=(0.5, 0.999))
         gen_optim = torch.optim.AdamW(
-            chain(self.net_g.parameters(), self.spk_clf.parameters()), lr=self.config.train.lr)
+            chain(self.net_g.parameters(), self.spk_clf.parameters()), lr=self.config.train.lr, betas=(0.5, 0.999))
         return [disc_optim, gen_optim], []
 
 if __name__ == '__main__':
