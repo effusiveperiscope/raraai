@@ -1,4 +1,4 @@
-exp_name: sing_base3
+exp_name: sing_base4
 train:
   lr: 5e-6
   batch_size: 10
