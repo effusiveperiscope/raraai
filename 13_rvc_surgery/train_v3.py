@@ -130,12 +130,16 @@ class RVCTrainingModule(pl.LightningModule):
         spk_logits = self.spk_clf(grad_reverse(x, self.config.train.lam_grl))
         loss_spk = F.cross_entropy(spk_logits, sids)
 
+        # Noise discriminator inputs
+        wave_noise = wave + torch.randn_like(wave) * self.config.train.disc_noise_scale
+        y_hat_noise = y_hat + torch.randn_like(y_hat) * self.config.train.disc_noise_scale
+
         # Discriminator
-        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave.unsqueeze(1), y_hat.detach())
+        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave_noise.unsqueeze(1), y_hat_noise.detach())
         loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
             self.config.train.label_alpha)
 
-        if is_train and self.current_epoch > self.config.train.stage1_train:
+        if is_train and self.current_epoch >= self.config.train.stage1_train:
             # Stage 1 will have no grad for the discriminator
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
@@ -145,7 +149,7 @@ class RVCTrainingModule(pl.LightningModule):
             d_norm = 0
 
         # Generator
-        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave.unsqueeze(1), y_hat)
+        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave_noise.unsqueeze(1), y_hat_noise)
         loss_mel = F.l1_loss(y_mel, y_hat_mel)
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) 
         loss_fm = feature_loss(fmap_r, fmap_g)
@@ -272,7 +276,7 @@ if __name__ == '__main__':
         training_module = RVCTrainingModule(net_g, net_d, config)
 
     logger = pl.loggers.TensorBoardLogger(
-        config.train.get('log_dir', 'logs'), name=config.exp_name+'_stage2',
+        config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=args.version
     )
 
