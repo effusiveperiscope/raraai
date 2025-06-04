@@ -13,7 +13,7 @@ if __name__ == '__main__':
     parser.add_argument('--val_fraction', type=float, default=0.05)
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--shuffle_seed', type=int, default=42)
-    parser.add_argument('--do_48k', action='store_true') # Needed for stage 2
+    parser.add_argument('--do_48k', action='store_true', default=True) 
     
     # 16k (default) is for stage 1 training - KL Div from teacher
     # 48k is for stage 2 training - E2E RVC training
@@ -59,20 +59,19 @@ if __name__ == '__main__':
         data_48k, _ = librosa.load(line, sr=48000)
         features = my_feats.get_features(data, data_48k)
 
-        if not os.path.exists(os.path.join(args.output_dir, basename+'.whisp_feat')):
-            if 'rvc_feat' in features:
-                torch.save(
-                    features['rvc_feat'],
-                    os.path.join(args.output_dir, basename+'.rvc_feat'))
+        if 'rvc_feat' in features:
             torch.save(
-                features['whisp_feat'],
-                os.path.join(args.output_dir, basename+'.whisp_feat'))
-            torch.save(
-                features['pitch'],
-                os.path.join(args.output_dir, basename+'.pitch'))
-            torch.save(
-                features['pitch_fine'],
-                os.path.join(args.output_dir, basename+'.pitch_fine'))
+                features['rvc_feat'],
+                os.path.join(args.output_dir, basename+'.rvc_feat'))
+        torch.save(
+            features['whisp_feat'],
+            os.path.join(args.output_dir, basename+'.whisp_feat'))
+        torch.save(
+            features['pitch'],
+            os.path.join(args.output_dir, basename+'.pitch'))
+        torch.save(
+            features['pitch_fine'],
+            os.path.join(args.output_dir, basename+'.pitch_fine'))
 
         if args.do_48k:
             torch.save(

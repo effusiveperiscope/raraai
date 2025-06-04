@@ -10,6 +10,7 @@ from mel_processing import spectrogram_torch
 from einops import rearrange
 import torch
 import torch.nn.functional as F
+import librosa
 
 from transformers import WhisperFeatureExtractor, WhisperModel
 import numpy
@@ -149,6 +150,9 @@ class MyFeatures:
         return quantized, codecs, codec_masks
 
     def get_features(self, data_16k : np.ndarray, data_48k : np.ndarray=None):
+        data_16k = librosa.util.normalize(data_16k)
+        data_48k = librosa.util.normalize(data_48k)
+
         # [1, T, D]
         if self.extract_hubert:
             rvc_feat = self.rvc_model.extract_features(torch.from_numpy(data_16k))
