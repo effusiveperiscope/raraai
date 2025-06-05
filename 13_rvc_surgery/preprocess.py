@@ -28,8 +28,12 @@ if __name__ == '__main__':
     random.seed(args.shuffle_seed)
     random.shuffle(lines)
 
-    val_lines = lines[-int(len(lines) * args.val_fraction):]
-    train_lines = lines[:-int(len(lines) * args.val_fraction)]
+    if args.val_fraction > 0:
+        val_lines = lines[-int(len(lines) * args.val_fraction):]
+        train_lines = lines[:-int(len(lines) * args.val_fraction)]
+    else:
+        val_lines = []
+        train_lines = lines
 
     # my_feats = MyFeatures(
         # extract_hubert=True, extract_whisper=True, extract_vevo=False)
