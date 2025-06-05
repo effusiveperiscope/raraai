@@ -110,24 +110,25 @@ class RVCTrainingModule(pl.LightningModule):
         for batch in self.test_dataloader:
             if self.config.train.get('octave_transpose_test', True):
                 batch['pitch_fine'] = batch['pitch_fine'] * 2 # Octave transpose
-                batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine'].squeeze(0)) # Recalculate coarse
+                batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine']).squeeze(0) # Recalculate coarse
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    batch['whisp_feat'], 
-                    batch['lengths'], 
-                    batch['pitch'], 
-                    batch['pitch_fine'],
-                    batch['sids'],
+                    batch['whisp_feat'].to(self.device), 
+                    batch['lengths'].to(self.device), 
+                    batch['pitch'].to(self.device), 
+                    batch['pitch_fine'].to(self.device),
+                    batch['sids'].to(self.device),
                     noise_scale=self.config.train.noise_scale_test
                 )
                 for i, audio in enumerate(o):
-                    audio = audio.cpu()
-                    self.logger_experiment.add_audio(
+                    audio = audio.cpu()[:, :batch['lengths'][i] * self.config.data.hop_length]
+                    self.logger.experiment.add_audio(
                         tag=f'test_{i}',
                         snd_tensor=audio,
                         global_step=self.global_step,
                         sample_rate=self.config.data.sampling_rate
                     )
+                self.logger.experiment.flush()
 
     def step(self, batch, batch_idx, is_train=True, is_val=False):
         x = batch
@@ -258,9 +259,9 @@ class RVCTrainingModule(pl.LightningModule):
 
         return ret
 
-    def on_validation_end(self):
+    def on_train_epoch_end(self):
         self.test()
-        return super().on_validation_end()
+        return super().on_train_epoch_end()
 
     def training_step(self, batch, batch_idx):
         out = self.step(batch, batch_idx)
