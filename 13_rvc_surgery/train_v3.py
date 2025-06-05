@@ -29,6 +29,7 @@ class RVCTrainingModule(pl.LightningModule):
             n_layers=config.model.spk_class_n_layers)
         self.config = config
         self.automatic_optimization = False
+        self.last_d_norm = 0
 
     def on_train_start(self):
         if self.config.train.get('finetune', False):
@@ -166,8 +167,9 @@ class RVCTrainingModule(pl.LightningModule):
             self.manual_backward(loss_disc)
             d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 10_000.)
             disc_optim.step()
+            self.last_d_norm = d_norm
         else:
-            d_norm = 0
+            d_norm = self.last_d_norm
 
         # Generator
         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave_noise.unsqueeze(1), y_hat_noise)
