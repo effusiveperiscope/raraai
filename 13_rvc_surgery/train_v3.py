@@ -161,8 +161,7 @@ class RVCTrainingModule(pl.LightningModule):
         loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
             self.config.train.label_alpha)
 
-        if is_train and self.current_epoch >= self.config.train.get('stage1_train', 0):
-            # Stage 1 will have no grad for the discriminator
+        if is_train and (self.global_step % self.config.train.disc_every == 0):
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
             d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 10_000.)
