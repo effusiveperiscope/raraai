@@ -6,13 +6,15 @@ from torch.utils.data import Dataset
 import torch.nn.functional as F
 
 class FeatureDataset(Dataset):
-    def __init__(self, config: OmegaConf, is_train=True):
-        self.feature_dir = os.path.dirname(config.train.filelist)
+    def __init__(self, config: OmegaConf, is_train=True, override_filelist=None):
+        filelist_to_use = config.train.filelist if is_train else config.train.val_filelist
+        filelist_to_use = override_filelist if override_filelist is not None else filelist_to_use
+        self.feature_dir = os.path.dirname(filelist_to_use)
         self.files = []
 
         log_ons = False
 
-        with open(config.train.filelist if is_train else config.train.val_filelist, 'r', encoding='utf-8') as f:
+        with open(filelist_to_use, 'r', encoding='utf-8') as f:
             for line in f.readlines():
                 if '|' in line:
 

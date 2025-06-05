@@ -97,7 +97,7 @@ class MyFeatures:
             hidden_states = hidden_states[:, :feature_len, :]
         return hidden_states
 
-    def f0_to_coarse(self, pitch: np.ndarray) -> torch.Tensor:
+    def f0_to_coarse(pitch: np.ndarray) -> torch.Tensor:
         """Converts f0 to coarse representation."""
         if type(pitch) is torch.Tensor:
             pitch = pitch.detach().cpu().numpy()
@@ -197,7 +197,7 @@ class MyFeatures:
 
         # coarse f0 for encoder input
         f0bak = pitch.copy()
-        f0_coarse = self.f0_to_coarse(pitch)
+        f0_coarse = MyFeatures.f0_to_coarse(pitch)
 
         # truncation
         p_len = data_16k.shape[0] // self.window

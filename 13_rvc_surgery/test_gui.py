@@ -40,11 +40,11 @@ class MainWindow(QMainWindow):
             extract_hubert=False, extract_whisper=True, extract_vevo=False)
         self.my_feats = my_feats
 
-        self.hubert_stats_path = config.data.get('hubert_stats_path', 
-            'hubert_large_stat.npz')
-        stat = np.load(self.hubert_stats_path)
-        self.hubert_feat_norm_mean = torch.tensor(stat["mean"])
-        self.hubert_feat_norm_std = torch.tensor(stat["std"])
+        # self.hubert_stats_path = config.data.get('hubert_stats_path', 
+        #     'hubert_large_stat.npz')
+        # stat = np.load(self.hubert_stats_path)
+        # self.hubert_feat_norm_mean = torch.tensor(stat["mean"])
+        # self.hubert_feat_norm_std = torch.tensor(stat["std"])
 
         self.config = config
 
@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         self.net_g.load_state_dict(state_dict)
         self.net_g.to('cuda')
         self.net_g.eval()
-        self.net_g.half()
+        #self.net_g.half()
         logger.info(f'Checkpoint {checkpoint_name} loaded')
 
     def inferAction(self, data: dict):
@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
             # Tranpsose
             feats['pitch_fine'] = feats['pitch_fine'] * (2 ** (transpose / 12))
             # Experiment with different coarse transpose relative to fine
-            feats['pitch'] = self.my_feats.f0_to_coarse(
+            feats['pitch'] = MyFeatures.f0_to_coarse(
                 (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
 
             # Truncate
@@ -99,7 +99,8 @@ class MainWindow(QMainWindow):
 
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    feats['whisp_feat'].half(), 
+                    #feats['whisp_feat'].half(), 
+                    feats['whisp_feat'].to('cuda'),
                     lens, 
                     feats['pitch'].to('cuda'), 
                     feats['pitch_fine'].to('cuda'),

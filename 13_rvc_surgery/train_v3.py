@@ -1,5 +1,6 @@
 # Stage 2. E2E training with RVC objectives
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from features import MyFeatures
 from modeling.my_rvc import AltSynthesizer
 from modeling.spk_classifier import SpeakerClassifier
 from modeling.grl import grad_reverse
@@ -39,8 +40,10 @@ class RVCTrainingModule(pl.LightningModule):
                 param.requires_grad = True
             for param in self.net_d.parameters():
                 param.requires_grad = True
+
+            # There is no reason to train speaker classifier if content prior is frozen
             for param in self.spk_clf.parameters():
-                param.requires_grad = True
+                param.requires_grad = False
 
             for param in self.net_g.enc_p.parameters():
                 param.requires_grad = False
@@ -53,6 +56,8 @@ class RVCTrainingModule(pl.LightningModule):
             print('=== Freezing prior encoder ===')
             for param in self.net_g.enc_p.parameters():
                 param.requires_grad = False
+
+        self.test()
         return super().on_train_start()
 
     def on_train_epoch_start(self):
@@ -85,7 +90,46 @@ class RVCTrainingModule(pl.LightningModule):
                 param.requires_grad = True
         pass
 
-    def step(self, batch, batch_idx, is_train=True):
+    def test(self):
+        print('=== Testing ===')
+        self.net_g.eval()
+        self.net_d.eval()
+        self.spk_clf.eval()
+
+        if not hasattr(self, 'test_dataset'):
+            self.test_dataset = FeatureDataset(self.config, is_train=False, 
+                override_filelist=self.config.train.test_filelist)
+            self.test_dataloader = torch.utils.data.DataLoader(
+                self.test_dataset,
+                batch_size=self.config.train.batch_size,
+                shuffle=False,
+                num_workers=0,
+                collate_fn=FeatureCollator(),
+            )
+        
+        for batch in self.test_dataloader:
+            if self.config.train.get('octave_transpose_test', True):
+                batch['pitch_fine'] = batch['pitch_fine'] * 2 # Octave transpose
+                batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine'].squeeze(0)) # Recalculate coarse
+            with torch.no_grad():
+                o, x_mask, z_stats = self.net_g.infer(
+                    batch['whisp_feat'], 
+                    batch['lengths'], 
+                    batch['pitch'], 
+                    batch['pitch_fine'],
+                    batch['sids'],
+                    noise_scale=self.config.train.noise_scale_test
+                )
+                for i, audio in enumerate(o):
+                    audio = audio.cpu()
+                    self.logger_experiment.add_audio(
+                        tag=f'test_{i}',
+                        snd_tensor=audio,
+                        global_step=self.global_step,
+                        sample_rate=self.config.data.sampling_rate
+                    )
+
+    def step(self, batch, batch_idx, is_train=True, is_val=False):
         x = batch
         whisp_feat = x['whisp_feat']
         pitch = x['pitch']
@@ -191,6 +235,7 @@ class RVCTrainingModule(pl.LightningModule):
             g_norm = 0
 
         ret = {
+            'y_hat': y_hat,
             'loss_gen_all': loss_gen_all,
             'loss_gen': loss_gen,
             'loss_mel': loss_mel,
@@ -202,7 +247,7 @@ class RVCTrainingModule(pl.LightningModule):
             'g_norm': g_norm
         }
 
-        if not is_train and batch_idx == 0:
+        if is_val and batch_idx == 0:
             audio = y_hat[0].cpu()
             self.logger.experiment.add_audio(
                 tag='gen_audio',
@@ -212,6 +257,10 @@ class RVCTrainingModule(pl.LightningModule):
             )
 
         return ret
+
+    def on_validation_end(self):
+        self.test()
+        return super().on_validation_end()
 
     def training_step(self, batch, batch_idx):
         out = self.step(batch, batch_idx)
@@ -237,7 +286,7 @@ class RVCTrainingModule(pl.LightningModule):
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def validation_step(self, batch, batch_idx):
-        out = self.step(batch, batch_idx, is_train=False)
+        out = self.step(batch, batch_idx, is_train=False, is_val=True)
         loss_gen_all = out['loss_gen_all']
         loss_gen = out['loss_gen']
         loss_mel = out['loss_mel']
@@ -371,6 +420,5 @@ if __name__ == '__main__':
         logger=logger,
         precision='bf16',
         callbacks=[checkpoint_callback],
-        detect_anomaly=True
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
