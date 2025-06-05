@@ -90,3 +90,17 @@ def smooth_random_amplitude_modulation(spectrogram: torch.Tensor,
 
     # Apply gain
     return spectrogram * gain_curve
+
+def tensor_check(tensor: torch.Tensor):
+    if tensor.abs().max() > 1e4:
+        print("Large value detected in tensor")
+        import pdb; pdb.set_trace()
+    if tensor.abs().max() < 1e-4:
+        print("Small value detected in tensor")
+        import pdb; pdb.set_trace()
+    if torch.isnan(tensor).any():
+        print("NaN detected in tensor")
+        import pdb; pdb.set_trace()
+    if torch.isinf(tensor).any():
+        print("Inf detected in tensor")
+        import pdb; pdb.set_trace()

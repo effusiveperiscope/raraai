@@ -57,33 +57,32 @@ class RVCTrainingModule(pl.LightningModule):
 
     def on_train_epoch_start(self):
         # - this was only for retraining titan base model for whisper -
+        # (doesn't conflict with finetuning by definition)
+        if self.current_epoch < self.config.train.stage1_train:
+            # Retrain prior encoder for speaker invariance
+            # + train speaker classifier
+            # Also need to train posterior to match new speaker targets
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.net_d.parameters():
+                param.requires_grad = False
 
-        # if self.current_epoch < self.config.train.stage1_train:
-        #     # Retrain prior encoder for speaker invariance
-        #     # + train speaker classifier
-        #     # Also need to train posterior to match new speaker targets
-        #     for param in self.net_g.parameters():
-        #         param.requires_grad = False
-        #     for param in self.net_d.parameters():
-        #         param.requires_grad = False
-
-        #     for param in self.net_g.enc_p.parameters():
-        #         param.requires_grad = True
-        #     for param in self.net_g.enc_q.parameters():
-        #         param.requires_grad = True
-        #     for param in self.net_g.emb_g.parameters():
-        #         param.requires_grad = True
-        #     for param in self.spk_clf.parameters():
-        #         param.requires_grad = True
-        # else:
-        #     # Enable all
-        #     for param in self.net_g.parameters():
-        #         param.requires_grad = True
-        #     for param in self.net_d.parameters():
-        #         param.requires_grad = True
-        #     for param in self.spk_clf.parameters():
-        #         param.requires_grad = True
-
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_q.parameters():
+                param.requires_grad = True
+            for param in self.net_g.emb_g.parameters():
+                param.requires_grad = True
+            for param in self.spk_clf.parameters():
+                param.requires_grad = True
+        else:
+            # Enable all
+            for param in self.net_g.parameters():
+                param.requires_grad = True
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+            for param in self.spk_clf.parameters():
+                param.requires_grad = True
         pass
 
     def step(self, batch, batch_idx, is_train=True):
@@ -162,7 +161,7 @@ class RVCTrainingModule(pl.LightningModule):
         loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
             self.config.train.label_alpha)
 
-        if is_train and (self.global_step % self.config.train.disc_every == 0):
+        if is_train and (self.global_step % self.config.train.disc_every == 0) and loss_disc.requires_grad:
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
             d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 10_000.)
@@ -183,7 +182,7 @@ class RVCTrainingModule(pl.LightningModule):
             loss_kl*self.config.train.lam_kl + 
             loss_spk*self.config.train.lam_spk)
 
-        if is_train:
+        if is_train and loss_gen_all.requires_grad:
             gen_optim.zero_grad()
             self.manual_backward(loss_gen_all)
             g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 10_000.)
@@ -193,6 +192,7 @@ class RVCTrainingModule(pl.LightningModule):
 
         ret = {
             'loss_gen_all': loss_gen_all,
+            'loss_gen': loss_gen,
             'loss_mel': loss_mel,
             'loss_kl': loss_kl,
             'loss_disc': loss_disc,
@@ -216,6 +216,7 @@ class RVCTrainingModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         out = self.step(batch, batch_idx)
         loss_gen_all = out['loss_gen_all']
+        loss_gen = out['loss_gen']
         loss_mel = out['loss_mel']
         loss_kl = out['loss_kl']
         loss_disc = out['loss_disc']
@@ -224,7 +225,8 @@ class RVCTrainingModule(pl.LightningModule):
         d_norm = out['d_norm']
         g_norm = out['g_norm']
 
-        self.log('gen_loss', loss_gen_all, prog_bar=True, logger=True)
+        self.log('gen_loss_all', loss_gen_all, prog_bar=True, logger=True)
+        self.log('gen_loss', loss_gen, prog_bar=True, logger=True)
         self.log('mel_loss', loss_mel, logger=True)
         self.log('kl_loss', loss_kl, logger=True)
         self.log('disc_loss', loss_disc, prog_bar=True, logger=True)
@@ -237,6 +239,7 @@ class RVCTrainingModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         out = self.step(batch, batch_idx, is_train=False)
         loss_gen_all = out['loss_gen_all']
+        loss_gen = out['loss_gen']
         loss_mel = out['loss_mel']
         loss_kl = out['loss_kl']
         loss_disc = out['loss_disc']
@@ -245,7 +248,8 @@ class RVCTrainingModule(pl.LightningModule):
         d_norm = out['d_norm']
         g_norm = out['g_norm']
 
-        self.log('val_gen_loss', loss_gen_all, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_gen_loss_all', loss_gen_all, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_gen_loss', loss_gen, on_epoch=True, prog_bar=True, logger=True)
         self.log('val_mel_loss', loss_mel, on_epoch=True, logger=True)
         self.log('val_kl_loss', loss_kl, on_epoch=True, logger=True)
         self.log('val_disc_loss', loss_disc, on_epoch=True, prog_bar=True, logger=True)
@@ -365,8 +369,8 @@ if __name__ == '__main__':
         max_epochs=config.train.epochs,
         accelerator='auto',
         logger=logger,
-        precision='16-mixed',
+        precision='bf16',
         callbacks=[checkpoint_callback],
-        # detect_anomaly=True
+        detect_anomaly=True
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

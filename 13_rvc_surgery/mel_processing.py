@@ -2,6 +2,7 @@ import torch
 import torch.utils.data
 from librosa.filters import mel as librosa_mel_fn
 import logging
+from commons import tensor_check
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,12 @@ def spec_to_mel_torch(spec, n_fft, num_mels, sampling_rate, fmin, fmax):
         )
 
     # Mel-frequency Log-amplitude spectrogram :: (B, Freq=num_mels, Frame)
+    
+    tensor_check(mel_basis[fmax_dtype_device])
+    tensor_check(spec)
+
     melspec = torch.matmul(mel_basis[fmax_dtype_device], spec)
+    tensor_check(melspec)
     melspec = spectral_normalize_torch(melspec)
     return melspec
 

@@ -18,6 +18,7 @@ train:
   label_alpha: 0.1 # GAN label smoothing
   disc_noise_scale: 0.003
   disc_every: 3 # steps
+  stage1_train: 0
 model:
   segment_size: 32
   vevo_dim: 1024
