@@ -151,7 +151,8 @@ class MyFeatures:
 
     def get_features(self, data_16k : np.ndarray, data_48k : np.ndarray=None):
         data_16k = librosa.util.normalize(data_16k)
-        data_48k = librosa.util.normalize(data_48k)
+        if data_48k is not None:
+            data_48k = librosa.util.normalize(data_48k)
 
         # [1, T, D]
         if self.extract_hubert:
