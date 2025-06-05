@@ -172,7 +172,7 @@ class RVCTrainingModule(pl.LightningModule):
             d_norm = self.last_d_norm
 
         # Generator
-        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave, y_hat)
+        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave.unsqueeze(1), y_hat)
         loss_mel = F.l1_loss(y_mel, y_hat_mel)
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) 
         loss_fm = feature_loss(fmap_r, fmap_g)
