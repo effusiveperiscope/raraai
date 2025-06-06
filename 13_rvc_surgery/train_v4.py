@@ -198,7 +198,7 @@ class RVCTrainingModule(pl.LightningModule):
 
         # GRL speaker classifier
         subsamp_x, subsamp_mask = random_subsample_segments(
-            x, x_mask=x_mask, min_segment_len=10, max_segment_len=20)
+            rearrange(x, 'b c t -> b t c'), x_mask=x_mask, min_segment_len=10, max_segment_len=20)
         spk_logits = self.spk_clf(
             grad_reverse(subsamp_x, self.config.train.lam_grl), subsamp_mask)
         loss_spk = F.cross_entropy(spk_logits, sids)
@@ -244,7 +244,7 @@ class RVCTrainingModule(pl.LightningModule):
         # Just train classifier on random segments
         for i in self.config.train.get('extra_spk_steps', 4):
             subsamp_x, subsamp_mask = random_subsample_segments(
-                x, x_mask=x_mask, min_segment_len=10, max_segment_len=20)
+                rearrange(x, 'b c t -> b t c'), x_mask=x_mask, min_segment_len=10, max_segment_len=20)
             spk_logits = self.spk_clf(
                 subsamp_x.detach(), subsamp_mask)
 

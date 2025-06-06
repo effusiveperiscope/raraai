@@ -25,11 +25,11 @@ class SpeakerClassifier(nn.Module):
 
     def forward(self, x, x_mask):
         """
-        x: Tensor of shape [batch_size, inter_channels, seq_len]
+        x: Tensor of shape [batch_size, seq_len, inter_channels]
         """
 
         # Transformer expects [seq_len, batch_size, features]
-        x = rearrange(x, "b c t -> t b c")
+        x = rearrange(x, "b t c -> t b c")
         x = self.sipe(x)
 
         x = self.encoder(x, src_key_padding_mask=x_mask)  # [seq_len, batch_size, inter_channels]
