@@ -1,0 +1,61 @@
+exp_name: base10
+train:
+  lr: 1e-5
+  batch_size: 10
+  filelist: data/base10/train.txt
+  val_filelist: data/base10/val.txt
+  test_filelist: data/test/train.txt
+  octave_transpose_test: True
+  noise_scale_test: 0.5
+  epochs: 500
+  lam_mel: 45
+  lam_kl: 1.0
+  lam_grl: 0.5
+  lam_spk: 1.0
+  finetune: False
+  phone_aug_scale: 0.4
+  spec_aug_scale: 0.2
+  spec_am_min: 0.7
+  spec_am_max: 1.3
+  spec_am_points: 100
+  label_alpha: 0.05 # GAN label smoothing
+  disc_noise_scale: 0.0003
+  disc_every: 1 # steps
+  stage1_train: 0
+  extra_spk_steps: 4
+model:
+  segment_size: 32
+  vevo_dim: 1024
+  inter_channels: 192
+  content_size: 64
+  spec_channels: 1025
+  hidden_channels: 192
+  filter_channels: 768
+  n_heads: 2
+  n_layers: 6
+  kernel_size: 3
+  p_dropout: 0
+  resblock: '1'
+  resblock_kernel_sizes: [3, 7, 11]
+  resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
+  upsample_rates: [12, 10, 2, 2]
+  upsample_initial_channel: 512
+  upsample_kernel_sizes: [24, 20, 4, 4]
+  spk_embed_dim: 10 # Probably more than this cannot be represented
+  gin_channels: 256
+  sr: 48000
+  spk_class_n_layers: 6
+  content_n_layers: 10
+  coloring_n_layers: 12
+data:
+  hop_length: 480
+  segment_size: 17280
+  max_len: 480000
+  n_fft: 2048
+  num_mels: 128
+  sampling_rate: 48000
+  win_size: 2048
+  fmin: 0
+  fmax: null
+  num_workers: 0
+  hubert_stats_path: hubert_large_stat.npz

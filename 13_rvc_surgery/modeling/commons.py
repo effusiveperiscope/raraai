@@ -52,3 +52,17 @@ class SinusoidalPositionalEncoding(nn.Module):
         # self.pe[:, :x.size(1)] slices the PE to match input sequence length
         # Returns: [batch_size, seq_len, dim]
         return x + self.pe[:, :x.size(1)]
+
+class DepthwiseSeparableConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.depthwise = nn.Conv1d(in_channels, in_channels, kernel_size,
+            stride=stride, padding=padding, groups=in_channels, padding_mode='reflect')
+        self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
