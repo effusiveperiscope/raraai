@@ -52,7 +52,7 @@ class ColoringTower(nn.Module):
                 kernel_size=1, padding=0) for _ in range(config.model.coloring_n_layers)
         ])
         self.conditions = nn.ModuleList([
-            FiLMGenerator(config.model.inter_channels, config.model.inter_channels) for _ in self.convs
+            FiLMGenerator(config.model.gin_channels, config.model.inter_channels) for _ in self.convs
         ])
         self.out_proj = nn.Linear(config.model.inter_channels, config.model.inter_channels)
 
@@ -108,7 +108,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
             num_layers=4
         )
         self.conditions = nn.ModuleList([
-            FiLMGenerator(config.model.inter_channels, conv.in_channels) for conv in self.convs
+            FiLMGenerator(config.model.gin_channels, conv.in_channels) for conv in self.convs
         ])
         self.encoder_proj = nn.Linear(config.model.inter_channels, 1024)
         self.out_proj = nn.Linear(1024, 1)
@@ -241,7 +241,7 @@ if __name__ == "__main__":
     h_B = torch.randn((2, 100, 768))
     h_mask_A = torch.ones((2, 100), dtype=torch.bool)
     h_mask_B = torch.ones((2, 100), dtype=torch.bool)
-    spk_A = torch.randn((2, config.model.inter_channels))
-    spk_B = torch.randn((2, config.model.inter_channels))
+    spk_A = torch.randn((2, config.model.gin_channels))
+    spk_B = torch.randn((2, config.model.gin_channels))
 
     model.train_step(h_A, h_mask_A, h_B, h_mask_B, spk_A, spk_B, 0.1)

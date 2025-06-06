@@ -1,9 +1,9 @@
-exp_name: base10
+exp_name: v05
 train:
   lr: 1e-5
-  batch_size: 10
-  filelist: data/base10/train.txt
-  val_filelist: data/base10/val.txt
+  batch_size: 8
+  filelist: data/titan/train.txt
+  val_filelist: data/titan/val.txt
   test_filelist: data/test/train.txt
   octave_transpose_test: True
   noise_scale_test: 0.5

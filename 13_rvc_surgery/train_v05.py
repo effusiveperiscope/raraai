@@ -1,6 +1,6 @@
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from features import MyFeatures
-from modeling.v05 import SynthesizerV05
+from modeling.v05.rvc import SynthesizerV05
 from dataset_paired import FeatureDatasetPaired, paired_feature_collator
 from dataset import FeatureDataset, FeatureCollator
 from rvc_losses import feature_loss, discriminator_loss, generator_loss, kl_loss
@@ -90,6 +90,7 @@ class V05TrainingModule(pl.LightningModule):
         spks_A = batch['A']['sids']
         spks_B = batch['B']['sids']
         y_A = batch['A']['spec']
+        wave_A = batch['A']['wave']
 
         disc_optim, gen_optim = self.optimizers()
 
@@ -115,7 +116,7 @@ class V05TrainingModule(pl.LightningModule):
                 spks_A=spks_A, spks_B=spks_B,
                 y_A=y_A_aug, y_lengths_A=batch['A']['lengths'],
                 # 0 to maximum
-                lambda_grl = ((self.global_steps / \
+                lambda_grl = ((self.global_step / \
                      self.config.train.lam_grl_steps) * \
                          self.config.train.lam_grl_max),
                 label_alpha = self.config.train.label_alpha
@@ -140,11 +141,11 @@ class V05TrainingModule(pl.LightningModule):
             center=False
         )
         wave = slice_segments_general(
-            wave, ids_slice * self.config.data.hop_length, 
+            wave_A, ids_slice * self.config.data.hop_length, 
             self.config.data.segment_size
         )
         wave = wave[:, :y_hat.shape[2]] 
-        y_mel = y_mel[:, :, :y_hat_mel.shape[2]]
+        y_mel = y_A_mel[:, :, :y_hat_mel.shape[2]]
 
         if not self.stage1:
             # Train discriminator

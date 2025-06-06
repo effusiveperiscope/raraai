@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+from einops import rearrange
 from torch import nn
 from torch.nn import functional as F
 import torch
@@ -9,6 +10,28 @@ logger = logging.getLogger(__name__)
 from svc_helper.svc.rvc.lib.infer_pack.models import GeneratorNSF, PosteriorEncoder, ResidualCouplingBlock
 from svc_helper.svc.rvc.lib.infer_pack import commons
 from modeling.v05.encoder import V05Encoder
+
+import pdb
+import sys
+import traceback
+def custom_excepthook(exc_type, exc_value, exc_traceback):
+    """
+    Custom exception hook that prints the exception information
+    and then drops into a pdb debugger session.
+    """
+    # First, print the exception information as Python normally would.
+    # We use traceback.print_exception to ensure consistent formatting.
+    print("An unhandled exception occurred:")
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    print("\nDropping into debugger...")
+
+    # Then, drop into the pdb debugger.
+    # The post_mortem function starts the debugger at the point of the exception.
+    pdb.post_mortem(exc_traceback)
+
+# Set the custom exception hook
+sys.excepthook = custom_excepthook
+
 
 sr2sr = {
     "32k": 32000,
@@ -145,10 +168,14 @@ class SynthesizerV05(nn.Module):
             m_p_A, logs_p_A, m_p_B, logvar_p_B, z_A, z_B = self.enc_p.train_step(
                 h_A = phone_A, h_A_mask = commons.sequence_mask(phone_lengths_A, phone_A.size(1)),
                 h_B = phone_B, h_B_mask = commons.sequence_mask(phone_lengths_B, phone_B.size(1)),
-                spk_A = g_A, spk_B = g_B,
+                spk_A = g_A.squeeze(-1), 
+                spk_B = g_B.squeeze(-1),
                 lambda_grl=lambda_grl, label_alpha=label_alpha
             )
-        z, m_q_A, logs_q_A, z_mask = self.enc_q(y_A, y_lengths_A, g=g)
+        logs_p_A = rearrange(logs_p_A, 'b t c -> b c t')
+        m_p_A = rearrange(m_p_A, 'b t c -> b c t')
+
+        z, m_q_A, logs_q_A, z_mask = self.enc_q(rearrange(y_A, 'b t c -> b c t'), y_lengths_A, g=g_A)
         z_p = self.flow(z, z_mask, g=g_A)
         z_slice, ids_slice = commons.rand_slice_segments(
             z, y_lengths_A, self.segment_size
