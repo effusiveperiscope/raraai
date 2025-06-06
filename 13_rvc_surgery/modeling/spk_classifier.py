@@ -26,16 +26,19 @@ class SpeakerClassifier(nn.Module):
     def forward(self, x, x_mask):
         """
         x: Tensor of shape [batch_size, seq_len, inter_channels]
+        x_mask: Tensor of shape [batch_size, seq_len], True for valid positions
         """
 
         # Transformer expects [seq_len, batch_size, features]
         x = rearrange(x, "b t c -> t b c")
         x = self.sipe(x)
 
-        x = self.encoder(x, src_key_padding_mask=x_mask)  # [seq_len, batch_size, inter_channels]
+        x = self.encoder(x, src_key_padding_mask=~x_mask)  # [seq_len, batch_size, inter_channels]
 
         # Mean pooling across sequence dimension (temporal)
-        x = x.mean(dim=0)  # [batch_size, inter_channels]
+        x_mask = rearrange(x_mask, "b t -> t b")
+        x = ((x * x_mask.unsqueeze(-1)).sum(dim=0) /
+             x_mask.sum(dim=0).clamp(min=1.0).unsqueeze(-1)) # avoid zero division
 
         x = self.out_proj(x)  # [batch_size, spk_embed_dim]
         return x
