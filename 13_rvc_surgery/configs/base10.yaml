@@ -1,23 +1,28 @@
-exp_name: titan_spk_v3_aug
+exp_name: base10
 train:
   lr: 1e-5
   batch_size: 10
-  filelist: data/titan/train.txt
-  val_filelist: data/titan/val.txt
+  filelist: data/base10/train.txt
+  val_filelist: data/base10/val.txt
+  test_filelist: data/test/train.txt
+  octave_transpose_test: True
+  noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
-  lam_grl: 0.2
+  lam_grl: 0.5
   lam_spk: 1.0
-  # freeze_prior: False
-  # freeze_all_but_spk_for: 0 # epochs
-  # freeze_all_but_encs_for: 2
-  stage1_train: 0 # epochs
+  finetune: False
   whisper_aug_scale: 0.4
   spec_aug_scale: 0.2
   spec_am_min: 0.7
   spec_am_max: 1.3
-  spec_am_points: 32
+  spec_am_points: 100
+  label_alpha: 0.05 # GAN label smoothing
+  disc_noise_scale: 0.0003
+  disc_every: 1 # steps
+  stage1_train: 0
+  extra_spk_steps: 4
 model:
   segment_size: 32
   vevo_dim: 1024
