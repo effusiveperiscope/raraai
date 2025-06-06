@@ -44,6 +44,7 @@ if __name__ == '__main__':
             if not is_multispk:
                 print('=== Multispeaker filelist detected! ===')
             is_multispk = True
+            orig_line = line
             split = line.split('|')
             line = split[0]
             sid = split[1]
@@ -59,7 +60,7 @@ if __name__ == '__main__':
                 print(f'Skipping short file: {line}')
                 continue
             else:
-                new_lines.append(line)
+                new_lines.append(orig_line)
             continue
 
         data, _ = librosa.load(line, sr=16000)
@@ -89,7 +90,7 @@ if __name__ == '__main__':
                 features['wave'],
                 os.path.join(args.output_dir, basename+'.wave'))
 
-        new_lines.append(line)
+        new_lines.append(orig_line)
 
     if args.val_fraction > 0:
         val_lines = new_lines[-int(len(lines) * args.val_fraction):]
