@@ -28,19 +28,14 @@ if __name__ == '__main__':
     random.seed(args.shuffle_seed)
     random.shuffle(lines)
 
-    if args.val_fraction > 0:
-        val_lines = lines[-int(len(lines) * args.val_fraction):]
-        train_lines = lines[:-int(len(lines) * args.val_fraction)]
-    else:
-        val_lines = []
-        train_lines = lines
-
     # my_feats = MyFeatures(
         # extract_hubert=True, extract_whisper=True, extract_vevo=False)
     my_feats = MyFeatures(
         extract_hubert=True, extract_whisper=False, extract_vevo=False)
 
     is_multispk = False
+
+    new_lines = [] # May need to filter out too short lines
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
         if 'longform' in line:
             # These are for longform in Expresso - will cause OOM
@@ -58,6 +53,14 @@ if __name__ == '__main__':
 
         basename = os.path.basename(line)
 
+        if os.path.exists(os.path.join(args.output_dir, basename+'.pitch')):
+            a = torch.load(os.path.join(args.output_dir, basename+'.rvc_feat'))
+            if a.shape[1] < 32:
+                print(f'Skipping short file: {line}')
+                continue
+            else:
+                new_lines.append(line)
+            continue
 
         data, _ = librosa.load(line, sr=16000)
         data_48k, _ = librosa.load(line, sr=48000)
@@ -86,6 +89,14 @@ if __name__ == '__main__':
                 features['wave'],
                 os.path.join(args.output_dir, basename+'.wave'))
 
+        new_lines.append(line)
+
+    if args.val_fraction > 0:
+        val_lines = new_lines[-int(len(lines) * args.val_fraction):]
+        train_lines = new_lines[:-int(len(lines) * args.val_fraction)]
+    else:
+        val_lines = []
+        train_lines = new_lines
 
     with open(os.path.join(args.output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(train_lines))
