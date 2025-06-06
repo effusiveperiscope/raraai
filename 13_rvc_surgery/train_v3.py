@@ -8,7 +8,9 @@ from dataset import FeatureCollator, FeatureDataset
 from rvc_losses import feature_loss, discriminator_loss, generator_loss, kl_loss
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 import torch.nn.functional as F
-from commons import slice_segments_general, load_state_dict_mismatch, smooth_random_amplitude_modulation
+from commons import (
+    slice_segments_general, load_state_dict_mismatch,
+    smooth_random_amplitude_modulation, random_subsample_segments)
 from omegaconf import OmegaConf
 import pytorch_lightning as pl
 import torch
@@ -143,7 +145,7 @@ class RVCTrainingModule(pl.LightningModule):
 
         assert spec is not None and wave is not None and len(spec) > 0
 
-        disc_optim, gen_optim = self.optimizers()
+        disc_optim, gen_optim, clf_optim = self.optimizers()
 
         # --- Data augmentation ---
         # Speech feature noise
@@ -194,7 +196,11 @@ class RVCTrainingModule(pl.LightningModule):
         # incomplete length corresponding to mel specs
         # whereas the original wave gets the full subsegment length
 
-        spk_logits = self.spk_clf(grad_reverse(x, self.config.train.lam_grl))
+        # GRL speaker classifier
+        subsamp_x, subsamp_mask = random_subsample_segments(
+            x, x_mask=x_mask, min_segment_len=10, max_segment_len=20)
+        spk_logits = self.spk_clf(
+            grad_reverse(subsamp_x, self.config.train.lam_grl), subsamp_mask)
         loss_spk = F.cross_entropy(spk_logits, sids)
 
         # Noise discriminator inputs
@@ -234,6 +240,20 @@ class RVCTrainingModule(pl.LightningModule):
             gen_optim.step()
         else:
             g_norm = 0
+
+        # Just train classifier on random segments
+        for i in self.config.train.get('extra_spk_steps', 4):
+            subsamp_x, subsamp_mask = random_subsample_segments(
+                x, x_mask=x_mask, min_segment_len=10, max_segment_len=20)
+            spk_logits = self.spk_clf(
+                subsamp_x.detach(), subsamp_mask)
+
+            if is_train and spk_logits.requires_grad:
+                clf_optim.zero_grad()
+                loss_ce = F.cross_entropy(spk_logits, sids)
+                self.manual_backward(loss_ce)
+                torch.nn.utils.clip_grad_norm_(self.spk_clf.parameters(), 10_000.)
+                clf_optim.step()
 
         ret = {
             'y_hat': y_hat,
@@ -309,10 +329,13 @@ class RVCTrainingModule(pl.LightningModule):
         return loss_gen_all + loss_mel + loss_kl + loss_disc + loss_fm
 
     def configure_optimizers(self):
-        disc_optim = torch.optim.AdamW(self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
+        disc_optim = torch.optim.AdamW(
+            self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
         gen_optim = torch.optim.AdamW(
-            chain(self.net_g.parameters(), self.spk_clf.parameters()), lr=self.config.train.lr, betas=(0.9, 0.999))
-        return [disc_optim, gen_optim], []
+            self.net_g.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
+        clf_optim = torch.optim.AdamW(
+            self.spk_clf.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
+        return [disc_optim, gen_optim, clf_optim], []
 
 if __name__ == '__main__':
     import argparse

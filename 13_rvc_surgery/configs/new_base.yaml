@@ -22,6 +22,7 @@ train:
   disc_noise_scale: 0.0003
   disc_every: 1 # steps
   stage1_train: 0
+  extra_spk_steps: 4
 model:
   segment_size: 32
   vevo_dim: 1024

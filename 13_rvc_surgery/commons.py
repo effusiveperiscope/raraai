@@ -1,5 +1,94 @@
 import torch
 import torch.nn.functional as F
+import random
+
+def random_subsample_segments(x: torch.Tensor,
+                              x_mask: torch.Tensor,
+                              min_segment_len: int = 4,
+                              max_segment_len: int = 12) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Randomly subsamples a contiguous segment from m_p for each item in the batch,
+    respecting the x_mask for valid positions.
+
+    Args:
+        x (torch.Tensor): The input tensor, e.g., prior means.
+                            Shape: (batch_size, time_steps, feature_dim)
+        x_mask (torch.Tensor): Boolean mask indicating valid time steps.
+                               True for valid, False for invalid/padding.
+                               Shape: (batch_size, time_steps)
+        min_segment_len (int): Minimum length of the segment to sample.
+        max_segment_len (int): Maximum length of the segment to sample.
+                               The output tensors will be padded to this length.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]:
+            - subsampled_m_p (torch.Tensor): The subsampled segments, padded to max_segment_len.
+                                             Shape: (batch_size, max_segment_len, feature_dim)
+            - subsampled_mask (torch.Tensor): Boolean mask for the subsampled segments.
+                                              Shape: (batch_size, max_segment_len)
+    """
+    batch_size, _, feature_dim = x.shape
+    device = x.device
+
+    # Ensure max_segment_len is at least min_segment_len
+    # This also defines the output sequence length for the padded batch
+    output_seq_len = max(min_segment_len, max_segment_len)
+
+    # Initialize output tensors (will be padded)
+    batched_subsampled_m_p = torch.zeros(batch_size, output_seq_len, feature_dim,
+                                         device=device, dtype=x.dtype)
+    batched_subsampled_mask = torch.zeros(batch_size, output_seq_len,
+                                          device=device, dtype=torch.bool)
+
+    for i in range(batch_size):
+        # Get indices of valid (True) frames for the current batch item
+        # x_mask[i] is 1D, e.g., [True, True, True, False, False]
+        # valid_indices will be like tensor([0, 1, 2])
+        valid_indices = torch.where(x_mask[i])[0]
+        num_valid_frames = len(valid_indices)
+
+        if num_valid_frames == 0:
+            # No valid frames for this item, segment will be all padding (zeros)
+            # The initialized zeros in batched_subsampled_m_p and batched_subsampled_mask are correct
+            current_actual_segment_len = 0
+        else:
+            # Determine the length of the segment to sample for this item
+            if num_valid_frames < min_segment_len:
+                # If fewer valid frames than min_segment_len, take all of them
+                current_actual_segment_len = num_valid_frames
+            else:
+                # Sample a random length between min_segment_len and
+                # min(max_segment_len, num_valid_frames)
+                # The upper bound for randint must be >= lower bound.
+                upper_bound_for_len_choice = min(output_seq_len, num_valid_frames)
+                current_actual_segment_len = random.randint(min_segment_len, upper_bound_for_len_choice)
+
+            # Choose a random start index for the segment *within the list of valid_indices*
+            # The segment must fit within the available valid frames.
+            # Max start index in valid_indices list: num_valid_frames - current_actual_segment_len
+            if num_valid_frames - current_actual_segment_len < 0:
+                 # This should ideally not happen if logic for current_actual_segment_len is correct.
+                 # This case implies current_actual_segment_len > num_valid_frames,
+                 # which means num_valid_frames < min_segment_len was true, and
+                 # current_actual_segment_len was set to num_valid_frames.
+                 # So, num_valid_frames - current_actual_segment_len should be 0.
+                start_offset_in_valid_indices = 0
+            else:
+                start_offset_in_valid_indices = random.randint(0, num_valid_frames - current_actual_segment_len)
+
+            # Get the actual frame indices from m_p's time dimension
+            selected_original_indices = valid_indices[
+                start_offset_in_valid_indices : start_offset_in_valid_indices + current_actual_segment_len
+            ]
+
+            # Subsample m_p using these original indices
+            segment_data = x[i, selected_original_indices, :]
+
+            # Place into the batched output tensors (first part, rest is padding)
+            batched_subsampled_m_p[i, :current_actual_segment_len, :] = segment_data
+            batched_subsampled_mask[i, :current_actual_segment_len] = True
+
+    return batched_subsampled_m_p, batched_subsampled_mask
 
 def slice_segments_general(x, ids_str, segment_size=4, pad_value=0.0):
     """

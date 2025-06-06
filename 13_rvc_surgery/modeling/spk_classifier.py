@@ -23,7 +23,7 @@ class SpeakerClassifier(nn.Module):
         self.sipe = SinusoidalPositionalEncoding(inter_channels)
         self.n_layers = n_layers
 
-    def forward(self, x):
+    def forward(self, x, x_mask):
         """
         x: Tensor of shape [batch_size, inter_channels, seq_len]
         """
@@ -32,7 +32,7 @@ class SpeakerClassifier(nn.Module):
         x = rearrange(x, "b c t -> t b c")
         x = self.sipe(x)
 
-        x = self.encoder(x)  # [seq_len, batch_size, inter_channels]
+        x = self.encoder(x, src_key_padding_mask=x_mask)  # [seq_len, batch_size, inter_channels]
 
         # Mean pooling across sequence dimension (temporal)
         x = x.mean(dim=0)  # [batch_size, inter_channels]
