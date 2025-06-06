@@ -242,7 +242,7 @@ class RVCTrainingModule(pl.LightningModule):
             g_norm = 0
 
         # Just train classifier on random segments
-        for i in self.config.train.get('extra_spk_steps', 4):
+        for i in range(self.config.train.get('extra_spk_steps', 4)):
             subsamp_x, subsamp_mask = random_subsample_segments(
                 rearrange(x, 'b c t -> b t c'), x_mask=x_mask, min_segment_len=10, max_segment_len=20)
             spk_logits = self.spk_clf(
