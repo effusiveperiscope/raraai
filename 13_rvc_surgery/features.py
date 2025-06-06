@@ -150,9 +150,9 @@ class MyFeatures:
         return quantized, codecs, codec_masks
 
     def get_features(self, data_16k : np.ndarray, data_48k : np.ndarray=None):
-        data_16k = librosa.util.normalize(data_16k)
+        data_16k = librosa.util.normalize(data_16k) * 0.95
         if data_48k is not None:
-            data_48k = librosa.util.normalize(data_48k)
+            data_48k = librosa.util.normalize(data_48k) * 0.95
 
         # [1, T, D]
         if self.extract_hubert:
