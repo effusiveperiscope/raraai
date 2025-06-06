@@ -10,7 +10,10 @@ train:
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
-  lam_grl: 0.5
+  lam_grl_max: 0.5
+  lam_grl_steps: 20000
+  lam_content: 1.0
+  lam_align: 0.1
   lam_spk: 1.0
   finetune: False
   phone_aug_scale: 0.4
@@ -21,7 +24,7 @@ train:
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
   disc_every: 1 # steps
-  stage1_train: 0
+  stage1_train_step: 30000
   extra_spk_steps: 4
 model:
   segment_size: 32

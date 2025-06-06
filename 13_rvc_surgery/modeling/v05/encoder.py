@@ -207,14 +207,14 @@ class V05Encoder(nn.Module):
         col_B = self.coloring_tower(c_B, h_B_mask, spk_B)
         p_A = self.final_proj(col_A)
         p_B = self.final_proj(col_B)
-        m_p_A, logvar_p_A = p_A.chunk(2, dim=-1)
-        m_p_B, logvar_p_B = p_B.chunk(2, dim=-1)
+        m_p_A, logs_p_A = p_A.chunk(2, dim=-1)
+        m_p_B, logs_p_B = p_B.chunk(2, dim=-1)
 
-        z_A = m_p_A + torch.exp(logvar_p_A) * torch.randn_like(m_p_A)
-        z_B = m_p_B + torch.exp(logvar_p_B) * torch.randn_like(m_p_B)
+        z_A = m_p_A + torch.exp(logs_p_A) * torch.randn_like(m_p_A)
+        z_B = m_p_B + torch.exp(logs_p_B) * torch.randn_like(m_p_B)
 
         return c_loss, align_loss, fake_loss, real_loss, \
-            m_p_A, logvar_p_A, m_p_B, logvar_p_B, z_A, z_B
+            m_p_A, logs_p_A, m_p_B, logs_p_B, z_A, z_B
 
     def forward(self, h, h_mask, spk_emb, noise_scale=1.0):
         u = self.base_encoder(h, src_key_padding_mask=~h_mask)
@@ -224,10 +224,10 @@ class V05Encoder(nn.Module):
 
         p = self.final_proj(col)
 
-        m_p, logvar_p = p.chunk(2, dim=-1)
+        m_p, logs_p = p.chunk(2, dim=-1)
 
-        z = m_p + torch.exp(logvar_p) * torch.randn_like(m_p) * noise_scale
-        return z, m_p, logvar_p, u, c, col
+        z = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
+        return z, m_p, logs_p, u, c, col
 
 if __name__ == "__main__":
     from omegaconf import OmegaConf
