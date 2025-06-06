@@ -115,7 +115,7 @@ class RVCTrainingModule(pl.LightningModule):
                 batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine']).squeeze(0) # Recalculate coarse
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    batch['whisp_feat'].to(self.device), 
+                    batch['rvc_feat'].to(self.device), 
                     batch['lengths'].to(self.device), 
                     batch['pitch'].to(self.device), 
                     batch['pitch_fine'].to(self.device),
@@ -134,7 +134,7 @@ class RVCTrainingModule(pl.LightningModule):
 
     def step(self, batch, batch_idx, is_train=True, is_val=False):
         x = batch
-        whisp_feat = x['whisp_feat']
+        rvc_feat = x['rvc_feat']
         pitch = x['pitch']
         pitch_fine = x['pitch_fine']
         lens = x['lengths']
@@ -149,7 +149,7 @@ class RVCTrainingModule(pl.LightningModule):
 
         # --- Data augmentation ---
         # Speech feature noise
-        whisp_aug = whisp_feat + torch.randn_like(whisp_feat) * self.config.train.whisper_aug_scale
+        rvc_aug = rvc_feat + torch.randn_like(rvc_feat) * self.config.train.phone_aug_scale
         # Spec power modulation
         spec_aug = smooth_random_amplitude_modulation(spec, 
             min_gain=self.config.train.spec_am_min,
@@ -161,7 +161,7 @@ class RVCTrainingModule(pl.LightningModule):
 
         y_hat, ids_slice, x_mask, z_mask, (z, z_p, m_p, logs_p, m_q, logs_q), x = (
             self.net_g(
-                whisp_aug, lens, 
+                rvc_aug, lens, 
                 pitch, pitch_fine,
                 rearrange(spec_aug, 'b t d -> b d t'), lens,
                 sids
