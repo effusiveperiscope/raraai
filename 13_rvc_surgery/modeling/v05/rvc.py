@@ -195,19 +195,21 @@ class SynthesizerV05(nn.Module):
         pitch: torch.Tensor,
         nsff0: torch.Tensor,
         sid: torch.Tensor,
-        rate: Optional[torch.Tensor] = None,
         noise_scale: float = 0.66666,
     ):
         g = self.emb_g(sid).unsqueeze(-1)
-        z, m_p, logs_p, u, c, col = self.enc_p(
+        _, m_p, logs_p, u, c, col = self.enc_p(
             h=phone, 
             h_mask = commons.sequence_mask(phone_lengths, phone.size(1)),
-            spk_emb=g, noise_scale=noise_scale)
-        if rate is not None:
-            head = int(z_p.shape[2] * (1.0 - rate.item()))
-            z_p = z_p[:, :, head:]
-            x_mask = x_mask[:, :, head:]
-            nsff0 = nsff0[:, head:]
+            spk_emb=g.squeeze(-1), noise_scale=noise_scale)
+        logs_p = rearrange(logs_p, 'b t c -> b c t')
+        m_p = rearrange(m_p, 'b t c -> b c t')
+
+        z_p = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
+
+        x_mask = commons.sequence_mask(phone_lengths, phone.size(1)).unsqueeze(1)
+        z_p = z_p * x_mask
+
         z = self.flow(z_p, x_mask, g=g, reverse=True)
         o = self.dec(z * x_mask, nsff0, g=g)
         return o, x_mask, (z, z_p, m_p, logs_p)

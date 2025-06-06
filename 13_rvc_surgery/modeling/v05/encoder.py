@@ -217,6 +217,8 @@ class V05Encoder(nn.Module):
             m_p_A, logs_p_A, m_p_B, logs_p_B, z_A, z_B
 
     def forward(self, h, h_mask, spk_emb, noise_scale=1.0):
+        h = self.in_proj(h)
+        h = self.sipe(h)
         u = self.base_encoder(h, src_key_padding_mask=~h_mask)
 
         c = self.content_encoder(u, h_mask)

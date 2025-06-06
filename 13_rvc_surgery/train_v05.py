@@ -25,6 +25,9 @@ class V05TrainingModule(pl.LightningModule):
         self.automatic_optimization = False
         self.stage1 = False
 
+    def on_train_start(self):
+        self.test()
+
     def on_train_step_start(self):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
             # We are just training the prior encoder during this segment
