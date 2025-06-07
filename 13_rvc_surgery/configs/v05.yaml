@@ -5,7 +5,7 @@ train:
   filelist: data/base10/train.txt
   val_filelist: data/base10/val.txt
   test_filelist: data/test/train.txt
-  octave_transpose_test: False
+  octave_transpose_test: True
   noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
