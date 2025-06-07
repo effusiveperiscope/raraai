@@ -82,21 +82,21 @@ class SpeakerConditionalDiscriminator(nn.Module):
         super().__init__()
         self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.convs = nn.ModuleList([
-            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
+            DepthwiseSeparableConv1d(
                 in_channels=config.model.inter_channels, out_channels=64, 
-                kernel_size=5, padding=2)),
-            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
+                kernel_size=5, padding=2, spectral_norm=True),
+            DepthwiseSeparableConv1d(
                 in_channels=64, out_channels=128, 
-                kernel_size=3, padding=1)),
-            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
+                kernel_size=3, padding=1, spectral_norm=True),
+            DepthwiseSeparableConv1d(
                 in_channels=128, out_channels=256, 
-                kernel_size=1, padding=0)),
-            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
                 in_channels=256, out_channels=512, 
-                kernel_size=1, padding=0)),
-            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
                 in_channels=512, out_channels=1024, 
-                kernel_size=1, padding=0)),
+                kernel_size=1, padding=0, spectral_norm=True),
         ])
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
@@ -129,7 +129,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
             x = gamma * x + beta
             x = rearrange(x, "b t c -> b c t")
 
-            x = F.layer_norm(x, x.shape[1:])
+            x = F.layer_norm(x,)
 
             x = layer(x)
 
