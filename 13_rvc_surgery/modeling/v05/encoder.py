@@ -80,7 +80,7 @@ class ColoringTower(nn.Module):
 class SpeakerConditionalDiscriminator(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
-        self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
+        # self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
                 in_channels=config.model.inter_channels, out_channels=64, 
@@ -98,16 +98,16 @@ class SpeakerConditionalDiscriminator(nn.Module):
                 in_channels=512, out_channels=1024, 
                 kernel_size=1, padding=0, spectral_norm=True),
         ])
-        self.encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=config.model.inter_channels,
-                nhead=8,
-                dim_feedforward=768,
-                activation=F.silu,
-                batch_first=True
-            ),
-            num_layers=4
-        )
+        # self.encoder = nn.TransformerEncoder(
+        #     nn.TransformerEncoderLayer(
+        #         d_model=config.model.inter_channels,
+        #         nhead=8,
+        #         dim_feedforward=768,
+        #         activation=F.silu,
+        #         batch_first=True
+        #     ),
+        #     num_layers=4
+        # )
         self.conditions = nn.ModuleList([
             FiLMGenerator(config.model.gin_channels, conv.in_channels) for conv in self.convs
         ])
