@@ -1,21 +1,22 @@
-exp_name: v05_02
+exp_name: v05_base10_00
 train:
-  lr: 1e-4
+  lr: 5e-5
   batch_size: 8
-  filelist: data/titan/train.txt
-  val_filelist: data/titan/val.txt
+  filelist: data/base10/train.txt
+  val_filelist: data/base10/val.txt
   test_filelist: data/test/train.txt
-  octave_transpose_test: True
+  octave_transpose_test: False
   noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
   lam_grl_max: 0.0
   lam_grl_steps: 60000
-  lam_content: 0.1
+  lam_content: 0.01
+  content_every_step: 10
   lam_align: 0.0
   lam_spk: 10.0
-  finetune: False
+  # finetune: False
   phone_aug_scale: 0.4
   spec_aug_scale: 0.2
   spec_am_min: 0.7
@@ -42,7 +43,7 @@ model:
   upsample_rates: [12, 10, 2, 2]
   upsample_initial_channel: 512
   upsample_kernel_sizes: [24, 20, 4, 4]
-  spk_embed_dim: 10 # Probably more than this cannot be represented
+  spk_embed_dim: 10 # Probably more than this cannot be represented (??)
   gin_channels: 256
   sr: 48000
   spk_class_n_layers: 6

@@ -179,10 +179,13 @@ class V05TrainingModule(pl.LightningModule):
             loss_fm + 
             loss_mel*self.config.train.lam_mel + 
             loss_kl*self.config.train.lam_kl + 
-            c_loss*self.config.train.lam_content + 
+            #c_loss*self.config.train.lam_content + 
             align_loss*self.config.train.lam_align +
             (fake_loss + real_loss)*self.config.train.lam_spk # Speaker conditioned discriminator
         )
+
+        if self.global_step % self.config.train.content_every_step == 0:
+            loss_gen_all = loss_gen_all + c_loss*self.config.train.lam_content
 
         if loss_gen_all.requires_grad:
             gen_optim.zero_grad()
@@ -326,13 +329,6 @@ if __name__ == '__main__':
         }
         net_d.load_state_dict(state_dict, strict=False)
         training_module = V05TrainingModule(net_g, net_d, config)
-        submodule_prefix = 'spk_clf.'
-        state_dict = {
-            k[len(submodule_prefix):]: v 
-            for k, v in state.items() 
-            if k.startswith(submodule_prefix)
-        }
-        training_module.spk_clf.load_state_dict(state_dict, strict=False)
     else:
         print('!!! Warning: No checkpoint provided. Training from scratch. !!!')
         net_g = SynthesizerV05(config, **config.model, is_half=True)
