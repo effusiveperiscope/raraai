@@ -12,6 +12,7 @@ from svc_helper.svc.rvc.lib.infer_pack import commons
 from modeling.v05.encoder import V05Encoder
 
 import pdb
+from PyQt5.QtCore import pyqtRemoveInputHook
 import sys
 import traceback
 def custom_excepthook(exc_type, exc_value, exc_traceback):
@@ -19,6 +20,7 @@ def custom_excepthook(exc_type, exc_value, exc_traceback):
     Custom exception hook that prints the exception information
     and then drops into a pdb debugger session.
     """
+    pyqtRemoveInputHook()
     # First, print the exception information as Python normally would.
     # We use traceback.print_exception to ensure consistent formatting.
     print("An unhandled exception occurred:")
