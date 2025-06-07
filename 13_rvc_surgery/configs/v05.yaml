@@ -12,7 +12,7 @@ train:
   lam_kl: 1.0
   lam_grl_max: 0.3
   lam_grl_steps: 60000
-  lam_content: 0.01
+  lam_content: 0.1
   content_every_step: 2
   lam_align: 0.0
   lam_spk: 10.0
