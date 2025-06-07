@@ -129,7 +129,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
             x = gamma * x + beta
             x = rearrange(x, "b t c -> b c t")
 
-            x = F.layer_norm(x,)
+            x = F.layer_norm(x, x.shape[1:])
 
             x = layer(x)
 
