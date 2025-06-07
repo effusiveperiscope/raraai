@@ -230,7 +230,7 @@ class V05TrainingModule(pl.LightningModule):
         self.log('kl_loss', ret['loss_kl'], logger=True)
         self.log('fm_loss', ret['loss_fm'], logger=True)
         self.log('c_loss', ret['loss_c'], logger=True)
-        self.log('align_loss', ret['loss_align'], logger=True)
+        #self.log('align_loss', ret['loss_align'], logger=True)
         self.log('spk_fake_loss', ret['loss_fake'], logger=True)
         self.log('spk_real_loss', ret['loss_real'], logger=True)
         if ret['loss_disc'] is not None:
@@ -250,7 +250,7 @@ class V05TrainingModule(pl.LightningModule):
         self.log('val_kl_loss', ret['loss_kl'], on_epoch=True, logger=True)
         self.log('val_fm_loss', ret['loss_fm'], on_epoch=True, logger=True)
         self.log('val_c_loss', ret['loss_c'], on_epoch=True, logger=True)
-        self.log('val_align_loss', ret['loss_align'], on_epoch=True, logger=True)
+        #self.log('val_align_loss', ret['loss_align'], on_epoch=True, logger=True)
         self.log('val_spk_fake_loss', ret['loss_fake'], on_epoch=True, logger=True)
         self.log('val_spk_real_loss', ret['loss_real'], on_epoch=True, logger=True)
         
