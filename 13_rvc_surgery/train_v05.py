@@ -250,8 +250,12 @@ class V05TrainingModule(pl.LightningModule):
         self.log('val_align_loss', ret['loss_align'], on_epoch=True, logger=True)
         self.log('val_spk_fake_loss', ret['loss_fake'], on_epoch=True, logger=True)
         self.log('val_spk_real_loss', ret['loss_real'], on_epoch=True, logger=True)
+        
+        val_loss = ret['loss_gen_all']
         if ret['loss_disc'] is not None:
+            val_loss += ret['loss_disc']
             self.log('val_disc_loss', ret['loss_disc'], on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_loss', val_loss, on_epoch=True, prog_bar=True, logger=True)
         return ret['loss_gen_all']
 
     def on_train_epoch_end(self):
@@ -347,13 +351,15 @@ if __name__ == '__main__':
         batch_size=config.train.batch_size,
         collate_fn=paired_feature_collator,
         shuffle=True,
-        num_workers=config.data.num_workers
+        num_workers=config.data.num_workers,
+        persistent_workers=True
     )
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=config.train.batch_size,
         collate_fn=paired_feature_collator,
-        num_workers=config.data.num_workers
+        num_workers=config.data.num_workers,
+        persistent_workers=True
     )
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(

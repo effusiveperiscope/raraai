@@ -1,20 +1,20 @@
-exp_name: v05_02
+exp_name: v05
 train:
-  lr: 1e-4
+  lr: 1e-5
   batch_size: 8
-  filelist: data/titan/train.txt
-  val_filelist: data/titan/val.txt
+  filelist: data/small_test/train.txt
+  val_filelist: data/small_test/val.txt
   test_filelist: data/test/train.txt
   octave_transpose_test: True
   noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
-  lam_grl_max: 0.0
-  lam_grl_steps: 60000
-  lam_content: 0.1
-  lam_align: 0.0
-  lam_spk: 10.0
+  lam_grl_max: 0.5
+  lam_grl_steps: 20000
+  lam_content: 0.3
+  lam_align: 0.1
+  lam_spk: 1.0
   finetune: False
   phone_aug_scale: 0.4
   spec_aug_scale: 0.2
@@ -23,7 +23,9 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 0
+  disc_every: 1 # steps
+  stage1_train_step: 30000
+  extra_spk_steps: 4
 model:
   segment_size: 32
   vevo_dim: 1024

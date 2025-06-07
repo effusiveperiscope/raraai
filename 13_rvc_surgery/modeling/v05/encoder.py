@@ -80,6 +80,7 @@ class ColoringTower(nn.Module):
 class SpeakerConditionalDiscriminator(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
+        self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
                 in_channels=config.model.inter_channels, out_channels=64, 
@@ -114,6 +115,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
         self.out_proj = nn.Linear(1024, 1)
 
     def forward(self, x, mask, spk):
+        x = self.sipe(x)
         x_enc = self.encoder(x, src_key_padding_mask=~mask)
 
         x = rearrange(x, "b t c -> b c t")
@@ -177,14 +179,15 @@ class V05Encoder(nn.Module):
         # c_A = cont(col(c_A|s_B))
         u_A = self.base_encoder(h_A, src_key_padding_mask=~h_A_mask)
         c_A = self.content_encoder(u_A, h_A_mask)
-        col_AB = self.coloring_tower(c_A, h_A_mask, spk_B)
+        col_AB = self.coloring_tower(c_A.detach(), h_A_mask, spk_B)
         c_AB = self.content_encoder(col_AB, h_A_mask)
 
         c_loss = F.l1_loss(c_A, c_AB)
 
         # Alignment of u_A space with color space.
         col_A = self.coloring_tower(c_A, h_A_mask, spk_A)
-        align_loss = F.l1_loss(u_A.detach(), col_A)
+        # align_loss = F.l1_loss(u_A.detach(), col_A)
+        align_loss = torch.Tensor([0.0]).to(h_A.device) # disabled, don't care right now
 
         # Coloring is speaker-correct.
         # Discriminator wants to classify BA as fake, A as real
