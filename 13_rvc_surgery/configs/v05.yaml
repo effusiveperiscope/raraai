@@ -1,4 +1,4 @@
-exp_name: v05_base10_01
+exp_name: v05_base10_02
 train:
   lr: 5e-5
   batch_size: 8
@@ -10,7 +10,7 @@ train:
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
-  lam_grl_max: 0.0
+  lam_grl_max: 0.3
   lam_grl_steps: 60000
   lam_content: 0.01
   content_every_step: 3
