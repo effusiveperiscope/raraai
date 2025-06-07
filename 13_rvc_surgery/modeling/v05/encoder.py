@@ -176,13 +176,14 @@ class V05Encoder(nn.Module):
         # RVC losses are downstream; not included in here.
 
         # Coloring is content preserving. 
+        # (And content encoder can extract from colored representations.)
         # c_A = cont(col(c_A|s_B))
         u_A = self.base_encoder(h_A, src_key_padding_mask=~h_A_mask)
         c_A = self.content_encoder(u_A, h_A_mask)
-        col_AB = self.coloring_tower(c_A.detach(), h_A_mask, spk_B)
+        col_AB = self.coloring_tower(c_A, h_A_mask, spk_B)
         c_AB = self.content_encoder(col_AB, h_A_mask)
 
-        c_loss = F.l1_loss(c_A, c_AB)
+        c_loss = F.l1_loss(c_A.detach(), c_AB)
 
         # Alignment of u_A space with color space.
         col_A = self.coloring_tower(c_A, h_A_mask, spk_A)
