@@ -82,21 +82,21 @@ class SpeakerConditionalDiscriminator(nn.Module):
         super().__init__()
         self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.convs = nn.ModuleList([
-            DepthwiseSeparableConv1d(
+            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
                 in_channels=config.model.inter_channels, out_channels=64, 
-                kernel_size=5, padding=2),
-            DepthwiseSeparableConv1d(
+                kernel_size=5, padding=2)),
+            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
                 in_channels=64, out_channels=128, 
-                kernel_size=3, padding=1),
-            DepthwiseSeparableConv1d(
+                kernel_size=3, padding=1)),
+            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
                 in_channels=128, out_channels=256, 
-                kernel_size=1, padding=0),
-            DepthwiseSeparableConv1d(
+                kernel_size=1, padding=0)),
+            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
                 in_channels=256, out_channels=512, 
-                kernel_size=1, padding=0),
-            DepthwiseSeparableConv1d(
+                kernel_size=1, padding=0)),
+            nn.utils.spectral_norm(DepthwiseSeparableConv1d(
                 in_channels=512, out_channels=1024, 
-                kernel_size=1, padding=0),
+                kernel_size=1, padding=0)),
         ])
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
@@ -115,8 +115,9 @@ class SpeakerConditionalDiscriminator(nn.Module):
         self.out_proj = nn.Linear(1024, 1)
 
     def forward(self, x, mask, spk):
-        x = self.sipe(x)
-        x_enc = self.encoder(x, src_key_padding_mask=~mask)
+        # Disable transformer encoder for now
+        # x = self.sipe(x)
+        # x_enc = self.encoder(x, src_key_padding_mask=~mask)
 
         x = rearrange(x, "b t c -> b c t")
 
@@ -128,12 +129,14 @@ class SpeakerConditionalDiscriminator(nn.Module):
             x = gamma * x + beta
             x = rearrange(x, "b t c -> b c t")
 
+            x = F.layer_norm(x, x.shape[1:])
+
             x = layer(x)
 
         x = rearrange(x, "b c t -> b t c")
         x = x * mask.unsqueeze(-1)
 
-        x = x + self.encoder_proj(x_enc)
+        # x = x + self.encoder_proj(x_enc)
         x = self.out_proj(x)
         return x
 
