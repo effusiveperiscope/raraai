@@ -183,6 +183,8 @@ class V05Encoder(nn.Module):
         col_AB = self.coloring_tower(c_A, h_A_mask, spk_B)
         c_AB = self.content_encoder(col_AB, h_A_mask)
 
+        # Middle ground - detach the target only, but allow for co-adaptation of content
+        # encoding with coloring
         c_loss = F.l1_loss(c_A.detach(), c_AB)
 
         # Alignment of u_A space with color space.
