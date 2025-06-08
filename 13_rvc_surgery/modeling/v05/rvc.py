@@ -179,12 +179,6 @@ class SynthesizerV05(nn.Module):
 
         z, m_q_A, logs_q_A, z_mask = self.enc_q(rearrange(y_A, 'b t c -> b c t'), y_lengths_A, g=g_A)
 
-        # For numerical stability - we apply tanh soft bound to both prior and posterior.
-        logs_p_A = self.config.model.p_max_std * torch.tanh(logs_p_A)
-        m_p_A = self.config.model.p_max_mean * torch.tanh(m_p_A)
-        logs_q_A = self.config.model.p_max_std * torch.tanh(logs_q_A)
-        m_q_A = self.config.model.p_max_mean * torch.tanh(m_q_A)
-
         z_p = self.flow(z, z_mask, g=g_A)
         z_slice, ids_slice = commons.rand_slice_segments(
             z, y_lengths_A, self.segment_size

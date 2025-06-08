@@ -1,6 +1,6 @@
-exp_name: v05_base10_05
+exp_name: v05_base10_06
 train:
-  lr: 1e-5
+  lr: 3e-5
   batch_size: 8
   filelist: data/base10/train.txt
   val_filelist: data/base10/val.txt
@@ -10,13 +10,14 @@ train:
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
-  lam_grl_max: 0.3
-  lam_grl_steps: 60000
-  lam_content: 0.3
-  content_every_step: 2
+  lam_kl_reg_logs: 1
+  lam_kl_reg_mus: 0.1
+  lam_grl_max: 0.5
+  lam_grl_steps: 40000
+  lam_content: 0.4
+  content_every_step: 1
   lam_align: 0.0
   lam_spk: 10.0
-  # finetune: False
   phone_aug_scale: 0.4
   spec_aug_scale: 0.2
   spec_am_min: 0.7
@@ -49,8 +50,6 @@ model:
   spk_class_n_layers: 6
   content_n_layers: 10
   coloring_n_layers: 12
-  p_max_std: 5.0
-  p_max_mean: 6.0
 data:
   hop_length: 480
   segment_size: 17280

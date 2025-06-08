@@ -30,13 +30,26 @@ class V05TrainingModule(pl.LightningModule):
 
     def on_train_step_start(self):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
-            # We are just training the prior encoder during this segment
             self.stage1 = True
+            # Only train prior
             for param in self.net_g.parameters():
                 param.requires_grad = False
             for param in self.net_d.parameters():
                 param.requires_grad = False
-            for param in self.net_g.enc_p.parameters():
+            # for param in self.net_g.enc_p.parameters():
+                # param.requires_grad = True
+
+            # Special - We are trying to fix the output magnitudes of prior and posterior
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+            for param in self.net_g.enc_p.final_proj.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_q.proj.parameters():
+                param.requires_grad = True
+            # We also allow the flow to adapt because it's immediately downstream of the posterior
+            for param in self.net_g.flow.parameters():
                 param.requires_grad = True
         else:
             self.stage1 = False
@@ -177,6 +190,17 @@ class V05TrainingModule(pl.LightningModule):
         # Train generator
         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave.unsqueeze(1), y_hat)
         loss_mel = F.l1_loss(y_mel, y_hat_mel)
+        # Regularization of prior to prevent numerical instability
+
+        active_elements = torch.sum(z_mask)
+
+        if active_elements == 0:
+            loss_kl_reg = torch.tensor(0.0, device=self.device)
+        else:
+            loss_kl_reg = torch.sum(logs_p_A ** 2 * z_mask) * \
+                self.config.train.lam_kl_reg_logs / active_elements \
+                + torch.sum(m_p_A ** 2 * z_mask) * \
+                self.config.train.lam_kl_reg_mus / active_elements
         loss_kl = kl_loss(z_p, logs_q_A, m_p_A, logs_p_A, z_mask) 
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, _ = generator_loss(y_d_hat_g)
@@ -187,6 +211,7 @@ class V05TrainingModule(pl.LightningModule):
             #c_loss*self.config.train.lam_content + 
             align_loss*self.config.train.lam_align +
             (fake_loss + real_loss)*self.config.train.lam_spk # Speaker conditioned discriminator
+            + loss_kl_reg
         )
 
         if self.global_step % self.config.train.content_every_step == 0:
@@ -195,7 +220,7 @@ class V05TrainingModule(pl.LightningModule):
         if loss_gen_all.isnan().any():
             loss_gen_all = torch.zeros_like(loss_gen_all)
             print("Warning - NaN detected in loss_gen_all")
-            import pdb; pdb.set_trace()
+            #import pdb; pdb.set_trace()
             return None
         
         if loss_gen_all.requires_grad:
@@ -212,6 +237,7 @@ class V05TrainingModule(pl.LightningModule):
             'loss_gen_all': loss_gen_all,
             'loss_mel': loss_mel,
             'loss_kl': loss_kl,
+            'loss_kl_reg': loss_kl_reg,
             'loss_fm': loss_fm,
             'loss_c': c_loss,
             'loss_align': align_loss,
@@ -241,6 +267,7 @@ class V05TrainingModule(pl.LightningModule):
         self.log('gen_loss_all', ret['loss_gen_all'], prog_bar=True, logger=True)
         self.log('mel_loss', ret['loss_mel'], logger=True)
         self.log('kl_loss', ret['loss_kl'], logger=True)
+        self.log('loss_kl_reg', ret['loss_kl_reg'], logger=True, on_step=True)
         self.log('fm_loss', ret['loss_fm'], logger=True)
         self.log('c_loss', ret['loss_c'], logger=True)
         #self.log('align_loss', ret['loss_align'], logger=True)

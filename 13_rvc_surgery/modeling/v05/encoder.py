@@ -219,6 +219,10 @@ class V05Encoder(nn.Module):
         m_p_A, logs_p_A = p_A.chunk(2, dim=-1)
         m_p_B, logs_p_B = p_B.chunk(2, dim=-1)
 
+        # Log clamping for KL stability
+        logs_p_A = torch.clamp(logs_p_A, min=-20.0, max=20.0)
+        logs_p_B = torch.clamp(logs_p_B, min=-20.0, max=20.0)
+
         z_A = m_p_A + torch.exp(logs_p_A) * torch.randn_like(m_p_A)
         z_B = m_p_B + torch.exp(logs_p_B) * torch.randn_like(m_p_B)
 
@@ -236,6 +240,7 @@ class V05Encoder(nn.Module):
         p = self.final_proj(col)
 
         m_p, logs_p = p.chunk(2, dim=-1)
+        logs_p = torch.clamp(logs_p, min=-20.0, max=20.0)
 
         z = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
         return z, m_p, logs_p, u, c, col
