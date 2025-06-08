@@ -13,8 +13,8 @@ train:
   lam_kl_reg_logs: 1
   lam_kl_reg_mus: 0.1
   lam_grl_max: 0.5
-  lam_grl_steps: 40000
-  lam_content: 0.4
+  lam_grl_steps: 20000
+  lam_content: 0.1
   content_every_step: 1
   lam_align: 0.0
   lam_spk: 10.0
