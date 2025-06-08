@@ -158,6 +158,11 @@ class V05TrainingModule(pl.LightningModule):
             loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
                 self.config.train.label_alpha)
 
+            if loss_disc.isnan().any():
+                loss_disc = torch.zeros_like(loss_disc)
+                print("Warning - NaN detected in loss_disc")
+                return None
+
             if loss_disc.requires_grad:
                 disc_optim.zero_grad()
                 self.manual_backward(loss_disc)
@@ -187,6 +192,12 @@ class V05TrainingModule(pl.LightningModule):
         if self.global_step % self.config.train.content_every_step == 0:
             loss_gen_all = loss_gen_all + c_loss*self.config.train.lam_content
 
+        if loss_gen_all.isnan().any():
+            loss_gen_all = torch.zeros_like(loss_gen_all)
+            print("Warning - NaN detected in loss_gen_all")
+            import pdb; pdb.set_trace()
+            return None
+        
         if loss_gen_all.requires_grad:
             gen_optim.zero_grad()
             self.manual_backward(loss_gen_all)
@@ -223,6 +234,8 @@ class V05TrainingModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True, is_val=False)
+        if ret is None:
+            return None
 
         self.log('gen_loss', ret['loss_gen'], prog_bar=True, logger=True)
         self.log('gen_loss_all', ret['loss_gen_all'], prog_bar=True, logger=True)
@@ -243,6 +256,8 @@ class V05TrainingModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=False, is_val=True)
+        if ret is None:
+            return None
 
         self.log('val_gen_loss', ret['loss_gen'], on_epoch=True, prog_bar=True, logger=True)
         self.log('val_gen_loss_all', ret['loss_gen_all'], on_epoch=True, prog_bar=True, logger=True)
