@@ -1,6 +1,6 @@
-exp_name: v05_base10_02
+exp_name: v05_base10_03
 train:
-  lr: 5e-5
+  lr: 1e-5
   batch_size: 8
   filelist: data/base10/train.txt
   val_filelist: data/base10/val.txt
@@ -10,9 +10,9 @@ train:
   epochs: 500
   lam_mel: 45
   lam_kl: 1.0
-  lam_grl_max: 0.3
-  lam_grl_steps: 60000
-  lam_content: 0.1
+  lam_grl_max: 0.4
+  lam_grl_steps: 40000
+  lam_content: 0.2
   content_every_step: 2
   lam_align: 0.0
   lam_spk: 10.0

@@ -373,5 +373,6 @@ if __name__ == '__main__':
         logger=logger,
         precision='bf16',
         callbacks=[checkpoint_callback],
+        # detect_anomaly=True
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
