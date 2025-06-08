@@ -181,7 +181,7 @@ class SynthesizerV05(nn.Module):
 
         # For numerical stability - we apply tanh soft bound to both prior and posterior.
         logs_p_A = self.config.model.p_max_std * torch.tanh(logs_p_A)
-        m_p = self.config.model.p_max_mean * torch.tanh(m_p_A)
+        m_p_A = self.config.model.p_max_mean * torch.tanh(m_p_A)
         logs_q_A = self.config.model.p_max_std * torch.tanh(logs_q_A)
         m_q_A = self.config.model.p_max_mean * torch.tanh(m_q_A)
 
