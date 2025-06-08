@@ -12,8 +12,8 @@ train:
   lam_kl: 1.0
   lam_grl_max: 0.4
   lam_grl_steps: 40000
-  lam_content: 0.4
-  content_every_step: 1
+  lam_content: 0.3
+  content_every_step: 2
   lam_align: 0.0
   lam_spk: 10.0
   # finetune: False
