@@ -12,7 +12,7 @@ train:
   lam_kl: 1.0
   lam_kl_reg_logs: 0.1
   lam_kl_reg_mus: 0.01
-  lam_grl_max: 2.4
+  lam_grl_max: 1.2
   lam_grl_steps: 20000
   lam_content: 0.05
   content_every_step: 1
