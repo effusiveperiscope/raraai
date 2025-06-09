@@ -216,7 +216,7 @@ class V05Encoder(nn.Module):
         disc_logits_BA = self.speaker_discriminator(
             grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
         disc_logits_A = self.speaker_discriminator(
-            col_A, h_A_mask, spk_A)
+            col_A.detach(), h_A_mask, spk_A)
         bce = nn.BCEWithLogitsLoss()
         fake_loss = bce(
             disc_logits_BA, torch.zeros_like(disc_logits_BA, device=h_A.device))
