@@ -1,4 +1,4 @@
-exp_name: v05_base10_09
+exp_name: v05_base10_09r1
 train:
   lr: 3e-5
   batch_size: 8
