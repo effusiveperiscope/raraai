@@ -202,8 +202,8 @@ class V05Encoder(nn.Module):
         c_loss = F.l1_loss(c_A.detach(), c_AB)
 
         # Alignment of u_A space with color space.
-        col_A = self.coloring_tower(c_A, h_A_mask, spk_A)
-        # align_loss = F.l1_loss(u_A.detach(), col_A)
+        col_A, cf_A = self.coloring_tower(c_A, h_A_mask, spk_A)
+        # align_loss = F.l1_loss(u_A.detach(), cf_A)
         align_loss = torch.Tensor([0.0]).to(h_A.device) # disabled, don't care right now
 
         # Coloring is speaker-correct.
@@ -211,7 +211,7 @@ class V05Encoder(nn.Module):
         # Upstream network wants to trick discriminator
         u_B = self.base_encoder(h_B, src_key_padding_mask=~h_B_mask)
         c_B = self.content_encoder(u_B, h_B_mask)
-        col_BA = self.coloring_tower(c_B, h_B_mask, spk_A)
+        col_BA, _ = self.coloring_tower(c_B, h_B_mask, spk_A)
 
         disc_logits_BA = self.speaker_discriminator(
             grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
@@ -224,7 +224,7 @@ class V05Encoder(nn.Module):
             disc_logits_A, torch.full_like(disc_logits_A, 1.0 - label_alpha, device=h_A.device))
 
         # Also get stats for downstream KL div
-        col_B = self.coloring_tower(c_B, h_B_mask, spk_B)
+        col_B, _ = self.coloring_tower(c_B, h_B_mask, spk_B)
         p_A = self.final_proj(col_A)
         p_B = self.final_proj(col_B)
         m_p_A, logs_p_A = p_A.chunk(2, dim=-1)
@@ -246,7 +246,7 @@ class V05Encoder(nn.Module):
         u = self.base_encoder(h, src_key_padding_mask=~h_mask)
 
         c = self.content_encoder(u, h_mask)
-        col = self.coloring_tower(c, h_mask, spk_emb)
+        col, _ = self.coloring_tower(c, h_mask, spk_emb)
 
         p = self.final_proj(col)
 
