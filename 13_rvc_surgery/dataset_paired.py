@@ -75,8 +75,8 @@ class FeatureDatasetPaired(Dataset):
         # Load full-length tensors
         wave = torch.load(os.path.join(load_dir, basename + '.wave'))
 
-        if os.path.exists(os.path.join(load_dir, basename + '.rvc_feat')):
-            rvc_feat = torch.load(os.path.join(load_dir, basename + '.rvc_feat')).squeeze(0)
+        if os.path.exists(os.path.join(load_dir, basename + '.whisp_feat')):
+            rvc_feat = torch.load(os.path.join(load_dir, basename + '.whisp_feat')).squeeze(0)
 
         pitch = torch.load(os.path.join(load_dir, basename + '.pitch')).squeeze(0)
         pitch_fine = torch.load(os.path.join(load_dir, basename + '.pitch_fine')).squeeze(0)

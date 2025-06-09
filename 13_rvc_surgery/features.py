@@ -30,7 +30,7 @@ class MyFeatures:
             self.rvc_model = RVCHubertModel(device=self.device, is_half=True)
 
         if extract_whisper:
-            model_name = "openai/whisper-small.en"
+            model_name = "openai/whisper-base.en"
             feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
             model = WhisperModel.from_pretrained(model_name)
             model.eval()

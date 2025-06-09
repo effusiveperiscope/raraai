@@ -36,21 +36,21 @@ class V05TrainingModule(pl.LightningModule):
                 param.requires_grad = False
             for param in self.net_d.parameters():
                 param.requires_grad = False
-            # for param in self.net_g.enc_p.parameters():
-                # param.requires_grad = True
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = True
 
             # Special - We are trying to fix the output magnitudes of prior and posterior
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-            for param in self.net_d.parameters():
-                param.requires_grad = False
-            for param in self.net_g.enc_p.final_proj.parameters():
-                param.requires_grad = True
-            for param in self.net_g.enc_q.proj.parameters():
-                param.requires_grad = True
+            # for param in self.net_g.parameters():
+                # param.requires_grad = False
+            # for param in self.net_d.parameters():
+                # param.requires_grad = False
+            # for param in self.net_g.enc_p.final_proj.parameters():
+                # param.requires_grad = True
+            # for param in self.net_g.enc_q.proj.parameters():
+                # param.requires_grad = True
             # We also allow the flow to adapt because it's immediately downstream of the posterior
-            for param in self.net_g.flow.parameters():
-                param.requires_grad = True
+            # for param in self.net_g.flow.parameters():
+                # param.requires_grad = True
         else:
             self.stage1 = False
             for param in self.net_g.parameters():
@@ -317,7 +317,7 @@ class V05TrainingModule(pl.LightningModule):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/v05.yaml')
+    parser.add_argument('--config', type=str, default='configs/v06.yaml')
     parser.add_argument('--gen_ckpt', type=str, default=None) # RVC G_ checkpoint
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)

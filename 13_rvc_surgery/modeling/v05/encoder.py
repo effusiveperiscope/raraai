@@ -151,7 +151,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
 class V05Encoder(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
-        self.in_proj = nn.Linear(768, config.model.inter_channels)
+        self.in_proj = nn.Linear(config.model.get('hubert_dim', 768), config.model.inter_channels)
         self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.base_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(

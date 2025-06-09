@@ -31,7 +31,7 @@ if __name__ == '__main__':
     # my_feats = MyFeatures(
         # extract_hubert=True, extract_whisper=True, extract_vevo=False)
     my_feats = MyFeatures(
-        extract_hubert=True, extract_whisper=False, extract_vevo=False)
+        extract_hubert=False, extract_whisper=True, extract_vevo=False)
 
     is_multispk = False
 
