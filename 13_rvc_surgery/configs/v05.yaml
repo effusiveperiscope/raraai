@@ -1,4 +1,4 @@
-exp_name: v05_base10_09r1
+exp_name: v05_base10_09r2
 train:
   lr: 3e-5
   batch_size: 8
@@ -12,9 +12,9 @@ train:
   lam_kl: 1.0
   lam_kl_reg_logs: 0.1
   lam_kl_reg_mus: 0.01
-  lam_grl_max: 0.6
+  lam_grl_max: 0.3
   lam_grl_steps: 20000
-  lam_content: 0.05
+  lam_content: 0.03
   content_every_step: 1
   lam_align: 0.0
   lam_spk: 10.0
