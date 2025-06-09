@@ -60,8 +60,14 @@ class ColoringTower(nn.Module):
         # g is embedded speaker [batch_size, inter_channels]
         x = self.in_proj(x)
         x = rearrange(x, "b t c -> b c t")
+
+        content_feature = None
         for i,layer in enumerate(self.convs):
             r_x = x
+
+            if i == self.config.model.content_guide_layer:
+                content_feature = x
+
             x = F.silu(x)
             x = layer(x)
 
@@ -74,7 +80,7 @@ class ColoringTower(nn.Module):
 
             x += r_x
         x = rearrange(x, "b c t -> b t c")
-        return self.out_proj(x)
+        return self.out_proj(x), content_feature
 
 
 class SpeakerConditionalDiscriminator(nn.Module):
@@ -183,8 +189,12 @@ class V05Encoder(nn.Module):
         # c_A = cont(col(c_A|s_B))
         u_A = self.base_encoder(h_A, src_key_padding_mask=~h_A_mask)
         c_A = self.content_encoder(u_A, h_A_mask)
-        col_AB = self.coloring_tower(c_A, h_A_mask, spk_B)
-        c_AB = self.content_encoder(col_AB, h_A_mask)
+
+        # Instead of matching cont(col_AB) directly, we match cont on an intermediate feature
+        # This moves the content preservation loss pressure further back from the KL pressure
+
+        col_AB, cf_AB = self.coloring_tower(c_A, h_A_mask, spk_B)
+        c_AB = self.content_encoder(cf_AB, h_A_mask)
 
         # Middle ground - detach the target only, but allow for co-adaptation of content
         # encoding with coloring
