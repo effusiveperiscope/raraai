@@ -80,7 +80,7 @@ class V05TrainingModule(pl.LightningModule):
                 batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine']).squeeze(0) # Recalculate coarse
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    batch['rvc_feat'].to(self.device).to(self.dtype), 
+                    batch['whisp_feat'].to(self.device).to(self.dtype), 
                     batch['lengths'].to(self.device), 
                     batch['pitch'].to(self.device), 
                     batch['pitch_fine'].to(self.device).to(self.dtype),
