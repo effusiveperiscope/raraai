@@ -55,6 +55,7 @@ class ColoringTower(nn.Module):
             FiLMGenerator(config.model.gin_channels, config.model.inter_channels) for _ in self.convs
         ])
         self.out_proj = nn.Linear(config.model.inter_channels, config.model.inter_channels)
+        self.config = config
 
     def forward(self, x, mask, spk):
         # g is embedded speaker [batch_size, inter_channels]
