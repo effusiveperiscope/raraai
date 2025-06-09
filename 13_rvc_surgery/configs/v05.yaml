@@ -50,7 +50,7 @@ model:
   spk_class_n_layers: 6
   content_n_layers: 10
   coloring_n_layers: 12
-  content_guide_layer: 6
+  content_guide_layer: 5
 data:
   hop_length: 480
   segment_size: 17280
