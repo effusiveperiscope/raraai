@@ -67,7 +67,7 @@ class ColoringTower(nn.Module):
             r_x = x
 
             if i == self.config.model.content_guide_layer:
-                content_feature = x
+                content_feature = rearrange(x, "b c t -> b t c")
 
             x = F.silu(x)
             x = layer(x)
