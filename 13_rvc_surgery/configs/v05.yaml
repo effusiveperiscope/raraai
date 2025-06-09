@@ -1,4 +1,4 @@
-exp_name: v05_base10_09
+exp_name: v05_base10_09r1
 train:
   lr: 3e-5
   batch_size: 8
@@ -12,7 +12,7 @@ train:
   lam_kl: 1.0
   lam_kl_reg_logs: 0.1
   lam_kl_reg_mus: 0.01
-  lam_grl_max: 0.6
+  lam_grl_max: 2.4
   lam_grl_steps: 20000
   lam_content: 0.05
   content_every_step: 1
@@ -50,7 +50,7 @@ model:
   spk_class_n_layers: 6
   content_n_layers: 10
   coloring_n_layers: 12
-  content_guide_layer: 5
+  content_guide_layer: 4
 data:
   hop_length: 480
   segment_size: 17280
