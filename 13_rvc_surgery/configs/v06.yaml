@@ -4,7 +4,7 @@ train:
   batch_size: 8
   filelist: data/base10_whisper/train.txt
   val_filelist: data/base10_whisper/val.txt
-  test_filelist: data/test/train.txt
+  test_filelist: data/test_whisper/train.txt
   octave_transpose_test: True
   noise_scale_test: 0.5
   epochs: 500

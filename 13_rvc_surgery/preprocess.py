@@ -37,6 +37,7 @@ if __name__ == '__main__':
 
     new_lines = [] # May need to filter out too short lines
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
+        orig_line = line
         if 'longform' in line:
             # These are for longform in Expresso - will cause OOM
             continue
@@ -44,7 +45,6 @@ if __name__ == '__main__':
             if not is_multispk:
                 print('=== Multispeaker filelist detected! ===')
             is_multispk = True
-            orig_line = line
             split = line.split('|')
             line = split[0]
             sid = split[1]
@@ -55,7 +55,7 @@ if __name__ == '__main__':
         basename = os.path.basename(line)
 
         if os.path.exists(os.path.join(args.output_dir, basename+'.pitch')):
-            a = torch.load(os.path.join(args.output_dir, basename+'.rvc_feat'))
+            a = torch.load(os.path.join(args.output_dir, basename+'.whisp_feat'))
             if a.shape[1] < 32:
                 print(f'Skipping short file: {line}')
                 continue
