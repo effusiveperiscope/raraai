@@ -1,4 +1,4 @@
-exp_name: v06_base10_02
+exp_name: v06_base10_03
 train:
   lr: 3e-5
   batch_size: 8
@@ -17,7 +17,7 @@ train:
   lam_content: 0.00
   content_every_step: 1
   lam_align: 0.0
-  lam_spk: 15.0
+  lam_spk: 8.0
   phone_aug_scale: 0.4
   spec_aug_scale: 0.2
   spec_am_min: 0.7
