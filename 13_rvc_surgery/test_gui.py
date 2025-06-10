@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/v05_base10_09r2'
+CHECKPOINTS_ROOT = 'checkpoints/v06_base10'
 #CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
@@ -38,7 +38,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(gui.build())
 
         my_feats = MyFeatures(
-            extract_hubert=True, extract_whisper=False, extract_vevo=False)
+            extract_hubert=False, extract_whisper=True, extract_vevo=False)
         self.my_feats = my_feats
 
         # self.hubert_stats_path = config.data.get('hubert_stats_path', 
@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
         for file in files:
             data_16k, _ = librosa.load(file, sr=16000)
             feats = self.my_feats.get_features(data_16k)
-            lens = torch.tensor([feats['rvc_feat'].shape[1]]).to('cuda')
+            lens = torch.tensor([feats['whisp_feat'].shape[1]]).to('cuda')
 
             # Tranpsose
             feats['pitch_fine'] = feats['pitch_fine'] * (2 ** (transpose / 12))
@@ -96,12 +96,12 @@ class MainWindow(QMainWindow):
                 (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
 
             # Truncate
-            feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['rvc_feat'].shape[1]]
-            feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['rvc_feat'].shape[1]]
+            feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
+            feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
 
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    feats['rvc_feat'].half(), 
+                    feats['whisp_feat'].half(), 
                     #feats['rvc_feat'].to('cuda'),
                     lens, 
                     feats['pitch'].to('cuda'), 
@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/v05.yaml')
+    config = OmegaConf.load('configs/v06.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()
