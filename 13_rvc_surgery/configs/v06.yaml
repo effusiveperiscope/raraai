@@ -25,7 +25,7 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 25000
+  stage1_train_step: 0
 model:
   segment_size: 32
   vevo_dim: 1024
