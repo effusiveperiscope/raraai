@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 from modeling.grl import grad_reverse
 from modeling.spk_classifier import SpeakerClassifierCNN
-from modeling.commons import DepthwiseSeparableConv1d, SinusoidalPositionalEncoding
+from modeling.commons import AttentionPooling, DepthwiseSeparableConv1d, SinusoidalPositionalEncoding
 from modeling.spk_cond import FiLMGenerator
 from einops import rearrange
 
@@ -88,48 +88,47 @@ class ColoringTower(nn.Module):
 class SpeakerConditionalDiscriminator(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
-        # self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
-                in_channels=config.model.inter_channels, out_channels=64, 
+                in_channels=config.model.content_size, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=7, padding=3, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
                 kernel_size=5, padding=2, spectral_norm=True),
             DepthwiseSeparableConv1d(
-                in_channels=64, out_channels=128, 
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
                 kernel_size=3, padding=1, spectral_norm=True),
             DepthwiseSeparableConv1d(
-                in_channels=128, out_channels=256, 
-                kernel_size=1, padding=0, spectral_norm=True),
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=3, padding=1, spectral_norm=True),
             DepthwiseSeparableConv1d(
-                in_channels=256, out_channels=512, 
-                kernel_size=1, padding=0, spectral_norm=True),
-            DepthwiseSeparableConv1d(
-                in_channels=512, out_channels=1024, 
-                kernel_size=1, padding=0, spectral_norm=True),
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=3, padding=1, spectral_norm=True),
         ])
-        # self.encoder = nn.TransformerEncoder(
-        #     nn.TransformerEncoderLayer(
-        #         d_model=config.model.inter_channels,
-        #         nhead=8,
-        #         dim_feedforward=768,
-        #         activation=F.silu,
-        #         batch_first=True
-        #     ),
-        #     num_layers=4
-        # )
+        self.norms = nn.ModuleList([
+            nn.GroupNorm(1, config.model.disc_channels) for _ in range(len(self.convs))
+        ])
         self.conditions = nn.ModuleList([
             FiLMGenerator(config.model.gin_channels, conv.in_channels) for conv in self.convs
         ])
-        self.encoder_proj = nn.Linear(config.model.inter_channels, 1024)
-        self.out_proj = nn.Linear(1024, 1)
+        self.pool = AttentionPooling(config.model.disc_channels)
+        self.out_proj = nn.Linear(config.model.disc_channels, 1)
 
-    def forward(self, x, mask, spk):
+    def forward(self, x, x_mask, spk):
         # Disable transformer encoder for now
         # x = self.sipe(x)
         # x_enc = self.encoder(x, src_key_padding_mask=~mask)
 
         x = rearrange(x, "b t c -> b c t")
 
-        for i, layer in enumerate(self.convs):
+        for i, conv in enumerate(self.convs):
+            xs = x
+
             x = F.silu(x)
 
             gamma, beta = self.conditions[i](spk.unsqueeze(1))
@@ -137,14 +136,15 @@ class SpeakerConditionalDiscriminator(nn.Module):
             x = gamma * x + beta
             x = rearrange(x, "b t c -> b c t")
 
-            x = F.layer_norm(x, x.shape[1:])
+            x = self.norms[i](x)
+            x = conv(x) * x_mask.unsqueeze(-1)
 
-            x = layer(x)
+            x = x + xs
 
         x = rearrange(x, "b c t -> b t c")
-        x = x * mask.unsqueeze(-1)
+        x = x * x_mask.unsqueeze(-1)
 
-        # x = x + self.encoder_proj(x_enc)
+        x = self.pool(x, x_mask)
         x = self.out_proj(x)
         return x
 

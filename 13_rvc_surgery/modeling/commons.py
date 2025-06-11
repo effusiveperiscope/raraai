@@ -3,6 +3,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+class AttentionPooling(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.attn = nn.Sequential(
+            nn.Linear(input_dim, input_dim // 2),
+            nn.Tanh(),
+            nn.Linear(input_dim // 2, 1)
+        )
+
+    def forward(self, x, x_mask):
+        attn_scores = self.attn(x).squeeze(-1)  # (B, T)
+        attn_scores = attn_scores.masked_fill(x_mask == 0, -1e9)
+        attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T)
+        pooled = (x * attn_weights.unsqueeze(-1)).sum(dim=1)  # (B, C)
+        return pooled
+
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, dim, max_len=10000):
         """

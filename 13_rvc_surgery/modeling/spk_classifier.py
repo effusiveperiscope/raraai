@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from modeling.commons import DepthwiseSeparableConv1d
+from modeling.commons import DepthwiseSeparableConv1d, AttentionPooling
 import math
 
 class SpeakerClassifierCNN(nn.Module):
@@ -11,31 +11,47 @@ class SpeakerClassifierCNN(nn.Module):
         super().__init__()
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
-                in_channels=config.model.content_size, out_channels=64, 
+                in_channels=config.model.content_size, 
+                out_channels=config.model.disc_channels, 
                 kernel_size=7, padding=3, spectral_norm=True),
             DepthwiseSeparableConv1d(
-                in_channels=64, out_channels=128, 
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=5, padding=2, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
                 kernel_size=3, padding=1, spectral_norm=True),
             DepthwiseSeparableConv1d(
-                in_channels=128, out_channels=256, 
-                kernel_size=1, padding=0, spectral_norm=True),
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=3, padding=1, spectral_norm=True),
             DepthwiseSeparableConv1d(
-                in_channels=256, out_channels=512, 
-                kernel_size=1, padding=0, spectral_norm=True),
-            DepthwiseSeparableConv1d(
-                in_channels=512, out_channels=1024, 
-                kernel_size=1, padding=0, spectral_norm=True),
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=3, padding=1, spectral_norm=True),
         ])
-        self.out_proj = nn.Linear(1024, config.model.spk_embed_dim)
+        self.norms = nn.ModuleList([
+            nn.GroupNorm(1, config.model.disc_channels) for _ in range(len(self.convs))
+        ])
+
+        self.pool = AttentionPooling(config.model.disc_channels)
+        self.out_proj = nn.Linear(config.model.disc_channels, config.model.spk_embed_dim)
 
     def forward(self, x, x_mask):
         x = rearrange(x, "b t c -> b c t")
-        for conv in self.convs:
-            x = F.silu(conv(x) * x_mask.unsqueeze(1))
+        for i, conv in enumerate(self.convs):
+            xs = x
+
+            x = F.silu(x)
+            x = self.norms[i](x)
+            x = conv(x) * x_mask.unsqueeze(1)
+
+            x = x + xs
+
         x = rearrange(x, "b c t -> b t c")
+        x = self.pool(x, x_mask)
         x = self.out_proj(x)
-        x = (x * x_mask.unsqueeze(-1)).sum(dim=1) / (
-            x_mask.sum(dim=1).unsqueeze(-1))
         return x
 
 class SpeakerClassifier(nn.Module):

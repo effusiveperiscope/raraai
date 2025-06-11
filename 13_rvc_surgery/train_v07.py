@@ -39,12 +39,14 @@ class V05TrainingModule(pl.LightningModule):
             # for param in self.net_g.dec.parameters():
                 # param.requires_grad = True
 
-            # Train speaker content classifier
+            # Train speaker content classifier and latent discriminator
             for param in self.net_g.parameters():
                 param.requires_grad = False
             for param in self.net_d.parameters():
                 param.requires_grad = False
             for param in self.net_g.enc_p.speaker_classifier.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_p.speaker_discriminator.parameters():
                 param.requires_grad = True
         else:
             self.stage1 = False
