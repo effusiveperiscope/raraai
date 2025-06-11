@@ -7,9 +7,11 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from svc_helper.svc.rvc.lib.infer_pack.models import GeneratorNSF, PosteriorEncoder, ResidualCouplingBlock
+from svc_helper.svc.rvc.lib.infer_pack.models import PosteriorEncoder, ResidualCouplingBlock, GeneratorNSF
 from svc_helper.svc.rvc.lib.infer_pack import commons
 from modeling.v05.encoder import V05Encoder
+from modeling.my_nsf import MyGeneratorNSF
+from commons import count_parameters
 
 import pdb
 from PyQt5.QtCore import pyqtRemoveInputHook
@@ -90,7 +92,7 @@ class SynthesizerV05(nn.Module):
 
         self.enc_p = V05Encoder(self.config)
 
-        self.dec = GeneratorNSF(
+        self.dec = MyGeneratorNSF(
             inter_channels,
             resblock,
             resblock_kernel_sizes,
@@ -190,6 +192,34 @@ class SynthesizerV05(nn.Module):
             (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
             (c_loss, align_loss, fake_loss, real_loss)
 
+    @torch.jit.ignore
+    def step_finetune(
+        self,
+        phone,
+        phone_lengths,
+        pitchf,
+        spks,
+        y,
+        y_lengths,
+    ): 
+        g = self.emb_g(spks).unsqueeze(-1)
+        _, m_p, logs_p, u, c, col = self.enc_p(
+            h=phone, h_mask=commons.sequence_mask(phone_lengths, phone.size(1)),
+            spk_emb=g.squeeze(-1)
+        )
+
+        z, m_q, logs_q, z_mask = self.enc_q(
+            rearrange(y, 'b t c -> b c t'), y_lengths, g=g
+        )
+        z_p = self.flow(z, z_mask, g=g)
+        z_slice, ids_slice = commons.rand_slice_segments(
+            z, y_lengths, self.segment_size
+        )
+        pitchf = commons.slice_segments2(pitchf, ids_slice, self.segment_size)
+        o = self.dec(z_slice, pitchf, g=g)
+
+        return o, z_mask, ids_slice, (z, z_p, m_p, logs_p, m_q, logs_q)
+
     @torch.jit.export
     def infer(
         self,
@@ -216,3 +246,17 @@ class SynthesizerV05(nn.Module):
         z = self.flow(z_p, x_mask, g=g, reverse=True)
         o = self.dec(z * x_mask, nsff0, g=g)
         return o, x_mask, (z, z_p, m_p, logs_p)
+
+if __name__ == '__main__':
+    from omegaconf import OmegaConf
+    config = OmegaConf.load('configs/v07.yaml')
+    model = SynthesizerV05(config, **config.model, is_half=True)
+    model.eval()
+
+    phone = torch.randn((2, 100, config.model.hubert_dim))
+    phone_lengths = torch.tensor([100, 100])
+    pitch = torch.randn((2, 100)).to(torch.int32)
+    nsff0 = torch.randn((2, 100))
+    sid = torch.tensor([0, 1])
+    model.infer(phone, phone_lengths, pitch, nsff0, sid)
+    print(count_parameters(model))

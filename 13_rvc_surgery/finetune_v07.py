@@ -14,7 +14,7 @@ import pytorch_lightning as pl
 import torch
 from einops import rearrange
 
-class V05TrainingModule(pl.LightningModule):
+class V07FinetuneModule(pl.LightningModule):
     def __init__(self, 
         net_g : SynthesizerV05, 
         net_d: MultiPeriodDiscriminatorV2, config : OmegaConf):
@@ -23,40 +23,18 @@ class V05TrainingModule(pl.LightningModule):
         self.net_d = net_d
         self.config = config
         self.automatic_optimization = False
-        self.stage1 = False
 
     def on_train_start(self):
         self.test()
 
     def on_train_step_start(self):
-        if self.global_step < self.config.train.get('stage1_train_step', 0):
-            self.stage1 = True
-            # Only train prior
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-            for param in self.net_d.parameters():
-                param.requires_grad = False
-            for param in self.net_g.enc_p.parameters():
-                param.requires_grad = True
-
-            # Special - We are trying to fix the output magnitudes of prior and posterior
-            # for param in self.net_g.parameters():
-                # param.requires_grad = False
-            # for param in self.net_d.parameters():
-                # param.requires_grad = False
-            # for param in self.net_g.enc_p.final_proj.parameters():
-                # param.requires_grad = True
-            # for param in self.net_g.enc_q.proj.parameters():
-                # param.requires_grad = True
-            # We also allow the flow to adapt because it's immediately downstream of the posterior
-            # for param in self.net_g.flow.parameters():
-                # param.requires_grad = True
-        else:
-            self.stage1 = False
-            for param in self.net_g.parameters():
-                param.requires_grad = True
-            for param in self.net_d.parameters():
-                param.requires_grad = True
+        for param in self.net_g.parameters():
+            param.requires_grad = True
+        for param in self.net_d.parameters():
+            param.requires_grad = True
+        # Freeze content encoder
+        for param in self.net_g.enc_p.content_encoder.parameters():
+            param.requires_grad = False
 
     def test(self):
         print('=== Testing ===')
@@ -98,52 +76,42 @@ class V05TrainingModule(pl.LightningModule):
                 self.logger.experiment.flush()
 
     def step(self, batch, batch_idx, is_train=True, is_val=False):
-        phone_A = batch['A']['rvc_feat']
-        phone_lengths_A = batch['A']['lengths']
-        phone_B = batch['B']['rvc_feat']
-        phone_lengths_B = batch['B']['lengths']
-        pitchf_A = batch['A']['pitch_fine']
-        spks_A = batch['A']['sids']
-        spks_B = batch['B']['sids']
-        y_A = batch['A']['spec']
-        wave_A = batch['A']['wave']
+        phone = batch['whisp_feat']
+        phone_lengths = batch['lengths']
+        pitchf = batch['pitch_fine']
+        spks = batch['sids']
+        y = batch['spec']
+        wave = batch['wave']
 
         disc_optim, gen_optim = self.optimizers()
 
         # --- Data augmentation ---
         # Speech feature noising
-        phone_A_aug = phone_A + torch.randn_like(phone_A) * self.config.train.phone_aug_scale
-        phone_B_aug = phone_B + torch.randn_like(phone_B) * self.config.train.phone_aug_scale
+        phone_aug = phone + torch.randn_like(phone) * self.config.train.phone_aug_scale
         # Spec power modulation
-        y_A_aug = smooth_random_amplitude_modulation(y_A,
+        y_aug = smooth_random_amplitude_modulation(y,
             min_gain=self.config.train.spec_am_min,
             max_gain=self.config.train.spec_am_max,
             points=self.config.train.spec_am_points)
         # Spec noise
-        y_A_aug = y_A_aug + torch.randn_like(y_A_aug) * self.config.train.spec_aug_scale
+        y_aug = y_aug + torch.randn_like(y_aug) * self.config.train.spec_aug_scale
 
         # During stage 1, the discriminator isn't touched by any gradients
+
         y_hat, z_mask, ids_slice, \
-            (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
-            (c_loss, align_loss, fake_loss, real_loss) = self.net_g(
-                phone_A=phone_A_aug, phone_lengths_A=phone_lengths_A,
-                phone_B=phone_B_aug, phone_lengths_B=phone_lengths_B,
-                pitchf_A=pitchf_A, 
-                spks_A=spks_A, spks_B=spks_B,
-                y_A=y_A_aug, y_lengths_A=batch['A']['lengths'],
-                # 0 to maximum
-                lambda_grl = ((self.global_step / \
-                     self.config.train.lam_grl_steps) * \
-                         self.config.train.lam_grl_max),
-                label_alpha = self.config.train.label_alpha
+            (z, z_p, m_p, logs_p, m_q, logs_q) = self.net_g.step_finetune(
+                phone=phone_aug, phone_lengths=phone_lengths,
+                pitchf=pitchf, 
+                spks=spks,
+                y=y_aug, y_lengths=batch['lengths'],
             )
 
-        mel_A = spec_to_mel_torch(rearrange(y_A, 'b t d -> b d t'),
+        mel = spec_to_mel_torch(rearrange(y, 'b t d -> b d t'),
             self.config.data.n_fft, self.config.data.num_mels, 
             self.config.data.sampling_rate, self.config.data.fmin, 
             self.config.data.fmax)
-        y_A_mel = slice_segments_general(
-            mel_A, ids_slice, 
+        y_mel = slice_segments_general(
+            mel, ids_slice, 
             self.config.data.segment_size // self.config.data.hop_length)
         y_hat_mel = mel_spectrogram_torch(
             y_hat.float().squeeze(1),
@@ -157,34 +125,30 @@ class V05TrainingModule(pl.LightningModule):
             center=False
         )
         wave = slice_segments_general(
-            wave_A, ids_slice * self.config.data.hop_length, 
+            wave, ids_slice * self.config.data.hop_length, 
             self.config.data.segment_size
         )
         wave = wave[:, :y_hat.shape[2]] 
-        y_mel = y_A_mel[:, :, :y_hat_mel.shape[2]]
+        y_mel = y_mel[:, :, :y_hat_mel.shape[2]]
 
-        if not self.stage1:
-            # Train discriminator
-            wave_noise = wave + torch.randn_like(wave) * self.config.train.disc_noise_scale
-            y_hat_noise = y_hat + torch.randn_like(y_hat) * self.config.train.disc_noise_scale
-            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave_noise.unsqueeze(1), y_hat_noise.detach())
-            loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
-                self.config.train.label_alpha)
+        # Train discriminator
+        wave_noise = wave + torch.randn_like(wave) * self.config.train.disc_noise_scale
+        y_hat_noise = y_hat + torch.randn_like(y_hat) * self.config.train.disc_noise_scale
+        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(wave_noise.unsqueeze(1), y_hat_noise.detach())
+        loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g, label_alpha=
+            self.config.train.label_alpha)
 
-            if loss_disc.isnan().any():
-                loss_disc = torch.zeros_like(loss_disc)
-                print("Warning - NaN detected in loss_disc")
-                return None
+        if loss_disc.isnan().any():
+            loss_disc = torch.zeros_like(loss_disc)
+            print("Warning - NaN detected in loss_disc")
+            return None
 
-            if loss_disc.requires_grad:
-                disc_optim.zero_grad()
-                self.manual_backward(loss_disc)
-                d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1000.)
-                disc_optim.step()
-            else:
-                d_norm = None
+        if loss_disc.requires_grad:
+            disc_optim.zero_grad()
+            self.manual_backward(loss_disc)
+            d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1000.)
+            disc_optim.step()
         else:
-            loss_disc = None
             d_norm = None
 
         # Train generator
@@ -197,25 +161,18 @@ class V05TrainingModule(pl.LightningModule):
         if active_elements == 0:
             loss_kl_reg = torch.tensor(0.0, device=self.device)
         else:
-            loss_kl_reg = torch.sum(logs_p_A ** 2 * z_mask) * \
+            loss_kl_reg = torch.sum(logs_p ** 2 * z_mask) * \
                 self.config.train.lam_kl_reg_logs / active_elements \
-                + torch.sum(m_p_A ** 2 * z_mask) * \
+                + torch.sum(m_p ** 2 * z_mask) * \
                 self.config.train.lam_kl_reg_mus / active_elements
-        loss_kl = kl_loss(z_p, logs_q_A, m_p_A, logs_p_A, z_mask) 
+        loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) 
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, _ = generator_loss(y_d_hat_g)
         loss_gen_all = loss_gen + (
             loss_fm + 
             loss_mel*self.config.train.lam_mel + 
             loss_kl*self.config.train.lam_kl + 
-            #c_loss*self.config.train.lam_content + 
-            align_loss*self.config.train.lam_align +
-            (fake_loss + real_loss)*self.config.train.lam_spk # Speaker conditioned discriminator
-            + loss_kl_reg
-        )
-
-        if self.global_step % self.config.train.content_every_step == 0:
-            loss_gen_all = loss_gen_all + c_loss*self.config.train.lam_content
+            + loss_kl_reg)
 
         if loss_gen_all.isnan().any():
             loss_gen_all = torch.zeros_like(loss_gen_all)
@@ -239,10 +196,6 @@ class V05TrainingModule(pl.LightningModule):
             'loss_kl': loss_kl,
             'loss_kl_reg': loss_kl_reg,
             'loss_fm': loss_fm,
-            'loss_c': c_loss,
-            'loss_align': align_loss,
-            'loss_fake': fake_loss,
-            'loss_real': real_loss,
             'd_norm': d_norm,
             'g_norm': g_norm,
         }
@@ -269,10 +222,6 @@ class V05TrainingModule(pl.LightningModule):
         self.log('kl_loss', ret['loss_kl'], logger=True)
         self.log('loss_kl_reg', ret['loss_kl_reg'], logger=True, on_step=True)
         self.log('fm_loss', ret['loss_fm'], logger=True)
-        self.log('c_loss', ret['loss_c'], logger=True)
-        #self.log('align_loss', ret['loss_align'], logger=True)
-        self.log('spk_fake_loss', ret['loss_fake'], logger=True)
-        self.log('spk_real_loss', ret['loss_real'], logger=True)
         if ret['loss_disc'] is not None:
             self.log('disc_loss', ret['loss_disc'], prog_bar=True, logger=True)
         if ret['d_norm'] is not None:
@@ -291,10 +240,6 @@ class V05TrainingModule(pl.LightningModule):
         self.log('val_mel_loss', ret['loss_mel'], on_epoch=True, logger=True)
         self.log('val_kl_loss', ret['loss_kl'], on_epoch=True, logger=True)
         self.log('val_fm_loss', ret['loss_fm'], on_epoch=True, logger=True)
-        self.log('val_c_loss', ret['loss_c'], on_epoch=True, logger=True)
-        #self.log('val_align_loss', ret['loss_align'], on_epoch=True, logger=True)
-        self.log('val_spk_fake_loss', ret['loss_fake'], on_epoch=True, logger=True)
-        self.log('val_spk_real_loss', ret['loss_real'], on_epoch=True, logger=True)
         
         val_loss = ret['loss_gen_all']
         if ret['loss_disc'] is not None:
@@ -317,7 +262,7 @@ class V05TrainingModule(pl.LightningModule):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/v06.yaml')
+    parser.add_argument('--config', type=str, default='configs/v07.yaml')
     parser.add_argument('--gen_ckpt', type=str, default=None) # RVC G_ checkpoint
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
@@ -343,13 +288,13 @@ if __name__ == '__main__':
         disc_state = torch.load(args.disc_ckpt, map_location='cpu')
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
         net_d.load_state_dict(disc_state['model'])
-        training_module = V05TrainingModule(net_g, net_d, config)
+        training_module = V07FinetuneModule(net_g, net_d, config)
 
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
         net_g = SynthesizerV05(config, **config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-        training_module = V05TrainingModule(net_g, net_d, config)
+        training_module = V07FinetuneModule(net_g, net_d, config)
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
         net_g = SynthesizerV05(config, **config.model, is_half=True)
@@ -370,20 +315,20 @@ if __name__ == '__main__':
             if k.startswith(submodule_prefix)
         }
         net_d.load_state_dict(state_dict, strict=False)
-        training_module = V05TrainingModule(net_g, net_d, config)
+        training_module = V07FinetuneModule(net_g, net_d, config)
     else:
         print('!!! Warning: No checkpoint provided. Training from scratch. !!!')
         net_g = SynthesizerV05(config, **config.model, is_half=True)
         net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-        training_module = V05TrainingModule(net_g, net_d, config)
+        training_module = V07FinetuneModule(net_g, net_d, config)
 
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=args.version
     )
 
-    train_dataset = FeatureDatasetPaired(config, is_train=True)
-    val_dataset = FeatureDatasetPaired(config, is_train=False)
+    train_dataset = FeatureDataset(config, is_train=True)
+    val_dataset = FeatureDataset(config, is_train=False)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=config.train.batch_size,

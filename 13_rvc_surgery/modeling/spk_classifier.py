@@ -1,8 +1,38 @@
+from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from modeling.commons import DepthwiseSeparableConv1d
 import math
+
+class SpeakerClassifierCNN(nn.Module):
+    def __init__(self, config : OmegaConf):
+        self.convs = nn.ModuleList([
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.inter_channels, out_channels=64, 
+                kernel_size=7, padding=3, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=64, out_channels=128, 
+                kernel_size=3, padding=1, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=128, out_channels=256, 
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=256, out_channels=512, 
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=512, out_channels=1024, 
+                kernel_size=1, padding=0, spectral_norm=True),
+        ])
+        self.out_proj = nn.Linear(config.model.inter_channels, config.model.spk_embed_dim)
+
+    def forward(self, x, x_mask):
+        for conv in self.convs:
+            x = F.silu(conv(x) * x_mask.unsqueeze(-1))
+        x = self.out_proj(x)
+        x = x.mean(dim=1)
+        return x
 
 class SpeakerClassifier(nn.Module):
     def __init__(self, 

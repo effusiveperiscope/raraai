@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from modeling.grl import grad_reverse
+from modeling.spk_classifier import SpeakerClassifierCNN
 from modeling.commons import DepthwiseSeparableConv1d, SinusoidalPositionalEncoding
 from modeling.spk_cond import FiLMGenerator
 from einops import rearrange
@@ -165,6 +166,7 @@ class V05Encoder(nn.Module):
         )
         self.content_encoder = ContentEncoder(config)
         self.coloring_tower = ColoringTower(config)
+        self.speaker_classifier = SpeakerClassifierCNN(config)
         self.speaker_discriminator = SpeakerConditionalDiscriminator(config)
 
         self.final_proj = nn.Sequential(
@@ -175,7 +177,7 @@ class V05Encoder(nn.Module):
         h_A, h_A_mask, # h is hubert features
         h_B, h_B_mask,
         spk_A, spk_B, 
-        lambda_grl, label_alpha=0.1):
+        ids_A, lambda_grl, label_alpha=0.1):
 
         h_A = self.in_proj(h_A) 
         h_A = self.sipe(h_A)
@@ -185,26 +187,15 @@ class V05Encoder(nn.Module):
 
         # RVC losses are downstream; not included in here.
 
-        # Coloring is content preserving. 
-        # (And content encoder can extract from colored representations.)
-        # c_A = cont(col(c_A|s_B))
         u_A = self.base_encoder(h_A, src_key_padding_mask=~h_A_mask)
         c_A = self.content_encoder(u_A, h_A_mask)
 
-        # Instead of matching cont(col_AB) directly, we match cont on an intermediate feature
-        # This moves the content preservation loss pressure further back from the KL pressure
-
-        col_AB, cf_AB = self.coloring_tower(c_A, h_A_mask, spk_B)
-        c_AB = self.content_encoder(cf_AB, h_A_mask)
-
-        # Middle ground - detach the target only, but allow for co-adaptation of content
-        # encoding with coloring
-        c_loss = F.l1_loss(c_A.detach(), c_AB)
+        # Content is speaker agnostic.
+        spk_logits = self.speaker_classifier(grad_reverse(c_A, lambda_grl), h_A_mask)
+        spk_loss = F.cross_entropy(spk_logits, ids_A)
 
         # Alignment of u_A space with color space.
         col_A, cf_A = self.coloring_tower(c_A, h_A_mask, spk_A)
-        # align_loss = F.l1_loss(u_A.detach(), cf_A)
-        align_loss = torch.Tensor([0.0]).to(h_A.device) # disabled, don't care right now
 
         # Coloring is speaker-correct.
         # Discriminator wants to classify BA as fake, A as real
@@ -237,7 +228,7 @@ class V05Encoder(nn.Module):
         z_A = m_p_A + torch.exp(logs_p_A) * torch.randn_like(m_p_A)
         z_B = m_p_B + torch.exp(logs_p_B) * torch.randn_like(m_p_B)
 
-        return c_loss, align_loss, fake_loss, real_loss, \
+        return spk_loss, fake_loss, real_loss, \
             m_p_A, logs_p_A, m_p_B, logs_p_B, z_A, z_B
 
     def forward(self, h, h_mask, spk_emb, noise_scale=1.0):
