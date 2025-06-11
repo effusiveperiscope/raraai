@@ -202,3 +202,10 @@ def count_parameters(model):
         return f"{total_params / 1e6:.2f} M"  # Millions
     else:
         return f"{total_params / 1e9:.2f} B"  # Billions
+
+def check_logits(logits):
+    # Check the full range of your logits
+    print(f"Logit stats: min={logits.min():.2f}, max={logits.max():.2f}, mean={logits.mean():.2f}")
+
+    # Check if this happens consistently
+    print(f"Extreme values (|logit| > 10): {(logits.abs() > 10).sum().item()}")

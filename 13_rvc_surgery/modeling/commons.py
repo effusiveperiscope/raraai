@@ -14,6 +14,12 @@ class AttentionPooling(nn.Module):
 
     def forward(self, x, x_mask):
         attn_scores = self.attn(x).squeeze(-1)  # (B, T)
+
+        # Check if any sequence has all tokens masked
+        valid_tokens = x_mask.sum(dim=-1)  # (B,)
+        if (valid_tokens == 0).any():
+            print("Warning: Found sequences with no valid tokens!")
+
         attn_scores = attn_scores.masked_fill(x_mask == 0, -1e9)
         attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T)
         pooled = (x * attn_weights.unsqueeze(-1)).sum(dim=1)  # (B, C)

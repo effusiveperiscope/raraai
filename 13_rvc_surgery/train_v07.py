@@ -223,10 +223,6 @@ class V05TrainingModule(pl.LightningModule):
             + loss_kl_reg
         )
 
-        if self.global_step % self.config.train.content_every_step == 0:
-            #loss_gen_all = loss_gen_all + c_loss*self.config.train.lam_content
-            pass
-
         if loss_gen_all.isnan().any():
             loss_gen_all = torch.zeros_like(loss_gen_all)
             print("Warning - NaN detected in loss_gen_all")
@@ -322,9 +318,11 @@ class V05TrainingModule(pl.LightningModule):
 
     def configure_optimizers(self):
         disc_optim = torch.optim.AdamW(
-            self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
+            self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999),
+            weight_decay=self.config.train.weight_decay)
         gen_optim = torch.optim.AdamW(
-            self.net_g.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
+            self.net_g.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999),
+            weight_decay=self.config.train.weight_decay)
         return [disc_optim, gen_optim], []
 
 if __name__ == '__main__':

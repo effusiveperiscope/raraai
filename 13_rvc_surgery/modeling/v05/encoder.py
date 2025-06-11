@@ -6,6 +6,7 @@ from modeling.grl import grad_reverse
 from modeling.spk_classifier import SpeakerClassifierCNN
 from modeling.commons import AttentionPooling, DepthwiseSeparableConv1d, SinusoidalPositionalEncoding
 from modeling.spk_cond import FiLMGenerator
+from commons import check_logits
 from einops import rearrange
 
 class ContentEncoder(nn.Module):
@@ -201,6 +202,7 @@ class V05Encoder(nn.Module):
 
         # Content is locally speaker agnostic.
         spk_logits = self.speaker_classifier(grad_reverse(c_A, lambda_grl), h_A_mask)
+        check_logits(spk_logits)
         ce_loss = nn.CrossEntropyLoss(label_smoothing=label_alpha)
         spk_loss = ce_loss(spk_logits, spk_A)
 
@@ -223,6 +225,8 @@ class V05Encoder(nn.Module):
             disc_logits_BA, torch.zeros_like(disc_logits_BA, device=h_A.device))
         real_loss = bce(
             disc_logits_A, torch.full_like(disc_logits_A, 1.0 - label_alpha, device=h_A.device))
+        check_logits(disc_logits_BA)
+        check_logits(disc_logits_A)
 
         # Also get stats for downstream KL div
         col_B, _ = self.coloring_tower(c_B, h_B_mask, spk_B)
