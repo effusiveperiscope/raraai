@@ -141,9 +141,9 @@ class V05TrainingModule(pl.LightningModule):
                 y_A=y_A_aug, y_lengths_A=batch['A']['lengths'],
                 # 0 to maximum
                 lambda_grl = self.step_lerp(
-                    max=self.config.lam_grl_max,
-                    start=self.config.stage1_train_step, # GRL should not have any coefficient before this
-                    end=self.config.lam_grl_end
+                    max=self.config.train.lam_grl_max,
+                    start=self.config.train.stage1_train_step, # GRL should not have any coefficient before this
+                    end=self.config.train.lam_grl_end
                 ),
                 label_alpha = self.config.train.label_alpha
             )
