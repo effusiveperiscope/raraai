@@ -168,12 +168,13 @@ class SynthesizerV05(nn.Module):
         g_A = self.emb_g(spks_A).unsqueeze(-1)  # [b, 256, 1]
         g_B = self.emb_g(spks_B).unsqueeze(-1)  # [b, 256, 1]
 
-        c_loss, align_loss, fake_loss, real_loss, \
+        spk_loss, fake_loss, real_loss, \
             m_p_A, logs_p_A, m_p_B, logvar_p_B, z_A, z_B = self.enc_p.train_step(
                 h_A = phone_A, h_A_mask = commons.sequence_mask(phone_lengths_A, phone_A.size(1)),
                 h_B = phone_B, h_B_mask = commons.sequence_mask(phone_lengths_B, phone_B.size(1)),
                 spk_A = g_A.squeeze(-1), 
                 spk_B = g_B.squeeze(-1),
+                ids_A = spks_A,
                 lambda_grl=lambda_grl, label_alpha=label_alpha
             )
         logs_p_A = rearrange(logs_p_A, 'b t c -> b c t')
@@ -190,7 +191,7 @@ class SynthesizerV05(nn.Module):
 
         return o, z_mask, ids_slice, \
             (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
-            (c_loss, align_loss, fake_loss, real_loss)
+            (spk_loss, fake_loss, real_loss)
 
     @torch.jit.ignore
     def step_finetune(

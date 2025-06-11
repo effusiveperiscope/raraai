@@ -11,7 +11,7 @@ class SpeakerClassifierCNN(nn.Module):
         super().__init__()
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
-                in_channels=config.model.inter_channels, out_channels=64, 
+                in_channels=config.model.content_size, out_channels=64, 
                 kernel_size=7, padding=3, spectral_norm=True),
             DepthwiseSeparableConv1d(
                 in_channels=64, out_channels=128, 
@@ -26,11 +26,13 @@ class SpeakerClassifierCNN(nn.Module):
                 in_channels=512, out_channels=1024, 
                 kernel_size=1, padding=0, spectral_norm=True),
         ])
-        self.out_proj = nn.Linear(config.model.inter_channels, config.model.spk_embed_dim)
+        self.out_proj = nn.Linear(1024, config.model.spk_embed_dim)
 
     def forward(self, x, x_mask):
+        x = rearrange(x, "b t c -> b c t")
         for conv in self.convs:
-            x = F.silu(conv(x) * x_mask.unsqueeze(-1))
+            x = F.silu(conv(x) * x_mask.unsqueeze(1))
+        x = rearrange(x, "b c t -> b t c")
         x = self.out_proj(x)
         x = x.mean(dim=1)
         return x

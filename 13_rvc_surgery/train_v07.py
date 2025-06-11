@@ -234,6 +234,7 @@ class V05TrainingModule(pl.LightningModule):
             'loss_kl': loss_kl,
             'loss_kl_reg': loss_kl_reg,
             'loss_fm': loss_fm,
+            'loss_spk': spk_loss,
             #'loss_c': c_loss,
             #'loss_align': align_loss,
             'loss_fake': fake_loss,
@@ -264,6 +265,7 @@ class V05TrainingModule(pl.LightningModule):
         self.log('kl_loss', ret['loss_kl'], logger=True)
         self.log('loss_kl_reg', ret['loss_kl_reg'], logger=True, on_step=True)
         self.log('fm_loss', ret['loss_fm'], logger=True)
+        self.log('spk_loss', ret['loss_spk'], logger=True)
         #self.log('c_loss', ret['loss_c'], logger=True)
         #self.log('align_loss', ret['loss_align'], logger=True)
         self.log('spk_fake_loss', ret['loss_fake'], logger=True)
@@ -286,6 +288,7 @@ class V05TrainingModule(pl.LightningModule):
         self.log('val_mel_loss', ret['loss_mel'], on_epoch=True, logger=True)
         self.log('val_kl_loss', ret['loss_kl'], on_epoch=True, logger=True)
         self.log('val_fm_loss', ret['loss_fm'], on_epoch=True, logger=True)
+        self.log('val_spk_loss', ret['loss_spk'], on_epoch=True, logger=True)
         #self.log('val_c_loss', ret['loss_c'], on_epoch=True, logger=True)
         #self.log('val_align_loss', ret['loss_align'], on_epoch=True, logger=True)
         self.log('val_spk_fake_loss', ret['loss_fake'], on_epoch=True, logger=True)
