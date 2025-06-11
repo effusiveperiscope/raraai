@@ -34,7 +34,8 @@ class SpeakerClassifierCNN(nn.Module):
             x = F.silu(conv(x) * x_mask.unsqueeze(1))
         x = rearrange(x, "b c t -> b t c")
         x = self.out_proj(x)
-        x = x.mean(dim=1)
+        x = (x * x_mask.unsqueeze(-1)).sum(dim=1) / (
+            x_mask.sum(dim=1).unsqueeze(-1))
         return x
 
 class SpeakerClassifier(nn.Module):
