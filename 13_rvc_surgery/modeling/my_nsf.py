@@ -194,6 +194,7 @@ class MyGeneratorNSF(torch.nn.Module):
         upsample_initial_channel,
         upsample_kernel_sizes,
         gin_channels,
+        spk_embed_dim,
         sr,
         is_half=False,
     ):
@@ -212,6 +213,7 @@ class MyGeneratorNSF(torch.nn.Module):
         )
         resblock = modules.ResBlock1 if resblock == "1" else modules.ResBlock2
 
+        self.emb_g = nn.Embedding(spk_embed_dim, gin_channels)
         if gin_channels != 0:
             self.gin_conds = nn.ModuleList()
 
@@ -275,8 +277,9 @@ class MyGeneratorNSF(torch.nn.Module):
 
         self.lrelu_slope = modules.LRELU_SLOPE
 
-    def forward(self, x, f0, g: Optional[torch.Tensor] = None):
+    def forward(self, x, f0, spk_id):
         har_source, noi_source = self.m_source(f0, self.upp)
+        g = self.emb_g(spk_id).unsqueeze(-1)
 
         noi_source = rearrange(noi_source, "b t 1 -> b 1 t")
         har_source = rearrange(har_source, "b t 1 -> b 1 t") # This should be 0 at unvoiced parts anyways

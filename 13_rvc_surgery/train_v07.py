@@ -39,9 +39,12 @@ class V05TrainingModule(pl.LightningModule):
             # for param in self.net_g.dec.parameters():
                 # param.requires_grad = True
 
-            # Train speaker content classifier and latent discriminator
+            # Train speaker content classifier, latent discriminator, and speaker embeddings
             for param in self.net_g.parameters():
-                param.requires_grad = False
+                if 'emb_g' not in param.name:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
             for param in self.net_d.parameters():
                 param.requires_grad = False
             for param in self.net_g.enc_p.speaker_classifier.parameters():

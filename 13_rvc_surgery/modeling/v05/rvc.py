@@ -7,8 +7,8 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from svc_helper.svc.rvc.lib.infer_pack.models import PosteriorEncoder, ResidualCouplingBlock, GeneratorNSF
-from svc_helper.svc.rvc.lib.infer_pack import commons
+from svc_helper.svc.rvc.lib.infer_pack.models import ResidualCouplingBlock, GeneratorNSF
+from svc_helper.svc.rvc.lib.infer_pack import commons, modules
 from modeling.v05.encoder import V05Encoder
 from modeling.my_nsf import MyGeneratorNSF
 from commons import count_parameters
@@ -101,6 +101,7 @@ class SynthesizerV05(nn.Module):
             upsample_initial_channel,
             upsample_kernel_sizes,
             gin_channels=gin_channels,
+            spk_embed_dim=spk_embed_dim,
             sr=sr,
             is_half=kwargs["is_half"],
         )
@@ -112,11 +113,12 @@ class SynthesizerV05(nn.Module):
             1,
             16,
             gin_channels=gin_channels,
+            spk_embed_dim=spk_embed_dim,
         )
         self.flow = ResidualCouplingBlock(
-            inter_channels, hidden_channels, 5, 1, 3, gin_channels=gin_channels
+            inter_channels, hidden_channels, 5, 1, 3, 
+            gin_channels=gin_channels, spk_embed_dim=spk_embed_dim
         )
-        self.emb_g = nn.Embedding(self.spk_embed_dim, gin_channels)
         logger.debug(
             "gin_channels: "
             + str(gin_channels)
@@ -165,16 +167,12 @@ class SynthesizerV05(nn.Module):
         y_A, y_lengths_A,
         lambda_grl, label_alpha
     ):  
-        g_A = self.emb_g(spks_A).unsqueeze(-1)  # [b, 256, 1]
-        g_B = self.emb_g(spks_B).unsqueeze(-1)  # [b, 256, 1]
-
         spk_loss, fake_loss, real_loss, \
             m_p_A, logs_p_A, m_p_B, logvar_p_B, z_A, z_B = self.enc_p.train_step(
                 h_A = phone_A, h_A_mask = commons.sequence_mask(phone_lengths_A, phone_A.size(1)),
                 h_B = phone_B, h_B_mask = commons.sequence_mask(phone_lengths_B, phone_B.size(1)),
-                spk_A = g_A.squeeze(-1), 
-                spk_B = g_B.squeeze(-1),
-                ids_A = spks_A,
+                spk_A = spks_A,
+                spk_B = spks_B,
                 lambda_grl=lambda_grl, label_alpha=label_alpha
             )
         logs_p_A = rearrange(logs_p_A, 'b t c -> b c t')
@@ -182,12 +180,12 @@ class SynthesizerV05(nn.Module):
 
         z, m_q_A, logs_q_A, z_mask = self.enc_q(rearrange(y_A, 'b t c -> b c t'), y_lengths_A, g=g_A)
 
-        z_p = self.flow(z, z_mask, g=g_A)
+        z_p = self.flow(z, z_mask, spk_id=spks_A)
         z_slice, ids_slice = commons.rand_slice_segments(
             z, y_lengths_A, self.segment_size
         )
         pitchf_A = commons.slice_segments2(pitchf_A, ids_slice, self.segment_size)
-        o = self.dec(z_slice, pitchf_A, g=g_A)
+        o = self.dec(z_slice, pitchf_A, spk_id=spks_A)
 
         return o, z_mask, ids_slice, \
             (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
@@ -247,6 +245,133 @@ class SynthesizerV05(nn.Module):
         z = self.flow(z_p, x_mask, g=g, reverse=True)
         o = self.dec(z * x_mask, nsff0, g=g)
         return o, x_mask, (z, z_p, m_p, logs_p)
+
+class PosteriorEncoder(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        hidden_channels,
+        kernel_size,
+        dilation_rate,
+        n_layers,
+        gin_channels=0,
+    ):
+        super(PosteriorEncoder, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.gin_channels = gin_channels
+
+        self.pre = nn.Conv1d(in_channels, hidden_channels, 1)
+        self.enc = modules.WN(
+            hidden_channels,
+            kernel_size,
+            dilation_rate,
+            n_layers,
+            gin_channels=gin_channels,
+        )
+        self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
+
+    def forward(
+        self, x: torch.Tensor, x_lengths: torch.Tensor, g: Optional[torch.Tensor] = None
+    ):
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
+            x.dtype
+        )
+        x = self.pre(x) * x_mask
+        x = self.enc(x, x_mask, g=g)
+        stats = self.proj(x) * x_mask
+        m, logs = torch.split(stats, self.out_channels, dim=1)
+        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
+        return z, m, logs, x_mask
+
+    def remove_weight_norm(self):
+        self.enc.remove_weight_norm()
+
+    def __prepare_scriptable__(self):
+        for hook in self.enc._forward_pre_hooks.values():
+            if (
+                hook.__module__ == "torch.nn.utils.weight_norm"
+                and hook.__class__.__name__ == "WeightNorm"
+            ):
+                torch.nn.utils.remove_weight_norm(self.enc)
+        return self
+
+class ResidualCouplingBlock(nn.Module):
+    def __init__(
+        self,
+        channels,
+        hidden_channels,
+        kernel_size,
+        dilation_rate,
+        n_layers,
+        n_flows=4,
+        gin_channels=0,
+        spk_embed_dim=1,
+    ):
+        super(ResidualCouplingBlock, self).__init__()
+        self.channels = channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.n_layers = n_layers
+        self.n_flows = n_flows
+        self.gin_channels = gin_channels
+
+        self.flows = nn.ModuleList()
+        for i in range(n_flows):
+            self.flows.append(
+                modules.ResidualCouplingLayer(
+                    channels,
+                    hidden_channels,
+                    kernel_size,
+                    dilation_rate,
+                    n_layers,
+                    gin_channels=gin_channels,
+                    mean_only=True,
+                )
+            )
+            self.flows.append(modules.Flip())
+        self.emb_g = nn.Embedding(spk_embed_dim, channels)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_mask: torch.Tensor,
+        spk_id: Optional[torch.Tensor] = None,
+        reverse: bool = False,
+    ):
+        if spk_id is not None:
+            g = self.emb_g(spk_id).unsqueeze(-1)
+        else:
+            g = None
+
+        if not reverse:
+            for flow in self.flows:
+                x, _ = flow(x, x_mask, g=g, reverse=reverse)
+        else:
+            for flow in self.flows[::-1]:
+                x, _ = flow.forward(x, x_mask, g=g, reverse=reverse)
+        return x
+
+    def remove_weight_norm(self):
+        for i in range(self.n_flows):
+            self.flows[i * 2].remove_weight_norm()
+
+    def __prepare_scriptable__(self):
+        for i in range(self.n_flows):
+            for hook in self.flows[i * 2]._forward_pre_hooks.values():
+                if (
+                    hook.__module__ == "torch.nn.utils.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    torch.nn.utils.remove_weight_norm(self.flows[i * 2])
+
+        return self
 
 if __name__ == '__main__':
     from omegaconf import OmegaConf
