@@ -190,9 +190,10 @@ class V05Encoder(nn.Module):
         u_A = self.base_encoder(h_A, src_key_padding_mask=~h_A_mask)
         c_A = self.content_encoder(u_A, h_A_mask)
 
-        # Content is speaker agnostic.
+        # Content is locally speaker agnostic.
         spk_logits = self.speaker_classifier(grad_reverse(c_A, lambda_grl), h_A_mask)
-        spk_loss = F.cross_entropy(spk_logits, ids_A)
+        ce_loss = nn.CrossEntropyLoss(label_smoothing=label_alpha)
+        spk_loss = ce_loss(spk_logits, ids_A)
 
         # Alignment of u_A space with color space.
         col_A, cf_A = self.coloring_tower(c_A, h_A_mask, spk_A)

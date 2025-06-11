@@ -8,6 +8,7 @@ import math
 
 class SpeakerClassifierCNN(nn.Module):
     def __init__(self, config : OmegaConf):
+        super().__init__()
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
                 in_channels=config.model.inter_channels, out_channels=64, 
