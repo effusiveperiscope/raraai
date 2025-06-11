@@ -57,11 +57,17 @@ class ColoringTower(nn.Module):
         ])
         self.out_proj = nn.Linear(config.model.inter_channels, config.model.inter_channels)
         self.config = config
+        self.emb_g = nn.Embedding(config.model.spk_embed_dim, config.model.gin_channels)
 
-    def forward(self, x, mask, spk):
+    def forward(self, x, mask, spk_id):
         # g is embedded speaker [batch_size, inter_channels]
         x = self.in_proj(x)
         x = rearrange(x, "b t c -> b c t")
+
+        if spk_id is not None:
+            g = self.emb_g(spk_id)
+        else:
+            g = None
 
         content_feature = None
         for i,layer in enumerate(self.convs):
@@ -73,7 +79,7 @@ class ColoringTower(nn.Module):
             x = F.silu(x)
             x = layer(x)
 
-            gamma, beta = self.conditions[i](spk.unsqueeze(1))
+            gamma, beta = self.conditions[i](g.unsqueeze(1))
             x = rearrange(x, "b c t -> b t c")
             x = gamma * x + beta
             x = rearrange(x, "b t c -> b c t")
@@ -125,7 +131,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
         # Disable transformer encoder for now
         # x = self.sipe(x)
         # x_enc = self.encoder(x, src_key_padding_mask=~mask)
-        g = self.emb_g(spk).unsqueeze(-1)
+        g = self.emb_g(spk).unsqueeze(1)
 
         x = self.in_proj(x)
         x = rearrange(x, "b t c -> b c t")
@@ -135,7 +141,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
 
             x = F.silu(x)
 
-            gamma, beta = self.conditions[i](spk.unsqueeze(1))
+            gamma, beta = self.conditions[i](g)
             x = rearrange(x, "b c t -> b t c")
             x = gamma * x + beta
             x = rearrange(x, "b t c -> b c t")
@@ -176,18 +182,11 @@ class V05Encoder(nn.Module):
         self.final_proj = nn.Sequential(
             nn.SiLU(),
             nn.Linear(config.model.inter_channels, config.model.inter_channels * 2))
-        self.emb_g = nn.Embedding(
-            config.model.spk_embed_dim,
-            config.model.inter_channels
-        )
 
     def train_step(self,
         h_A, h_A_mask, # h is hubert features
         h_B, h_B_mask,
         spk_A, spk_B, lambda_grl, label_alpha=0.1):
-
-        g_A = self.emb_g(spk_A).unsqueeze(-1)
-        g_B = self.emb_g(spk_B).unsqueeze(-1)
 
         h_A = self.in_proj(h_A) 
         h_A = self.sipe(h_A)
@@ -206,14 +205,14 @@ class V05Encoder(nn.Module):
         spk_loss = ce_loss(spk_logits, spk_A)
 
         # Alignment of u_A space with color space.
-        col_A, cf_A = self.coloring_tower(c_A, h_A_mask, g_A)
+        col_A, cf_A = self.coloring_tower(c_A, h_A_mask, spk_A)
 
         # Coloring is speaker-correct.
         # Discriminator wants to classify BA as fake, A as real
         # Upstream network wants to trick discriminator
         u_B = self.base_encoder(h_B, src_key_padding_mask=~h_B_mask)
         c_B = self.content_encoder(u_B, h_B_mask)
-        col_BA, _ = self.coloring_tower(c_B, h_B_mask, g_A)
+        col_BA, _ = self.coloring_tower(c_B, h_B_mask, spk_A)
 
         disc_logits_BA = self.speaker_discriminator(
             grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
@@ -226,7 +225,7 @@ class V05Encoder(nn.Module):
             disc_logits_A, torch.full_like(disc_logits_A, 1.0 - label_alpha, device=h_A.device))
 
         # Also get stats for downstream KL div
-        col_B, _ = self.coloring_tower(c_B, h_B_mask, g_B)
+        col_B, _ = self.coloring_tower(c_B, h_B_mask, spk_B)
         p_A = self.final_proj(col_A)
         p_B = self.final_proj(col_B)
         m_p_A, logs_p_A = p_A.chunk(2, dim=-1)
@@ -247,10 +246,8 @@ class V05Encoder(nn.Module):
         h = self.sipe(h)
         u = self.base_encoder(h, src_key_padding_mask=~h_mask)
 
-        spk_emb = self.emb_g(spk_id).unsqueeze(-1)
-
         c = self.content_encoder(u, h_mask)
-        col, _ = self.coloring_tower(c, h_mask, spk_emb)
+        col, _ = self.coloring_tower(c, h_mask, spk_id)
 
         p = self.final_proj(col)
 

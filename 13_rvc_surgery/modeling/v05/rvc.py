@@ -178,7 +178,7 @@ class SynthesizerV05(nn.Module):
         logs_p_A = rearrange(logs_p_A, 'b t c -> b c t')
         m_p_A = rearrange(m_p_A, 'b t c -> b c t')
 
-        z, m_q_A, logs_q_A, z_mask = self.enc_q(rearrange(y_A, 'b t c -> b c t'), y_lengths_A, g=g_A)
+        z, m_q_A, logs_q_A, z_mask = self.enc_q(rearrange(y_A, 'b t c -> b c t'), y_lengths_A, spk_id=spks_A)
 
         z_p = self.flow(z, z_mask, spk_id=spks_A)
         z_slice, ids_slice = commons.rand_slice_segments(
@@ -201,21 +201,20 @@ class SynthesizerV05(nn.Module):
         y,
         y_lengths,
     ): 
-        g = self.emb_g(spks).unsqueeze(-1)
         _, m_p, logs_p, u, c, col = self.enc_p(
             h=phone, h_mask=commons.sequence_mask(phone_lengths, phone.size(1)),
-            spk_emb=g.squeeze(-1)
+            spk_id=spks
         )
 
         z, m_q, logs_q, z_mask = self.enc_q(
-            rearrange(y, 'b t c -> b c t'), y_lengths, g=g
+            rearrange(y, 'b t c -> b c t'), y_lengths, spk_id=spks
         )
-        z_p = self.flow(z, z_mask, g=g)
+        z_p = self.flow(z, z_mask, spk_id=spks)
         z_slice, ids_slice = commons.rand_slice_segments(
             z, y_lengths, self.segment_size
         )
         pitchf = commons.slice_segments2(pitchf, ids_slice, self.segment_size)
-        o = self.dec(z_slice, pitchf, g=g)
+        o = self.dec(z_slice, pitchf, spk_id=spks)
 
         return o, z_mask, ids_slice, (z, z_p, m_p, logs_p, m_q, logs_q)
 
@@ -229,11 +228,10 @@ class SynthesizerV05(nn.Module):
         sid: torch.Tensor,
         noise_scale: float = 0.66666,
     ):
-        g = self.emb_g(sid).unsqueeze(-1)
         _, m_p, logs_p, u, c, col = self.enc_p(
             h=phone, 
             h_mask = commons.sequence_mask(phone_lengths, phone.size(1)),
-            spk_emb=g.squeeze(-1), noise_scale=noise_scale)
+            spk_id=sid, noise_scale=noise_scale)
         logs_p = rearrange(logs_p, 'b t c -> b c t')
         m_p = rearrange(m_p, 'b t c -> b c t')
 
@@ -242,8 +240,8 @@ class SynthesizerV05(nn.Module):
         x_mask = commons.sequence_mask(phone_lengths, phone.size(1)).unsqueeze(1)
         z_p = z_p * x_mask
 
-        z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec(z * x_mask, nsff0, g=g)
+        z = self.flow(z_p, x_mask, spk_id=sid, reverse=True)
+        o = self.dec(z * x_mask, nsff0, spk_id=sid)
         return o, x_mask, (z, z_p, m_p, logs_p)
 
 class PosteriorEncoder(nn.Module):
@@ -256,6 +254,7 @@ class PosteriorEncoder(nn.Module):
         dilation_rate,
         n_layers,
         gin_channels=0,
+        spk_embed_dim=1,
     ):
         super(PosteriorEncoder, self).__init__()
         self.in_channels = in_channels
@@ -275,10 +274,15 @@ class PosteriorEncoder(nn.Module):
             gin_channels=gin_channels,
         )
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
+        self.emb_g = nn.Embedding(spk_embed_dim, gin_channels)
 
     def forward(
-        self, x: torch.Tensor, x_lengths: torch.Tensor, g: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, x_lengths: torch.Tensor, spk_id: Optional[torch.Tensor] = None
     ):
+        if spk_id is not None:
+            g = self.emb_g(spk_id).unsqueeze(-1)
+        else:
+            g = None
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         )
@@ -336,7 +340,7 @@ class ResidualCouplingBlock(nn.Module):
                 )
             )
             self.flows.append(modules.Flip())
-        self.emb_g = nn.Embedding(spk_embed_dim, channels)
+        self.emb_g = nn.Embedding(spk_embed_dim, gin_channels)
 
     def forward(
         self,
