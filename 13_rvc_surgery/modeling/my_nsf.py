@@ -278,10 +278,10 @@ class MyGeneratorNSF(torch.nn.Module):
         self.lrelu_slope = modules.LRELU_SLOPE
 
     def forward(self, x, f0, spk_id):
-        har_source, noi_source = self.m_source(f0, self.upp)
+        # We don't actually need the noise from here
+        har_source, _ = self.m_source(f0, self.upp) 
         g = self.emb_g(spk_id).unsqueeze(-1)
 
-        noi_source = rearrange(noi_source, "b t 1 -> b 1 t")
         har_source = rearrange(har_source, "b t 1 -> b 1 t") # This should be 0 at unvoiced parts anyways
         uv = har_source <= 0
         uv = uv.long()
@@ -304,6 +304,10 @@ class MyGeneratorNSF(torch.nn.Module):
                 # We probably -shouldn't- add the last signal (conv with 1 kernel)
                 # It is like adding shredded chicken on top of a baked chicken
                 if i < self.num_upsamples - 1: 
+                    # Resample noise source at every upsample
+                    # Hypothesis - the old approach (reusing same noise across upsampling)
+                    # Has risk of introducing unwanted periodicities/correlations
+                    noi_source = torch.randn_like(har_source)
                     x = x + noise_convs(uv * noi_source + (1 - uv) * har_source *
                         self.m_source.l_sin_gen.sine_amp / 3)
                     x = x + har_convs(har_source) # already scaled by sine_amp
