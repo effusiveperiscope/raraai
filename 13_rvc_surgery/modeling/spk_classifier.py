@@ -9,9 +9,10 @@ import math
 class SpeakerClassifierCNN(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
+        self.in_proj = nn.Linear(config.model.content_size, config.model.disc_channels)
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
-                in_channels=config.model.content_size, 
+                in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 
                 kernel_size=7, padding=3, spectral_norm=True),
             DepthwiseSeparableConv1d(
@@ -39,6 +40,7 @@ class SpeakerClassifierCNN(nn.Module):
         self.out_proj = nn.Linear(config.model.disc_channels, config.model.spk_embed_dim)
 
     def forward(self, x, x_mask):
+        x = self.in_proj(x)
         x = rearrange(x, "b t c -> b c t")
         for i, conv in enumerate(self.convs):
             xs = x
