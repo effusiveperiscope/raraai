@@ -58,6 +58,14 @@ class V05TrainingModule(pl.LightningModule):
             for param in self.net_d.parameters():
                 param.requires_grad = True
 
+    def step_lerp(self, min=0, max=1, start=0, end=10000):
+        if self.global_step < start:
+            return min
+        elif self.global_step < end:
+            return (self.global_step - start) / (end - start) * (max - min) + min
+        else:
+            return max
+
     def test(self):
         print('=== Testing ===')
         self.net_g.eval()
@@ -132,9 +140,11 @@ class V05TrainingModule(pl.LightningModule):
                 spks_A=spks_A, spks_B=spks_B,
                 y_A=y_A_aug, y_lengths_A=batch['A']['lengths'],
                 # 0 to maximum
-                lambda_grl = ((self.global_step / \
-                     self.config.train.lam_grl_steps) * \
-                         self.config.train.lam_grl_max),
+                lambda_grl = self.step_lerp(
+                    max=self.config.lam_grl_max,
+                    start=self.config.stage1_train_step, # GRL should not have any coefficient before this
+                    end=self.config.lam_grl_end
+                ),
                 label_alpha = self.config.train.label_alpha
             )
 
