@@ -3,6 +3,27 @@ from torch import nn
 from modeling.spk_cond import FiLMGenerator
 from modeling.commons import SinusoidalPositionalEncoding
 import torch.nn.functional as F
+from einops import rearrange
+
+class SiLUResBlock(nn.Module):
+    def __init__(self, convs : list):
+        super().__init__()
+        self.convs = nn.ModuleList(convs)
+        self.norms = nn.ModuleList([nn.GroupNorm(1, c.out_channels) for c in self.convs])
+
+    def forward(self, x, channels_last=True):
+        if channels_last:
+            x = rearrange(x, "b t c -> b c t")
+
+        for i,conv in enumerate(self.convs):
+            xs = x
+            x = F.silu(x)
+            x = conv(x)
+            x = self.norms[i](x)
+            x = x + xs
+
+        if channels_last:
+            x = rearrange(x, "b c t -> b t c")
 
 class F0DeltaPredictor(nn.Module):
     def __init__(self, 
@@ -10,8 +31,6 @@ class F0DeltaPredictor(nn.Module):
         pitch_dim: int,
         spk_emb_dim: int,
         hidden_dim: int,
-        n_layers_spk: int = 2,
-        n_layers_speech: int = 2,
         dropout: float = 0.1):
         super().__init__()
 
@@ -19,44 +38,34 @@ class F0DeltaPredictor(nn.Module):
         self.pitch_emb = nn.Embedding(pitch_dim, hidden_dim)
         self.speech_cond = FiLMGenerator(hidden_dim, hidden_dim)
         self.spk_cond = FiLMGenerator(spk_emb_dim, hidden_dim)
-        self.sipe = SinusoidalPositionalEncoding(hidden_dim)
 
-        self.spk_encode = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=hidden_dim,
-                nhead=8,
-                dim_feedforward=768,
-                activation=F.silu,
-                dropout=dropout
-            ),
-            num_layers=n_layers_spk
-        )
-        self.speech_encode = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=hidden_dim,
-                nhead=8,
-                dim_feedforward=768,
-                activation=F.silu,
-                dropout=dropout
-            ),
-            num_layers=n_layers_speech
-        )
+        self.speech_conv = SiLUResBlock([
+            nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)])
+        self.inter_conv = SiLUResBlock([
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)])
+        self.final_conv = SiLUResBlock([
+            nn.Conv1d(hidden_dim, hidden_dim, 5, padding=3),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, 1, 1, padding=0)])
 
     def forward(self, quant_pitch, speech, speech_mask,
         spk_emb):
 
         x = self.pitch_emb(quant_pitch) * speech_mask
-        x = self.sipe(quant_pitch)
 
         speech = self.speech_proj(speech) * speech_mask
+        speech = self.speech_conv(speech) * speech_mask
 
         gamma, beta = self.spk_cond(spk_emb.unsqueeze(1))
         x = gamma * x + beta
 
-        x = self.spk_encode(x, src_key_padding_mask=~speech_mask)
+        X = self.inter_conv(x)
 
         gamma, beta = self.speech_cond(speech)
         x = gamma * x + beta
 
-        x = self.speech_encode(x, src_key_padding_mask=~speech_mask)
         return x
