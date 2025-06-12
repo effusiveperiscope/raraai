@@ -130,6 +130,15 @@ class V05TrainingModule(pl.LightningModule):
         # Spec noise
         y_A_aug = y_A_aug + torch.randn_like(y_A_aug) * self.config.train.spec_aug_scale
 
+        if self.global_step % self.config.train.grl_every_step == 0:
+            lam_grl = self.step_lerp(
+                max=self.config.train.lam_grl_max,
+                start=self.config.train.stage1_train_step, # GRL should not have any coefficient before this
+                end=self.config.train.lam_grl_end
+            )
+        else:
+            lam_grl = 0
+
         # During stage 1, the discriminator isn't touched by any gradients
         y_hat, z_mask, ids_slice, \
             (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
@@ -140,11 +149,7 @@ class V05TrainingModule(pl.LightningModule):
                 spks_A=spks_A, spks_B=spks_B,
                 y_A=y_A_aug, y_lengths_A=batch['A']['lengths'],
                 # 0 to maximum
-                lambda_grl = self.step_lerp(
-                    max=self.config.train.lam_grl_max,
-                    start=self.config.train.stage1_train_step, # GRL should not have any coefficient before this
-                    end=self.config.train.lam_grl_end
-                ),
+                lambda_grl = lam_grl,
                 label_alpha = self.config.train.label_alpha
             )
 
