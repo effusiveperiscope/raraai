@@ -1,4 +1,4 @@
-exp_name: v07_test10
+exp_name: v07_test11
 train:
   lr: 1e-5
   batch_size: 8
@@ -12,10 +12,10 @@ train:
   lam_kl: 1.0
   lam_kl_reg_logs: 0.2
   lam_kl_reg_mus: 0.02
-  lam_grl_max: 0.01
-  lam_grl_end: 60000
+  lam_grl_max: 0.05
+  lam_grl_end: 20000
   lam_content: 0.00
-  grl_every_step: 5
+  grl_every_step: 3
   lam_align: 0.0
   lam_spk: 8.0
   phone_aug_scale: 0.5
@@ -25,7 +25,7 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 10000
+  stage1_train_step: 0
   weight_decay: 1e-3
 model:
   segment_size: 32
