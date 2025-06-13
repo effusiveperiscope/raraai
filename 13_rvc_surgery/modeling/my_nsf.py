@@ -301,16 +301,13 @@ class MyGeneratorNSF(torch.nn.Module):
                     beta = rearrange(beta, "b 1 c -> b c 1")
                     x = gamma * x + beta
 
-                # We probably -shouldn't- add the last signal (conv with 1 kernel)
-                # It is like adding shredded chicken on top of a baked chicken
-                if i < self.num_upsamples - 1: 
-                    # Resample noise source at every upsample
-                    # Hypothesis - the old approach (reusing same noise across upsampling)
-                    # Has risk of introducing unwanted periodicities/correlations
-                    noi_source = torch.randn_like(har_source)
-                    x = x + noise_convs(uv * noi_source + (1 - uv) * har_source *
-                        self.m_source.l_sin_gen.sine_amp / 3)
-                    x = x + har_convs(har_source) # already scaled by sine_amp
+                # Resample noise source at every upsample
+                # Hypothesis - the old approach (reusing same noise across upsampling)
+                # Has risk of introducing unwanted periodicities/correlations
+                noi_source = torch.randn_like(har_source)
+                x = x + noise_convs(uv * noi_source + (1 - uv) * har_source *
+                    self.m_source.l_sin_gen.sine_amp / 3)
+                x = x + har_convs(har_source) # already scaled by sine_amp
 
                 xs: Optional[torch.Tensor] = None
                 l = [i * self.num_kernels + j for j in range(self.num_kernels)]
