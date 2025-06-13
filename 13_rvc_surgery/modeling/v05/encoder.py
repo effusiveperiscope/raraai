@@ -9,6 +9,27 @@ from modeling.spk_cond import FiLMGenerator
 from commons import check_logits
 from einops import rearrange
 
+class PitchConditioner(nn.Module):
+    def __init__(self, config : OmegaConf):
+        super().__init__()
+        self.pitch_uv_emb = nn.Parameter(torch.randn(config.model.inter_channels))
+        self.pitch_proj = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.SiLU(),
+            nn.Linear(32, config.model.inter_channels)
+        )
+
+    def forward(self, pitch):
+        mel_pitch = 1127 * torch.log1p(pitch / 700)
+        mel_pitch = mel_pitch.unsqueeze(-1)
+
+        voiced_mask = (pitch > 0).float().unsqueeze(-1)
+
+        pitch_feat = self.pitch_proj(mel_pitch) * voiced_mask
+        pitch_feat += (1 - voiced_mask) * self.pitch_uv_emb
+
+        return pitch_feat
+
 class ContentEncoder(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
@@ -175,7 +196,7 @@ class V05Encoder(nn.Module):
             ),
             num_layers=3
         )
-        self.pitch_emb = nn.Embedding(256, config.model.inter_channels)
+        self.pitch_cond = PitchConditioner(config)
         self.content_encoder = ContentEncoder(config)
         self.coloring_tower = ColoringTower(config)
         self.speaker_classifier = SpeakerClassifierCNN(config)
@@ -191,10 +212,10 @@ class V05Encoder(nn.Module):
         pitch_A, pitch_B,
         spk_A, spk_B, lambda_grl, label_alpha=0.1):
 
-        h_A = self.in_proj(h_A) + self.pitch_emb(pitch_A)
+        h_A = self.in_proj(h_A) + self.pitch_cond(pitch_A)
         h_A = self.sipe(h_A)
 
-        h_B = self.in_proj(h_B) + self.pitch_emb(pitch_B)
+        h_B = self.in_proj(h_B) + self.pitch_cond(pitch_B)
         h_B = self.sipe(h_B)
 
         # RVC losses are downstream; not included in here.
@@ -249,7 +270,7 @@ class V05Encoder(nn.Module):
             m_p_A, logs_p_A, m_p_B, logs_p_B, z_A, z_B
 
     def forward(self, h, h_mask, pitch, spk_id, noise_scale=1.0):
-        h = self.in_proj(h) + self.pitch_emb(pitch)
+        h = self.in_proj(h) + self.pitch_cond(pitch)
         h = self.sipe(h)
         u = self.base_encoder(h, src_key_padding_mask=~h_mask)
 

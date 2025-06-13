@@ -46,7 +46,7 @@ class AltEncoder768(nn.Module):
         self.emb_phone = nn.Linear(768, hidden_channels)
         self.lrelu = nn.LeakyReLU(0.1, inplace=True)
         if f0 == True:
-            self.emb_pitch = nn.Embedding(256, hidden_channels)  # pitch 256
+            self.emb_pitch = nn.Linear(1, hidden_channels)  # pitch 256
         self.encoder = attentions.Encoder(
             hidden_channels,
             filter_channels,

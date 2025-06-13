@@ -113,7 +113,7 @@ class V05TrainingModule(pl.LightningModule):
         phone_B = batch['B']['rvc_feat']
         phone_lengths_B = batch['B']['lengths']
         pitch_A = batch['A']['pitch']
-        pitch_B = batch['B']['pitch']
+        pitchf_B = batch['B']['pitch_fine']
         pitchf_A = batch['A']['pitch_fine']
         spks_A = batch['A']['sids']
         spks_B = batch['B']['sids']
@@ -149,8 +149,8 @@ class V05TrainingModule(pl.LightningModule):
             (spk_loss, fake_loss, real_loss) = self.net_g(
                 phone_A=phone_A_aug, phone_lengths_A=phone_lengths_A,
                 phone_B=phone_B_aug, phone_lengths_B=phone_lengths_B,
-                pitch_A=pitch_A, pitch_B=pitch_B,
                 pitchf_A=pitchf_A, 
+                pitchf_B=pitchf_B,
                 spks_A=spks_A, spks_B=spks_B,
                 y_A=y_A_aug, y_lengths_A=batch['A']['lengths'],
                 # 0 to maximum

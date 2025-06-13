@@ -1,4 +1,4 @@
-exp_name: v07_test12_with_pitch
+exp_name: v07_test13_with_pitchf
 train:
   lr: 1e-5
   batch_size: 8

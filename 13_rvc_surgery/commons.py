@@ -209,3 +209,8 @@ def check_logits(logits):
 
     # Check if this happens consistently
     print(f"Extreme values (|logit| > 10): {(logits.abs() > 10).sum().item()}")
+
+def f0_to_mel(pitch: torch.Tensor) -> torch.Tensor:
+    """Converts f0 to mel representation."""
+    f0_mel = 1127 * torch.log(1 + pitch / 700)
+    return f0_mel
