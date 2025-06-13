@@ -224,8 +224,8 @@ class V05Encoder(nn.Module):
         c_A = self.content_encoder(u_A, h_A_mask)
 
         # Content is locally speaker agnostic.
-        # 0.1 because this is very sensitive
-        spk_logits = self.speaker_classifier(grad_reverse(c_A, lambda_grl * 0.1), h_A_mask)
+        # This is a little more sensitive than the conditioned discriminator
+        spk_logits = self.speaker_classifier(grad_reverse(c_A, lambda_grl * 0.5), h_A_mask)
         #check_logits(spk_logits)
         ce_loss = nn.CrossEntropyLoss(label_smoothing=label_alpha)
         spk_loss = ce_loss(spk_logits, spk_A)
