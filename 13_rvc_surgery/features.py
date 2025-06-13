@@ -149,10 +149,18 @@ class MyFeatures:
 
         return quantized, codecs, codec_masks
 
-    def get_features(self, data_16k : np.ndarray, data_48k : np.ndarray=None):
+    def get_features(
+        self, data_16k : np.ndarray, data_48k : np.ndarray=None,
+        pitch_shift : int=0):
         data_16k = librosa.util.normalize(data_16k) * 0.95
         if data_48k is not None:
             data_48k = librosa.util.normalize(data_48k) * 0.95
+
+        # [T2]
+        pitch = self.rmvpe_model.extract_pitch(data_16k)
+
+        if pitch_shift != 0:
+            data_16k = librosa.effects.pitch_shift(data_16k, sr=16000, n_steps=pitch_shift)
 
         # [1, T, D]
         if self.extract_hubert:
@@ -172,8 +180,6 @@ class MyFeatures:
             ) # [1, 1025, T]
             spec = rearrange(spec, "1 c t -> 1 t c")
         
-        # [T2]
-        pitch = self.rmvpe_model.extract_pitch(data_16k)
 
         if self.extract_vevo:
             quantized, codecs, _ = self.extract_hubert_codes(

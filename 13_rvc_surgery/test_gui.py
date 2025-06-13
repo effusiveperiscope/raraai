@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/v06_base10_03'
+CHECKPOINTS_ROOT = 'checkpoints/sing_base_test2'
 #CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
@@ -26,6 +26,7 @@ class MainWindow(QMainWindow):
         gui.addCheckpoint(Checkpoint(
             get_checkpoints=self.getCheckpoints, load_checkpoint=self.loadCheckpoint))
         gui.addFileInput(AudioFileInput())
+        gui.addParam(IntParam(label="Feature Transpose", id='feat_transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Coarse Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
         logger.info(f'Checkpoint {checkpoint_name} loaded')
 
     def inferAction(self, data: dict):
+        feat_transpose = data['feat_transpose']
         transpose = data['transpose']
         coarse = data['coarse']
         files = data['audio_files']['files']
@@ -86,7 +88,7 @@ class MainWindow(QMainWindow):
         out = []
         for file in files:
             data_16k, _ = librosa.load(file, sr=16000)
-            feats = self.my_feats.get_features(data_16k)
+            feats = self.my_feats.get_features(data_16k, pitch_shift=feat_transpose)
             lens = torch.tensor([feats['whisp_feat'].shape[1]]).to('cuda')
 
             # Tranpsose
@@ -117,7 +119,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/v06.yaml')
+    config = OmegaConf.load('configs/sing_base.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()
