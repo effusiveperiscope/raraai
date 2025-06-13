@@ -30,33 +30,35 @@ class V05TrainingModule(pl.LightningModule):
 
     def on_train_step_start(self):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
+            raise NotImplementedError()
             self.stage1 = True
-            # Only train decoder
-            # for param in self.net_g.parameters():
-                # param.requires_grad = False
-            # for param in self.net_d.parameters():
-                # param.requires_grad = False
-            # for param in self.net_g.dec.parameters():
-                # param.requires_grad = True
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+            for param in self.net_g.parameters():
+                param.requires_grad = True
 
             # Train speaker content classifier, latent discriminator, and speaker embeddings
-            for param in self.net_g.parameters():
-                if 'emb_g' not in param.name:
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True
-            for param in self.net_d.parameters():
-                param.requires_grad = False
-            for param in self.net_g.enc_p.speaker_classifier.parameters():
-                param.requires_grad = True
-            for param in self.net_g.enc_p.speaker_discriminator.parameters():
-                param.requires_grad = True
+            # for param in self.net_g.parameters():
+            #     if 'emb_g' not in param.name:
+            #         param.requires_grad = False
+            #     else:
+            #         param.requires_grad = True
+            # for param in self.net_d.parameters():
+            #     param.requires_grad = False
+            # for param in self.net_g.enc_p.speaker_classifier.parameters():
+            #     param.requires_grad = True
+            # for param in self.net_g.enc_p.speaker_discriminator.parameters():
+            #     param.requires_grad = True
         else:
             self.stage1 = False
             for param in self.net_g.parameters():
                 param.requires_grad = True
             for param in self.net_d.parameters():
                 param.requires_grad = True
+
+            # Freeze content encoder (?)
+            for param in self.net_g.enc_p.content_encoder.parameters():
+                param.requires_grad = False
 
     def step_lerp(self, min=0, max=1, start=0, end=10000):
         if self.global_step < start:
