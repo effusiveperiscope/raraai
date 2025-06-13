@@ -15,7 +15,7 @@ train:
   lam_grl_max: 0.05
   lam_grl_end: 40000
   lam_content: 0.00
-  grl_every_step: 3
+  grl_every_step: 2
   lam_align: 0.0
   lam_spk: 8.0
   phone_aug_scale: 0.5

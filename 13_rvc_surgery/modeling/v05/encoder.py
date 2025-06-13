@@ -206,6 +206,13 @@ class V05Encoder(nn.Module):
             nn.SiLU(),
             nn.Linear(config.model.inter_channels, config.model.inter_channels * 2))
 
+    def content_only(self, x, mask, pitch):
+        x = self.in_proj(x) + self.pitch_cond(pitch)
+        x = self.sipe(x)
+        x = self.base_encoder(x, src_key_padding_mask=~mask)
+        x = self.content_encoder(x, mask)
+        return x
+
     def train_step(self,
         h_A, h_A_mask, # h is hubert features
         h_B, h_B_mask,
