@@ -162,6 +162,7 @@ class SynthesizerV05(nn.Module):
         self, 
         phone_A, phone_lengths_A, 
         phone_B, phone_lengths_B,
+        pitch_A, pitch_B,
         pitchf_A, 
         spks_A, spks_B,
         y_A, y_lengths_A,
@@ -171,6 +172,7 @@ class SynthesizerV05(nn.Module):
             m_p_A, logs_p_A, m_p_B, logvar_p_B, z_A, z_B = self.enc_p.train_step(
                 h_A = phone_A, h_A_mask = commons.sequence_mask(phone_lengths_A, phone_A.size(1)),
                 h_B = phone_B, h_B_mask = commons.sequence_mask(phone_lengths_B, phone_B.size(1)),
+                pitch_A=pitch_A, pitch_B=pitch_B,
                 spk_A = spks_A,
                 spk_B = spks_B,
                 lambda_grl=lambda_grl, label_alpha=label_alpha
@@ -196,6 +198,7 @@ class SynthesizerV05(nn.Module):
         self,
         phone,
         phone_lengths,
+        pitch,
         pitchf,
         spks,
         y,
@@ -203,7 +206,7 @@ class SynthesizerV05(nn.Module):
     ): 
         _, m_p, logs_p, u, c, col = self.enc_p(
             h=phone, h_mask=commons.sequence_mask(phone_lengths, phone.size(1)),
-            spk_id=spks
+            pitch=pitch, spk_id=spks
         )
 
         z, m_q, logs_q, z_mask = self.enc_q(
@@ -231,6 +234,7 @@ class SynthesizerV05(nn.Module):
         _, m_p, logs_p, u, c, col = self.enc_p(
             h=phone, 
             h_mask = commons.sequence_mask(phone_lengths, phone.size(1)),
+            pitch=pitch,
             spk_id=sid, noise_scale=noise_scale)
         logs_p = rearrange(logs_p, 'b t c -> b c t')
         m_p = rearrange(m_p, 'b t c -> b c t')

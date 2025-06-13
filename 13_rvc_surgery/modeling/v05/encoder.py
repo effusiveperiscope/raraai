@@ -175,6 +175,7 @@ class V05Encoder(nn.Module):
             ),
             num_layers=3
         )
+        self.pitch_emb = nn.Embedding(256, config.model.inter_channels)
         self.content_encoder = ContentEncoder(config)
         self.coloring_tower = ColoringTower(config)
         self.speaker_classifier = SpeakerClassifierCNN(config)
@@ -187,12 +188,13 @@ class V05Encoder(nn.Module):
     def train_step(self,
         h_A, h_A_mask, # h is hubert features
         h_B, h_B_mask,
+        pitch_A, pitch_B,
         spk_A, spk_B, lambda_grl, label_alpha=0.1):
 
-        h_A = self.in_proj(h_A) 
+        h_A = self.in_proj(h_A) + self.pitch_emb(pitch_A)
         h_A = self.sipe(h_A)
 
-        h_B = self.in_proj(h_B) 
+        h_B = self.in_proj(h_B) + self.pitch_emb(pitch_B)
         h_B = self.sipe(h_B)
 
         # RVC losses are downstream; not included in here.
@@ -246,8 +248,8 @@ class V05Encoder(nn.Module):
         return spk_loss, fake_loss, real_loss, \
             m_p_A, logs_p_A, m_p_B, logs_p_B, z_A, z_B
 
-    def forward(self, h, h_mask, spk_id, noise_scale=1.0):
-        h = self.in_proj(h)
+    def forward(self, h, h_mask, pitch, spk_id, noise_scale=1.0):
+        h = self.in_proj(h) + self.pitch_emb(pitch)
         h = self.sipe(h)
         u = self.base_encoder(h, src_key_padding_mask=~h_mask)
 
