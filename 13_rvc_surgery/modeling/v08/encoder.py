@@ -19,7 +19,7 @@ class PitchConditioner(nn.Module):
         mel_pitch = 1127 * torch.log1p(pitch / 700)
         mel_pitch = mel_pitch.unsqueeze(-1)
 
-        voiced_mask = (pitch > 0).float().unsqueeze(-1)
+        voiced_mask = (pitch > 0).to(pitch.dtype).unsqueeze(-1)
 
         pitch_feat = self.pitch_proj(mel_pitch) * voiced_mask
         pitch_feat += (1 - voiced_mask) * self.pitch_uv_emb
@@ -64,15 +64,23 @@ class V08Encoder(nn.Module):
 
     def forward(self, phone: torch.Tensor, pitchf: torch.Tensor, lengths: torch.Tensor):
         if pitchf is None:
-            x = self.emb_phone(phone)
+            x_phone = self.emb_phone(phone)
+            x_phone = x_phone / (x_phone.std(dim=-1, keepdim=True) + 1e-6)
+            x = x_phone
         else:
-            x = self.emb_phone(phone) + self.emb_pitch(pitchf)
+            x_phone = self.emb_phone(phone)
+            x_pitch = self.emb_pitch(pitchf)
+            x_phone = x_phone / (x_phone.std(dim=-1, keepdim=True) + 1e-6)
+            x_pitch = x_pitch / (x_pitch.std(dim=-1, keepdim=True) + 1e-6)
+
+            x = x_phone + x_pitch
         x = x * math.sqrt(self.hidden_channels)  # [b, t, h]
         x = self.lrelu(x)
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(lengths, x.size(2)), 1).to(
             x.dtype
         )
+
         x = self.encoder(x * x_mask, x_mask) # Should run GRL here
         pre_proj_x = x
         spk_feat_pred = self.spk_classifier(x)

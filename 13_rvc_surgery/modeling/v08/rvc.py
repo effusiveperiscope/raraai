@@ -179,7 +179,7 @@ class V08Synthesizer(nn.Module):
         noise_scale: float = 0.66666,
     ):
         g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask, spk_emb_pred = self.enc_p(phone, pitch, phone_lengths)
+        m_p, logs_p, x_mask, spk_emb_pred, pre_proj_x = self.enc_p(phone, nsff0, phone_lengths)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale) * x_mask
         if rate is not None:
             head = int(z_p.shape[2] * (1.0 - rate.item()))

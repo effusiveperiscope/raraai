@@ -70,7 +70,20 @@ class MainWindow(QMainWindow):
         self.net_g.load_state_dict(state_dict)
         self.net_g.to('cuda')
         self.net_g.eval()
-        self.net_g.half()
+        # self.net_g.half()
+
+        def debug_forward(name):
+            def hook(module, input, output):
+                if type(input) == tuple:
+                    input = input[0]
+                if torch.isnan(input).any():
+                    print(f'NaNs detected before {name}')
+                    raise ValueError(f'NaNs in {name}')
+            return hook
+        for name, module in self.net_g.named_modules():
+            module.register_forward_hook(debug_forward(name))
+
+
         logger.info(f'Checkpoint {checkpoint_name} loaded')
 
     def inferAction(self, data: dict):
@@ -103,10 +116,12 @@ class MainWindow(QMainWindow):
 
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    feats['whisp_feat'].half(), 
+                    # feats['whisp_feat'].half(), 
+                    feats['whisp_feat'],
                     lens, 
                     feats['pitch'].to('cuda'), 
-                    feats['pitch_fine'].to('cuda'),
+                    # feats['pitch_fine'].to('cuda').half(),
+                    feats['pitch_fine'].to('cuda').float(),
                     torch.tensor([data['sid']]).to('cuda'),
                     noise_scale = data['noise'])
                 o_np = o.squeeze().cpu().float().numpy()
