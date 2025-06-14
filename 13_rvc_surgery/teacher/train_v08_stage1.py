@@ -120,6 +120,6 @@ if __name__ == '__main__':
         accelerator='gpu',
         precision='bf16',
         max_epochs=config.train.max_epochs,
-        callbacks=[],
+        callbacks=[checkpoint_callback],
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

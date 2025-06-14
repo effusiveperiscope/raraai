@@ -3,7 +3,7 @@ from PyQt5.QtCore import pyqtRemoveInputHook
 from PyQt5.QtWidgets import QApplication, QMainWindow
 import librosa
 import numpy as np
-from modeling.v05.rvc import SynthesizerV05
+from modeling.v08.rvc import V08Synthesizer
 from logging import getLogger
 from svc_helper.gui import *
 from omegaconf import OmegaConf
@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/sing_base_test2'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_test00'
 #CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
@@ -57,7 +57,7 @@ class MainWindow(QMainWindow):
         logger.info(f'Loading checkpoint {checkpoint_name}')
         checkpoint_path = os.path.join(CHECKPOINTS_ROOT, checkpoint_name)
         # Points to a lightning checkpoint
-        self.net_g = SynthesizerV05(config, **self.config.model, is_half=True)
+        self.net_g = V08Synthesizer(**self.config.model, is_half=True)
         print(count_parameters(self.net_g.enc_p))
 
         state = torch.load(checkpoint_path, map_location='cpu')['state_dict']
@@ -104,7 +104,6 @@ class MainWindow(QMainWindow):
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
                     feats['whisp_feat'].half(), 
-                    #feats['rvc_feat'].to('cuda'),
                     lens, 
                     feats['pitch'].to('cuda'), 
                     feats['pitch_fine'].to('cuda'),
@@ -119,7 +118,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/sing_base.yaml')
+    config = OmegaConf.load('configs/v08.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()

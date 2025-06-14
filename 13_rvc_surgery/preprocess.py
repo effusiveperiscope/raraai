@@ -6,6 +6,7 @@ import torch
 import librosa
 from tqdm import tqdm
 from features import MyFeatures
+from svc_helper.speaker.models import SVC5SpeakerEncoder
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -30,6 +31,7 @@ if __name__ == '__main__':
 
     # my_feats = MyFeatures(
         # extract_hubert=True, extract_whisper=True, extract_vevo=False)
+    spk_encoder = SVC5SpeakerEncoder(device='cuda')
     my_feats = MyFeatures(
         extract_hubert=False, extract_whisper=True, extract_vevo=False)
 
@@ -54,7 +56,14 @@ if __name__ == '__main__':
 
         basename = os.path.basename(line)
 
-        if os.path.exists(os.path.join(args.output_dir, basename+'.pitch')):
+        if not os.path.exists(os.path.join(args.output_dir, basename + '.spk_feat')):
+            spk_features = spk_encoder.extract_feature(line)
+            torch.save(
+                spk_features,
+                os.path.join(args.output_dir, basename+'.spk_feat')
+            )
+
+        if os.path.exists(os.path.join(args.output_dir, basename+'.whisp_feat')):
             a = torch.load(os.path.join(args.output_dir, basename+'.whisp_feat'))
             if a.shape[1] < 32:
                 print(f'Skipping short file: {line}')

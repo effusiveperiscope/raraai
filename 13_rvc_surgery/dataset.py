@@ -61,6 +61,11 @@ class FeatureDataset(Dataset):
         pitch = torch.load(os.path.join(load_dir, basename + '.pitch')).squeeze(0)
         pitch_fine = torch.load(os.path.join(load_dir, basename + '.pitch_fine')).squeeze(0)
 
+        if os.path.exists(os.path.join(load_dir, basename + '.spk_feat')):
+            spk_feat = torch.load(os.path.join(load_dir, basename + '.spk_feat')).squeeze(0)
+        else:
+            raise ValueError('spk_feat does not exist for {}'.format(basename))
+
         num_samples = wave.shape[0]
         max_len = min(self.max_len, num_samples)
         frame_len = max_len // self.hop_length
@@ -77,7 +82,8 @@ class FeatureDataset(Dataset):
             'whisp_feat': whisp_feat[start_frame:end_frame],
             'pitch': pitch[start_frame:end_frame],
             'pitch_fine': pitch_fine[start_frame:end_frame],
-            'sid': sid
+            'sid': sid,
+            'spk_feat': spk_feat,
         }
         
         spec_path = os.path.join(load_dir, basename + '.spec')
@@ -183,6 +189,7 @@ class FeatureCollator:
         spec_list = [item.get('spec') for item in batch]
         wave_list = [item.get('wave') for item in batch]
         sid_list = [item.get('sid') for item in batch]
+        spk_feat_list = [item.get('spk_feat') for item in batch]
 
         # 2. Determine original frame lengths (e.g., based on pitch)
         lengths = torch.tensor([p.size(0) for p in pitch_list], dtype=torch.long)
@@ -249,4 +256,5 @@ class FeatureCollator:
             'wave': wave_batch,   # Now a batched tensor
             'lengths': lengths,    # Original frame-level lengths
             'sids': torch.Tensor(sid_list).long(),
+            'spk': torch.stack(spk_feat_list)
         }

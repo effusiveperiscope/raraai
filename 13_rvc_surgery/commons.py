@@ -150,6 +150,12 @@ def load_state_dict_mismatch(model, state_dict):
 
     model.load_state_dict(filtered_state_dict, strict=False)
 
+def load_submodule_prefix(model, prefix : str, state_dict: dict):
+    state_dict = {
+        k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)
+    }
+    load_state_dict_mismatch(model, state_dict)
+
 def smooth_random_amplitude_modulation(spectrogram: torch.Tensor, 
                                        min_gain: float = 0.7, 
                                        max_gain: float = 1.3, 

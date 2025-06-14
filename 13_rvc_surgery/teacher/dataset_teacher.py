@@ -48,7 +48,10 @@ class FeatureDataset(Dataset):
         load_dir = self.feature_dir if self.feature_dir else '.'
 
         whisp_feat = torch.load(os.path.join(load_dir, basename + '.whisp_feat')).squeeze(0)
-        svc5_feat = torch.load(os.path.join(load_dir, basename + '.svc5_feat')).squeeze(0)
+        if os.path.exists(os.path.join(load_dir, basename + '.svc5_feat')):
+            svc5_feat = torch.load(os.path.join(load_dir, basename + '.svc5_feat')).squeeze(0)
+        else:
+            svc5_feat = torch.zeros_like(whisp_feat)
         pitch_fine = torch.load(os.path.join(load_dir, basename + '.pitch_fine')).squeeze(0)
         spk = torch.load(os.path.join(load_dir, basename + '.spk_feat')).squeeze(0)
 

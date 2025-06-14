@@ -155,7 +155,8 @@ class V08Synthesizer(nn.Module):
         # print(1,pitch.shape)#[bs,t]
         g = self.emb_g(ds).unsqueeze(-1)  # [b, 256, 1]##1是t，广播的
         m_p, logs_p, x_mask, spk_emb_pred, _ = self.enc_p(phone, pitchf, phone_lengths)
-        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
+
+        z, m_q, logs_q, y_mask = self.enc_q(rearrange(y, 'b t c -> b c t'), y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
         z_slice, ids_slice = commons.rand_slice_segments(
             z, y_lengths, self.segment_size
@@ -163,7 +164,7 @@ class V08Synthesizer(nn.Module):
         # print(-1,pitchf.shape,ids_slice,self.segment_size,self.hop_length,self.segment_size//self.hop_length)
         pitchf = commons.slice_segments2(pitchf, ids_slice, self.segment_size)
         # print(-2,pitchf.shape,z_slice.shape)
-        o = self.dec(z_slice, pitchf, g=g)
+        o = self.dec(x=z_slice, f0=pitchf, spk_id=ds)
         return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), spk_emb_pred
 
     @torch.jit.export
@@ -178,7 +179,7 @@ class V08Synthesizer(nn.Module):
         noise_scale: float = 0.66666,
     ):
         g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask, pre_spk_x = self.enc_p(phone, pitch, phone_lengths, g=g)
+        m_p, logs_p, x_mask, spk_emb_pred = self.enc_p(phone, pitch, phone_lengths)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale) * x_mask
         if rate is not None:
             head = int(z_p.shape[2] * (1.0 - rate.item()))
@@ -186,5 +187,5 @@ class V08Synthesizer(nn.Module):
             x_mask = x_mask[:, :, head:]
             nsff0 = nsff0[:, head:]
         z = self.flow(z_p, x_mask, g=g, reverse=True)
-        o = self.dec(z * x_mask, nsff0, g=g)
+        o = self.dec(z * x_mask, nsff0, spk_id=sid)
         return o, x_mask, (z, z_p, m_p, logs_p)
