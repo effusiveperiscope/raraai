@@ -317,8 +317,13 @@ class MyGeneratorNSF(torch.nn.Module):
                 noise_env = F.interpolate(noise_env, har_source.shape[-1], mode='nearest')
                 har_env = F.interpolate(har_env, har_source.shape[-1], mode='nearest')
 
-                x = x + noise_convs((uv * noi_source + (1 - uv) * har_source * self.m_source.l_sin_gen.sine_amp / 3) * noise_env)
-                x = x + har_convs(har_source * har_env) # already scaled by sine_amp
+                this_noise = (uv * noi_source + (1 - uv) * har_source * self.m_source.l_sin_gen.sine_amp / 3) * noise_env
+                this_noise = this_noise.to(x.dtype)
+                this_har = har_source * har_env
+                this_har = this_har.to(x.dtype)
+
+                x = x + noise_convs(this_noise)
+                x = x + har_convs(this_har) # already scaled by sine_amp
 
                 xs: Optional[torch.Tensor] = None
                 l = [i * self.num_kernels + j for j in range(self.num_kernels)]

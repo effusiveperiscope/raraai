@@ -375,7 +375,7 @@ if __name__ == '__main__':
     trainer = pl.Trainer(
         logger=logger,
         accelerator='gpu',
-        precision='bf16',
+        precision='bf16-mixed',
         max_epochs=config.train.epochs,
         callbacks=[checkpoint_callback],
     )
