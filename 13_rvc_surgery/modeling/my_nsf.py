@@ -169,6 +169,8 @@ class EnvGenerator(torch.nn.Module):
             nn.SiLU(),
             DepthwiseSeparableConv1d(hidden_channels, hidden_channels, 3, padding=1),
             nn.SiLU(),
+            DepthwiseSeparableConv1d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.SiLU(),
         )
         self.final_proj = nn.Linear(hidden_channels, n_outputs)
 
@@ -260,7 +262,7 @@ class MyGeneratorNSF(torch.nn.Module):
                 self.har_convs.append(Conv1d(1, c_cur, kernel_size=1))
                 pass
 
-        # self.env_gen = EnvGenerator(upsample_initial_channel, 192, len(self.noise_convs) * 2)
+        self.env_gen = EnvGenerator(upsample_initial_channel, 192, len(self.noise_convs) * 2)
 
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
@@ -286,7 +288,7 @@ class MyGeneratorNSF(torch.nn.Module):
         uv = har_source <= 0
         uv = uv.long()
 
-        # env = self.env_gen(x, f0)
+        env = self.env_gen(x, f0)
 
         x = self.conv_pre(x)
         # torch.jit.script() does not support direct indexing of torch modules
@@ -307,12 +309,12 @@ class MyGeneratorNSF(torch.nn.Module):
                 # Hypothesis - the old approach (reusing same noise across upsampling)
                 # Has risk of introducing unwanted periodicities/correlations
                 noi_source = torch.randn_like(har_source)
-                # noise_env = env[:, :, 2*i] # [B, T, 1]
-                # har_env = env[:, :, 2*i+1] # [B, T, 1]
+                noise_env = env[:, :, 2*i] # [B, T, 1]
+                har_env = env[:, :, 2*i+1] # [B, T, 1]
 
-                x = x + noise_convs(uv * noi_source + (1 - uv) * har_source *
-                    self.m_source.l_sin_gen.sine_amp / 3)
-                x = x + har_convs(har_source) # already scaled by sine_amp
+                x = x + noise_convs((uv * noi_source + (1 - uv) * har_source *
+                    self.m_source.l_sin_gen.sine_amp / 3) * noise_env)
+                x = x + har_convs(har_source * har_env) # already scaled by sine_amp
 
                 xs: Optional[torch.Tensor] = None
                 l = [i * self.num_kernels + j for j in range(self.num_kernels)]
