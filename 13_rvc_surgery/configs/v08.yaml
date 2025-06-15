@@ -1,4 +1,4 @@
-exp_name: v08_test00
+exp_name: v08_test01
 train:
   lr: 5e-5
   batch_size: 8
@@ -20,7 +20,7 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 20000
+  stage1_train_step: 10000
   weight_decay: 1e-3
 model:
   segment_size: 32

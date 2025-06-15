@@ -12,6 +12,29 @@ from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 from modeling.v08.rvc import V08Synthesizer
 from rvc_losses import discriminator_loss, feature_loss, generator_loss, kl_loss
 
+import pdb
+import sys
+import traceback
+def custom_excepthook(exc_type, exc_value, exc_traceback):
+    """
+    Custom exception hook that prints the exception information
+    and then drops into a pdb debugger session.
+    """
+    # First, print the exception information as Python normally would.
+    # We use traceback.print_exception to ensure consistent formatting.
+    print("An unhandled exception occurred:")
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    print("\nDropping into debugger...")
+
+    # Then, drop into the pdb debugger.
+    # The post_mortem function starts the debugger at the point of the exception.
+    pdb.post_mortem(exc_traceback)
+
+# Set the custom exception hook
+sys.excepthook = custom_excepthook
+
+
+
 class V08TrainingModule(pl.LightningModule):
     def __init__(self, 
         net_g : V08Synthesizer, 
@@ -43,8 +66,6 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = True
             for param in self.net_g.parameters():
                 param.requires_grad = True
-            for param in self.net_g.enc_p.parameters():
-                param.requires_grad = False
         else:
             self.stage1 = False
             for param in self.net_d.parameters():
@@ -75,11 +96,10 @@ class V08TrainingModule(pl.LightningModule):
             with torch.no_grad():
                 self.net_g : V08Synthesizer
                 o, x_mask, z_stats = self.net_g.infer(
-                    batch['whisp_feat'].to(self.device).to(self.dtype), 
-                    batch['lengths'].to(self.device), 
-                    batch['pitch'].to(self.device), 
-                    batch['pitch_fine'].to(self.device).to(self.dtype),
-                    batch['sids'].to(self.device),
+                    phone=batch['whisp_feat'].to(self.device).to(self.dtype), 
+                    phone_lengths=batch['lengths'].to(self.device), 
+                    nsff0=batch['pitch_fine'].to(self.device).to(self.dtype),
+                    sid=batch['sids'].to(self.device),
                     noise_scale=self.config.train.noise_scale_test
                 )
                 for i, audio in enumerate(o):
@@ -294,6 +314,7 @@ if __name__ == '__main__':
     parser.add_argument('--stage1_ckpt', type=str, default=None)
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
+    parser.add_argument('--transfer_from', type=str, default=None)
     parser.add_argument('--version', type=int, default=None, help='tensorboard log version')
 
     args = parser.parse_args()
@@ -314,7 +335,7 @@ if __name__ == '__main__':
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
         state = torch.load(args.transfer_from, map_location='cpu')['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
-        load_submodule_prefix(net_d, 'net_g.', state)
+        load_submodule_prefix(net_d, 'net_d.', state)
     else:
         print('!!! No checkpoint file found - starting from scratch !!!')
     training_module = V08TrainingModule(net_g, net_d, config)

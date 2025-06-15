@@ -262,7 +262,7 @@ class MyGeneratorNSF(torch.nn.Module):
                 self.har_convs.append(Conv1d(1, c_cur, kernel_size=1))
                 pass
 
-        self.env_gen = EnvGenerator(upsample_initial_channel, 192, len(self.noise_convs) * 2)
+        self.env_gen = EnvGenerator(initial_channel, 192, len(self.noise_convs) * 2)
 
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
@@ -285,10 +285,12 @@ class MyGeneratorNSF(torch.nn.Module):
         g = self.emb_g(spk_id).unsqueeze(-1)
 
         har_source = rearrange(har_source, "b t 1 -> b 1 t") # This should be 0 at unvoiced parts anyways
-        uv = har_source <= 0
-        uv = uv.long()
 
-        env = self.env_gen(x, f0)
+        uv = f0 <= 0
+        uv = uv.float()
+        uv = F.interpolate(uv.unsqueeze(1), har_source.shape[-1], mode='nearest')
+
+        env = self.env_gen(rearrange(x, "b c t -> b t c"), f0.unsqueeze(-1))
 
         x = self.conv_pre(x)
         # torch.jit.script() does not support direct indexing of torch modules
@@ -306,14 +308,16 @@ class MyGeneratorNSF(torch.nn.Module):
                     x = gamma * x + beta
 
                 # Resample noise source at every upsample
-                # Hypothesis - the old approach (reusing same noise across upsampling)
-                # Has risk of introducing unwanted periodicities/correlations
                 noi_source = torch.randn_like(har_source)
-                noise_env = env[:, :, 2*i] # [B, T, 1]
-                har_env = env[:, :, 2*i+1] # [B, T, 1]
 
-                x = x + noise_convs((uv * noi_source + (1 - uv) * har_source *
-                    self.m_source.l_sin_gen.sine_amp / 3) * noise_env)
+                noise_env = env[:, :, 2*i] # [B, T]
+                har_env = env[:, :, 2*i+1] # [B, T]
+                noise_env = rearrange(noise_env, "b t -> b 1 t")
+                har_env = rearrange(har_env, "b t -> b 1 t")
+                noise_env = F.interpolate(noise_env, har_source.shape[-1], mode='nearest')
+                har_env = F.interpolate(har_env, har_source.shape[-1], mode='nearest')
+
+                x = x + noise_convs((uv * noi_source + (1 - uv) * har_source * self.m_source.l_sin_gen.sine_amp / 3) * noise_env)
                 x = x + har_convs(har_source * har_env) # already scaled by sine_amp
 
                 xs: Optional[torch.Tensor] = None
