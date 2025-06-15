@@ -172,14 +172,16 @@ class V08Synthesizer(nn.Module):
         self,
         phone: torch.Tensor,
         phone_lengths: torch.Tensor,
-        pitch: torch.Tensor,
         nsff0: torch.Tensor,
         sid: torch.Tensor,
         rate: Optional[torch.Tensor] = None,
         noise_scale: float = 0.66666,
+        prior_pitch: torch.Tensor = None
     ):
+        if prior_pitch is None:
+            prior_pitch = nsff0
         g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask, spk_emb_pred, pre_proj_x = self.enc_p(phone, nsff0, phone_lengths)
+        m_p, logs_p, x_mask, spk_emb_pred, pre_proj_x = self.enc_p(phone, prior_pitch, phone_lengths)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale) * x_mask
         if rate is not None:
             head = int(z_p.shape[2] * (1.0 - rate.item()))

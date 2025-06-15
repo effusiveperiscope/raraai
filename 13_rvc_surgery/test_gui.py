@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
         gui.addFileInput(AudioFileInput())
         gui.addParam(IntParam(label="Feature Transpose", id='feat_transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
-        gui.addParam(IntParam(label="Coarse Transpose", id='coarse', min=-24, max=24, default=0))
+        gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=config.model.spk_embed_dim - 1, default=0))
         # TODO - pitch smooth
@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
         self.net_g.load_state_dict(state_dict)
         self.net_g.to('cuda')
         self.net_g.eval()
-        # self.net_g.half()
+        self.net_g.half()
 
         def debug_forward(name):
             def hook(module, input, output):
@@ -107,23 +107,22 @@ class MainWindow(QMainWindow):
             # Tranpsose
             feats['pitch_fine'] = feats['pitch_fine'] * (2 ** (transpose / 12))
             # Experiment with different coarse transpose relative to fine
-            feats['pitch'] = MyFeatures.f0_to_coarse(
-                (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
+            # feats['pitch'] = MyFeatures.f0_to_coarse(
+                # (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
 
             # Truncate
             feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
-            feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
+            # feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
 
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    # feats['whisp_feat'].half(), 
-                    feats['whisp_feat'],
-                    lens, 
-                    feats['pitch'].to('cuda'), 
-                    # feats['pitch_fine'].to('cuda').half(),
-                    feats['pitch_fine'].to('cuda').float(),
-                    torch.tensor([data['sid']]).to('cuda'),
-                    noise_scale = data['noise'])
+                    phone=feats['whisp_feat'].half(),
+                    phone_lengths=lens, 
+                    nsff0=feats['pitch_fine'].to('cuda').half(),
+                    sid=torch.tensor([data['sid']]).to('cuda'),
+                    noise_scale = data['noise'],
+                    #prior_pitch=(feats['pitch'].to('cuda') * (2 ** (coarse / 12))).half(),
+                    )
                 o_np = o.squeeze().cpu().float().numpy()
                 out.append(AudioResult(
                     label=os.path.basename(file)+data['model_labels'][0],

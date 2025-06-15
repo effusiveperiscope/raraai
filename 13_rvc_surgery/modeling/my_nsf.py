@@ -152,12 +152,12 @@ class SourceModuleHnNSF(torch.nn.Module):
         har_merge = self.l_tanh(self.l_linear(sine_wavs))
         return har_merge, noise  
 
-class UVGenerator(torch.nn.Module):
+class EnvGenerator(torch.nn.Module):
     def __init__(self,
         x_channels,
         hidden_channels,
         n_outputs):
-        super(UVGenerator, self).__init__()
+        super(EnvGenerator, self).__init__()
 
         self.in_proj = nn.Linear(x_channels, hidden_channels)
         self.f0_proj = nn.Linear(1, hidden_channels)
@@ -172,8 +172,8 @@ class UVGenerator(torch.nn.Module):
         )
         self.final_proj = nn.Linear(hidden_channels, n_outputs)
 
-    def forward(self, x, f0_interp):
-        x = self.in_proj(x) + self.f0_proj(f0_interp)
+    def forward(self, x, f0):
+        x = self.in_proj(x) + self.f0_proj(f0)
 
         x = rearrange(x, "b t c -> b c t")
         x = self.cnn(x)
@@ -219,8 +219,6 @@ class MyGeneratorNSF(torch.nn.Module):
 
 
         self.ups = nn.ModuleList()
-        # self.uv_gen = UVGenerator(initial_channel, upsample_initial_channel,
-            # n_outputs=len(upsample_rates))
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             c_cur = upsample_initial_channel // (2 ** (i + 1))
             self.ups.append(
@@ -262,6 +260,8 @@ class MyGeneratorNSF(torch.nn.Module):
                 self.har_convs.append(Conv1d(1, c_cur, kernel_size=1))
                 pass
 
+        # self.env_gen = EnvGenerator(upsample_initial_channel, 192, len(self.noise_convs) * 2)
+
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
             ch = upsample_initial_channel // (2 ** (i + 1))
@@ -286,6 +286,8 @@ class MyGeneratorNSF(torch.nn.Module):
         uv = har_source <= 0
         uv = uv.long()
 
+        # env = self.env_gen(x, f0)
+
         x = self.conv_pre(x)
         # torch.jit.script() does not support direct indexing of torch modules
         # That's why I wrote this
@@ -305,6 +307,9 @@ class MyGeneratorNSF(torch.nn.Module):
                 # Hypothesis - the old approach (reusing same noise across upsampling)
                 # Has risk of introducing unwanted periodicities/correlations
                 noi_source = torch.randn_like(har_source)
+                # noise_env = env[:, :, 2*i] # [B, T, 1]
+                # har_env = env[:, :, 2*i+1] # [B, T, 1]
+
                 x = x + noise_convs(uv * noi_source + (1 - uv) * har_source *
                     self.m_source.l_sin_gen.sine_amp / 3)
                 x = x + har_convs(har_source) # already scaled by sine_amp
