@@ -1,0 +1,59 @@
+exp_name: finetune_fs_2
+train:
+  lr: 3e-5
+  batch_size: 8
+  filelist: data/fluttershy_sing/train.txt
+  val_filelist: data/fluttershy_sing/val.txt
+  test_filelist: data/test_whisper/val.txt
+  octave_transpose_test: True
+  noise_scale_test: 0.5
+  epochs: 500
+  lam_mel: 45
+  lam_kl: 0.5
+  lam_kl_reg_logs: 0.1
+  lam_kl_reg_mus: 0.01
+  lam_spk: 1.0
+  lam_grl: 2.0
+  phone_aug_scale: 0.5
+  spec_aug_scale: 0.2
+  spec_am_min: 0.7
+  spec_am_max: 1.3
+  spec_am_points: 100
+  label_alpha: 0.05 # GAN label smoothing
+  disc_noise_scale: 0.0003
+  stage1_train_step: 4000
+  weight_decay: 1e-3
+model:
+  segment_size: 32
+  vevo_dim: 1024
+  hubert_dim: 512 # whisper-base
+  inter_channels: 192
+  disc_channels: 256
+  content_size: 64
+  spec_channels: 1025
+  hidden_channels: 192
+  filter_channels: 768
+  n_heads: 2
+  n_layers: 6
+  kernel_size: 3
+  p_dropout: 0
+  resblock: '1'
+  resblock_kernel_sizes: [3, 7, 11]
+  resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
+  upsample_rates: [12, 10, 2, 2]
+  upsample_initial_channel: 512
+  upsample_kernel_sizes: [24, 20, 4, 4]
+  spk_embed_dim: 10 # Probably more than this cannot be represented (??)
+  gin_channels: 256
+  sr: 48000
+data:
+  hop_length: 480
+  segment_size: 17280
+  max_len: 480000
+  n_fft: 2048
+  num_mels: 128
+  sampling_rate: 48000
+  win_size: 2048
+  fmin: 0
+  fmax: null
+  num_workers: 4

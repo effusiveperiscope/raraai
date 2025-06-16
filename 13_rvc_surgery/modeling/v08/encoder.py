@@ -62,7 +62,8 @@ class V08Encoder(nn.Module):
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
         self.spk_classifier = SpeakerClassifier(hidden_channels, 256)
 
-    def forward(self, phone: torch.Tensor, pitchf: torch.Tensor, lengths: torch.Tensor):
+    def forward(self, phone: torch.Tensor, pitchf: torch.Tensor, lengths: torch.Tensor,
+        lam_grl = 1.0):
         if pitchf is None:
             x_phone = self.emb_phone(phone)
             x_phone = x_phone / (x_phone.std(dim=-1, keepdim=True) + 1e-6)
@@ -83,7 +84,7 @@ class V08Encoder(nn.Module):
 
         x = self.encoder(x * x_mask, x_mask) # Should run GRL here
         pre_proj_x = x
-        spk_feat_pred = self.spk_classifier(x)
+        spk_feat_pred = self.spk_classifier(x, override_lambda=lam_grl)
 
         stats = self.proj(x) * x_mask
 
@@ -124,8 +125,11 @@ class GradientReversal(torch.nn.Module):
         super(GradientReversal, self).__init__()
         self.lambda_ = lambda_reversal
 
-    def forward(self, x):
-        return GradientReversalFunction.apply(x, self.lambda_)
+    def forward(self, x, override_lambda = None):
+        lam = self.lambda_
+        if override_lambda is not None:
+            lam = override_lambda
+        return GradientReversalFunction.apply(x, self.lam)
 
 class SpeakerClassifier(nn.Module):
     def __init__(self, embed_dim, spk_dim):
@@ -139,11 +143,11 @@ class SpeakerClassifier(nn.Module):
             weight_norm(nn.Conv1d(embed_dim, spk_dim, kernel_size=5, padding=2))
         )
 
-    def forward(self, x):
+    def forward(self, x, override_lambda = None):
         ''' Forward function of Speaker Classifier:
             x = (B, embed_dim, len)
         '''
         # pass through classifier
-        outputs = self.classifier(x)  # (B, nb_speakers)
+        outputs = self.classifier(x, override_lambda)  # (B, nb_speakers)
         outputs = torch.mean(outputs, dim=-1)
         return outputs

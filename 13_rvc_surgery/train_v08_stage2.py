@@ -66,6 +66,8 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = True
             for param in self.net_g.parameters():
                 param.requires_grad = True
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = False
         else:
             self.stage1 = False
             for param in self.net_d.parameters():
@@ -142,7 +144,7 @@ class V08TrainingModule(pl.LightningModule):
                 phone=phone_aug, phone_lengths=phone_lengths,
                 pitch=pitch, pitchf=pitchf.to(phone.dtype), 
                 y=y_aug, y_lengths=batch['lengths'],
-                ds = sids)
+                ds = sids, lam_grl=self.config.train.lam_grl)
 
         mel = spec_to_mel_torch(rearrange(y, 'b t d -> b d t'),
             self.config.data.n_fft, self.config.data.num_mels, 

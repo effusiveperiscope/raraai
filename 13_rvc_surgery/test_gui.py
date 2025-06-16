@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_test01'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/finetune'
 #CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
@@ -132,7 +132,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/v08.yaml')
+    config = OmegaConf.load('configs/sing_base.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()

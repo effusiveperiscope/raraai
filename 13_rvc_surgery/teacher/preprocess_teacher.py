@@ -54,9 +54,11 @@ if __name__ == '__main__':
         basename = os.path.basename(line)
 
         data, _ = librosa.load(line, sr=16000)
+        data_48k, _ = librosa.load(line, sr=48000)
+        features = None
         if not all(os.path.exists(
             os.path.join(args.output_dir, basename + ext)) for ext in ['.whisp_feat', '.pitch_fine']):
-            features = my_feats.get_features(data, None)
+            features = my_feats.get_features(data, data_48k)
             if features['whisp_feat'].shape[1] < 32:
                 print(f'Skipping short file: {line}')
                 continue
@@ -66,6 +68,15 @@ if __name__ == '__main__':
             torch.save( # 
                 features['pitch_fine'],
                 os.path.join(args.output_dir, basename+'.pitch_fine'))
+
+        if not os.path.exists(os.path.join(args.output_dir, basename + '.wave')):
+            features = my_feats.get_features(data, data_48k)
+            torch.save(
+                features['spec'],
+                os.path.join(args.output_dir, basename+'.spec'))
+            torch.save(
+                features['wave'],
+                os.path.join(args.output_dir, basename+'.wave'))
 
         if not os.path.exists(os.path.join(args.output_dir, basename + '.svc5_feat')):
             teacher_features = text_encoder.extract_features(data)

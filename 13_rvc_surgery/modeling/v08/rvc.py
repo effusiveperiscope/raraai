@@ -150,11 +150,13 @@ class V08Synthesizer(nn.Module):
 
     @torch.jit.ignore
     def forward(
-        self, phone, phone_lengths, pitch, pitchf, y, y_lengths, ds
+        self, phone, phone_lengths, pitch, pitchf, y, y_lengths, ds,
+        lam_grl = 1.0,
     ):  # 这里ds是id，[bs,1]
         # print(1,pitch.shape)#[bs,t]
         g = self.emb_g(ds).unsqueeze(-1)  # [b, 256, 1]##1是t，广播的
-        m_p, logs_p, x_mask, spk_emb_pred, _ = self.enc_p(phone, pitchf, phone_lengths)
+        m_p, logs_p, x_mask, spk_emb_pred, _ = self.enc_p(phone, pitchf, phone_lengths, 
+            lam_grl=lam_grl)
 
         z, m_q, logs_q, y_mask = self.enc_q(rearrange(y, 'b t c -> b c t'), y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
