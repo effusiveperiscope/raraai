@@ -58,8 +58,11 @@ class FeatureDataset(Dataset):
         else:
             rvc_feat = torch.zeros_like(whisp_feat) # Hack to avoid having to process RVC feats
 
-        pitch = torch.load(os.path.join(load_dir, basename + '.pitch')).squeeze(0)
         pitch_fine = torch.load(os.path.join(load_dir, basename + '.pitch_fine')).squeeze(0)
+        if os.path.exists(os.path.join(load_dir, basename + '.pitch')):
+            pitch = torch.load(os.path.join(load_dir, basename + '.pitch')).squeeze(0)
+        else:
+            pitch = torch.zeros_like(pitch_fine)
 
         if os.path.exists(os.path.join(load_dir, basename + '.spk_feat')):
             spk_feat = torch.load(os.path.join(load_dir, basename + '.spk_feat')).squeeze(0)

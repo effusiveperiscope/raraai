@@ -310,7 +310,7 @@ class V08TrainingModule(pl.LightningModule):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/v08.yaml')
+    parser.add_argument('--config', type=str, default='configs/sing_base.yaml')
     parser.add_argument('--stage1_ckpt', type=str, default=None)
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)

@@ -1,10 +1,10 @@
-exp_name: sing_base_test3_with_pitch
+exp_name: v08_singbase
 train:
   lr: 5e-5
   batch_size: 8
   filelist: data/sing_base/train.txt
   val_filelist: data/sing_base/val.txt
-  test_filelist: data/test_whisper/train.txt
+  test_filelist: data/test_whisper/val.txt
   octave_transpose_test: True
   noise_scale_test: 0.5
   epochs: 500
@@ -12,12 +12,7 @@ train:
   lam_kl: 1.0
   lam_kl_reg_logs: 0.2
   lam_kl_reg_mus: 0.02
-  lam_grl_max: 0.05
-  lam_grl_end: 20000
-  lam_content: 0.00
-  grl_every_step: 3
-  lam_align: 0.0
-  lam_spk: 8.0
+  lam_spk: 1.0
   phone_aug_scale: 0.5
   spec_aug_scale: 0.2
   spec_am_min: 0.7
@@ -50,10 +45,6 @@ model:
   spk_embed_dim: 10 # Probably more than this cannot be represented (??)
   gin_channels: 256
   sr: 48000
-  spk_class_n_layers: 6
-  content_n_layers: 10
-  coloring_n_layers: 12
-  content_guide_layer: 4
 data:
   hop_length: 480
   segment_size: 17280
@@ -65,4 +56,3 @@ data:
   fmin: 0
   fmax: null
   num_workers: 4
-  hubert_stats_path: hubert_large_stat.npz
