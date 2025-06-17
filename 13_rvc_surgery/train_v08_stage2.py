@@ -60,13 +60,15 @@ class V08TrainingModule(pl.LightningModule):
 
     def on_train_step_start(self):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
-            # Freeze prior encoder (Assuming a content invariant representation)
+            # Freeze prior and posterior
             self.stage1 = True
             for param in self.net_d.parameters():
                 param.requires_grad = True
             for param in self.net_g.parameters():
                 param.requires_grad = True
             for param in self.net_g.enc_p.parameters():
+                param.requires_grad = False
+            for param in self.net_g.enc_q.parameters():
                 param.requires_grad = False
         else:
             self.stage1 = False

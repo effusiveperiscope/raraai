@@ -125,17 +125,18 @@ class GradientReversal(torch.nn.Module):
         super(GradientReversal, self).__init__()
         self.lambda_ = lambda_reversal
 
-    def forward(self, x, override_lambda = None):
+    def forward(self, x):
+        x, override_lambda = x # tuple
         lam = self.lambda_
         if override_lambda is not None:
             lam = override_lambda
-        return GradientReversalFunction.apply(x, self.lam)
+        return GradientReversalFunction.apply(x, lam)
 
 class SpeakerClassifier(nn.Module):
     def __init__(self, embed_dim, spk_dim):
         super(SpeakerClassifier, self).__init__()
-        self.grl = GradientReversal(lambda_reversal=1),
         self.classifier = nn.Sequential(
+            GradientReversal(lambda_reversal=1),
             weight_norm(nn.Conv1d(embed_dim, embed_dim, kernel_size=5, padding=2)),
             nn.ReLU(),
             weight_norm(nn.Conv1d(embed_dim, embed_dim, kernel_size=5, padding=2)),
@@ -148,7 +149,6 @@ class SpeakerClassifier(nn.Module):
             x = (B, embed_dim, len)
         '''
         # pass through classifier
-        outputs = self.classifier(self.grl(
-            x, override_lambda=override_lambda))  # (B, nb_speakers)
+        outputs = self.classifier((x, override_lambda))  # (B, nb_speakers)
         outputs = torch.mean(outputs, dim=-1)
         return outputs

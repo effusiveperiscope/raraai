@@ -1,4 +1,4 @@
-exp_name: finetune_fs_2
+exp_name: finetune_fs_3
 train:
   lr: 3e-5
   batch_size: 8
@@ -9,9 +9,9 @@ train:
   noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
-  lam_kl: 0.5
-  lam_kl_reg_logs: 0.1
-  lam_kl_reg_mus: 0.01
+  lam_kl: 1.0
+  lam_kl_reg_logs: 0.3
+  lam_kl_reg_mus: 0.03
   lam_spk: 1.0
   lam_grl: 2.0
   phone_aug_scale: 0.5
@@ -21,7 +21,7 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 4000
+  stage1_train_step: 2000
   weight_decay: 1e-3
 model:
   segment_size: 32
