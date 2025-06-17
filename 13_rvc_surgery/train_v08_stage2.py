@@ -72,6 +72,9 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = False
             for param in self.net_g.flow.parameters():
                 param.requires_grad = False
+            for param in self.net_g.last_n_enc_parameters(
+                self.config.train.get('stage1_last_n', 2)):
+                param.requires_grad = True
         else:
             self.stage1 = False
             for param in self.net_d.parameters():

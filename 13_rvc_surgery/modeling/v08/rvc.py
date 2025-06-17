@@ -1,4 +1,5 @@
 import math
+import itertools
 import logging
 from typing import Optional
 from torch import nn
@@ -111,6 +112,15 @@ class V08Synthesizer(nn.Module):
             + ", self.spk_embed_dim: "
             + str(self.spk_embed_dim)
         )
+
+    def last_n_enc_parameters(self, last_n):
+        params = []
+        layers_count = len(self.enc_p.encoder.attn_layers)
+        for i in range(last_n):
+            truei = layers_count - 1 - i
+            params.append(self.enc_p.encoder.attn_layers[truei])
+            params.append(self.enc_p.encoder.ffn_layers[truei])
+        return itertools.chain.from_iterable(params)
 
     def remove_weight_norm(self):
         self.dec.remove_weight_norm()
