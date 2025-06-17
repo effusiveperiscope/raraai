@@ -70,6 +70,8 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = False
             for param in self.net_g.enc_q.parameters():
                 param.requires_grad = False
+            for param in self.net_g.flow.parameters():
+                param.requires_grad = False
         else:
             self.stage1 = False
             for param in self.net_d.parameters():
