@@ -110,11 +110,11 @@ def spec_to_mel_torch(spec, n_fft, num_mels, sampling_rate, fmin, fmax):
 
     # Mel-frequency Log-amplitude spectrogram :: (B, Freq=num_mels, Frame)
     
-    tensor_check(mel_basis[fmax_dtype_device])
-    tensor_check(spec)
+    #tensor_check(mel_basis[fmax_dtype_device])
+    #tensor_check(spec)
 
     melspec = torch.matmul(mel_basis[fmax_dtype_device], spec)
-    tensor_check(melspec)
+    #tensor_check(melspec)
     melspec = spectral_normalize_torch(melspec)
     return melspec
 
