@@ -1,5 +1,6 @@
 from einops import rearrange
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from svc_helper.pitch.utils import discretize_f0_log
 from omegaconf import OmegaConf
 import torch
 import pytorch_lightning as pl
@@ -145,13 +146,23 @@ class V08TrainingModule(pl.LightningModule):
         # Spec noise
         y_aug = y_aug + torch.randn_like(y_aug) * self.config.train.spec_aug_scale
 
+        if self.config.model.get('use_pitch_predictor', False):
+            pitchq = []
+            for f0 in pitchf:
+                pitchq.append(
+                    discretize_f0_log(
+                        f0, 
+                        self.config.model.get('pitch_quant_dim', 8), 
+                        hold_length=10))
+        else:
+            pitchq = None
         y_hat, ids_slice, _, z_mask, \
             (z, z_p, m_p, logs_p, m_q, logs_q), \
-                spk_emb_pred = self.net_g(
+                spk_emb_pred, f0_pred = self.net_g(
                 phone=phone_aug, phone_lengths=phone_lengths,
                 pitch=pitch, pitchf=pitchf.to(phone.dtype), 
                 y=y_aug, y_lengths=batch['lengths'],
-                ds = sids, lam_grl=self.config.train.lam_grl)
+                ds = sids, lam_grl=self.config.train.lam_grl, pitchq=pitchq)
 
         mel = spec_to_mel_torch(rearrange(y, 'b t d -> b d t'),
             self.config.data.n_fft, self.config.data.num_mels, 
@@ -223,6 +234,9 @@ class V08TrainingModule(pl.LightningModule):
             loss_kl*self.config.train.lam_kl + 
             loss_spk*self.config.train.lam_spk +
             + loss_kl_reg)
+        if f0_pred is not None:
+            loss_f0 = F.l1_loss(f0_pred, pitchf)
+            loss_gen_all += loss_f0 * self.config.train.get('lam_f0', 0.0)
 
         if loss_gen_all.isnan().any():
             loss_gen_all = torch.zeros_like(loss_gen_all)
@@ -330,7 +344,9 @@ if __name__ == '__main__':
 
     config = OmegaConf.load(args.config)
 
-    net_g = V08Synthesizer(**config.model, is_half=True)
+    net_g = V08Synthesizer(**config.model, is_half=True,
+        use_pitch_predictor=config.model.get('use_pitch_predictor', False),
+        pitch_quant_dim=config.model.get('pitch_quant_dim', 8))
     net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
     if args.stage1_ckpt is not None:
         print('Using stage 1 checkpoint:', args.stage1_ckpt)

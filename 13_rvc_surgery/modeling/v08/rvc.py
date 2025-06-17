@@ -18,6 +18,8 @@ from modeling.spk_cond import FiLMGenerator
 from einops import rearrange
 from modeling.v08.encoder import V08Encoder
 from modeling.my_nsf import MyGeneratorNSF
+from modeling.f0_predictor import F0Predictor
+
 
 sr2sr = {
     "32k": 32000,
@@ -47,6 +49,8 @@ class V08Synthesizer(nn.Module):
         spk_embed_dim,
         gin_channels,
         sr,
+        use_pitch_predictor=False,
+        pitch_quant_dim=8, # Number of discrete pitch levels
         **kwargs
     ):
         super(V08Synthesizer, self).__init__()
@@ -113,6 +117,13 @@ class V08Synthesizer(nn.Module):
             + str(self.spk_embed_dim)
         )
 
+        if use_pitch_predictor:
+            self.pitch_predictor = F0Predictor(
+                speech_dim=inter_channels,
+                pitch_quant_dim=pitch_quant_dim,
+                spk_emb_dim=gin_channels
+            )
+
     def last_n_enc_parameters(self, last_n):
         params = []
         layers_count = len(self.enc_p.encoder.attn_layers)
@@ -161,12 +172,23 @@ class V08Synthesizer(nn.Module):
     @torch.jit.ignore
     def forward(
         self, phone, phone_lengths, pitch, pitchf, y, y_lengths, ds,
-        lam_grl = 1.0,
+        lam_grl = 1.0, pitchq=None
     ):  # 这里ds是id，[bs,1]
         # print(1,pitch.shape)#[bs,t]
         g = self.emb_g(ds).unsqueeze(-1)  # [b, 256, 1]##1是t，广播的
-        m_p, logs_p, x_mask, spk_emb_pred, _ = self.enc_p(phone, pitchf, phone_lengths, 
+        m_p, logs_p, x_mask, spk_emb_pred, pre_proj_x = self.enc_p(phone, pitchf, phone_lengths, 
             lam_grl=lam_grl)
+
+        if self.hasattr('pitch_predictor'):
+            assert pitchq is not None, "pitchq must be provided for pitch predictor"
+            f0_pred = self.pitch_predictor(
+                quant_pitch=pitchq,
+                target_f0_mean=pitchf.mean(),
+                speech=pre_proj_x.detach(),
+                speech_mask=x_mask,
+                spk_emb=g)
+        else:
+            f0_pred = None
 
         z, m_q, logs_q, y_mask = self.enc_q(rearrange(y, 'b t c -> b c t'), y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
@@ -177,7 +199,7 @@ class V08Synthesizer(nn.Module):
         pitchf = commons.slice_segments2(pitchf, ids_slice, self.segment_size)
         # print(-2,pitchf.shape,z_slice.shape)
         o = self.dec(x=z_slice, f0=pitchf, spk_id=ds)
-        return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), spk_emb_pred
+        return o, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q), spk_emb_pred, f0_pred
 
     @torch.jit.export
     def infer(
