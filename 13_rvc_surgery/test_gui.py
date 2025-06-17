@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/teacher/finetune'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_singbase_02'
 #CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):
@@ -72,16 +72,16 @@ class MainWindow(QMainWindow):
         self.net_g.eval()
         self.net_g.half()
 
-        def debug_forward(name):
-            def hook(module, input, output):
-                if type(input) == tuple:
-                    input = input[0]
-                if torch.isnan(input).any():
-                    print(f'NaNs detected before {name}')
-                    raise ValueError(f'NaNs in {name}')
-            return hook
-        for name, module in self.net_g.named_modules():
-            module.register_forward_hook(debug_forward(name))
+        # def debug_forward(name):
+            # def hook(module, input, output):
+                # if type(input) == tuple:
+                    # input = input[0]
+                # if torch.isnan(input).any():
+                    # print(f'NaNs detected before {name}')
+                    # raise ValueError(f'NaNs in {name}')
+            # return hook
+        # for name, module in self.net_g.named_modules():
+            # module.register_forward_hook(debug_forward(name))
 
 
         logger.info(f'Checkpoint {checkpoint_name} loaded')
