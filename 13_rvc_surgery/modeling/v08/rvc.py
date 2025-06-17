@@ -179,7 +179,7 @@ class V08Synthesizer(nn.Module):
         m_p, logs_p, x_mask, spk_emb_pred, pre_proj_x = self.enc_p(phone, pitchf, phone_lengths, 
             lam_grl=lam_grl)
 
-        if self.hasattr('pitch_predictor'):
+        if hasattr(self, 'pitch_predictor'):
             assert pitchq is not None, "pitchq must be provided for pitch predictor"
             f0_pred = self.pitch_predictor(
                 quant_pitch=pitchq,
