@@ -71,8 +71,8 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = False
             for param in self.net_g.enc_q.parameters():
                 param.requires_grad = False
-            for param in self.net_g.flow.parameters():
-                param.requires_grad = False
+            # for param in self.net_g.flow.parameters():
+                # param.requires_grad = False
             for param in self.net_g.last_n_enc_parameters(
                 self.config.train.get('stage1_last_n', 2)):
                 param.requires_grad = True
@@ -388,7 +388,7 @@ if __name__ == '__main__':
         persistent_workers=True
     )
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='val_loss',
         dirpath=f'checkpoints/teacher/{config.exp_name}',
         filename='best-checkpoint',
@@ -396,12 +396,20 @@ if __name__ == '__main__':
         mode='min',
         save_last=True
     )
+    callbacks = [val_checkpoint_callback]
+    if config.train.get('save_every_n_epochs'):
+        interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            every_n_epochs=config.train.save_every_n_epochs,
+            dirpath=f'checkpoints/teacher/{config.exp_name}',
+            filename='interval-checkpoint'
+        )
+        callbacks.append(interval_checkpoint_callback)
 
     trainer = pl.Trainer(
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',
         max_epochs=config.train.epochs,
-        callbacks=[checkpoint_callback],
+        callbacks=callbacks,
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

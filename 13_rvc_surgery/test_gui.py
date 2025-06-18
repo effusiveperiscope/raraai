@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_singbase_02'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_singbase_04'
 #CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
 
 class MainWindow(QMainWindow):

@@ -1,6 +1,6 @@
-exp_name: v08_singbase_04
+exp_name: v08_singbase_05
 train:
-  lr: 5e-5
+  lr: 1e-5
   batch_size: 8
   filelist: data/sing_base/train.txt
   val_filelist: data/sing_base/val.txt
@@ -8,11 +8,11 @@ train:
   octave_transpose_test: True
   noise_scale_test: 0.5
   epochs: 500
-  lam_mel: 40
+  lam_mel: 30
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
-  lam_spk: 2.0
+  lam_spk: 1.0
   lam_grl: 4.0
   phone_aug_scale: 0.5
   spec_aug_scale: 0.2
