@@ -84,6 +84,8 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = True
 
     def test(self):
+        if self.current_epoch % self.config.train.get('test_every_n_epochs', 1):
+            return
         print('=== Testing ===')
         self.net_g.eval()
         self.net_d.eval()
