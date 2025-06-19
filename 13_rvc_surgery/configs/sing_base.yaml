@@ -14,7 +14,7 @@ train:
   lam_kl_reg_mus: 0.03
   lam_spk: 1.0
   lam_grl: 4.0
-  phone_aug_scale: 0.5
+  phone_aug_scale: 1.8
   spec_aug_scale: 0.2
   spec_am_min: 0.7
   spec_am_max: 1.3

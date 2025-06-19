@@ -73,6 +73,10 @@ class V08TrainingModule(pl.LightningModule):
                 param.requires_grad = False
             # for param in self.net_g.flow.parameters():
                 # param.requires_grad = False
+
+            # Need to provide adversarial signal
+            for param in self.net_g.enc_p.spk_classifier.parameters():
+                param.requires_grad = True
             for param in self.net_g.last_n_enc_parameters(
                 self.config.train.get('stage1_last_n', 2)):
                 param.requires_grad = True
@@ -136,6 +140,7 @@ class V08TrainingModule(pl.LightningModule):
         spks = batch['spk'] # Speaker embeddings, [B, 256]
 
         disc_optim, gen_optim = self.optimizers()
+        disc_scheduler, gen_scheduler = self.lr_schedulers()
 
         # --- Data augmentation ---
         # Speech feature noising
@@ -208,6 +213,7 @@ class V08TrainingModule(pl.LightningModule):
             self.manual_backward(loss_disc)
             d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1000.)
             disc_optim.step()
+            disc_scheduler.step()
         else:
             d_norm = None
 
@@ -251,6 +257,7 @@ class V08TrainingModule(pl.LightningModule):
             self.manual_backward(loss_gen_all)
             g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 10000.)
             gen_optim.step()
+            gen_scheduler.step()
         else:
             g_norm = None
 
@@ -328,7 +335,17 @@ class V08TrainingModule(pl.LightningModule):
         gen_optim = torch.optim.AdamW(
             self.net_g.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999),
             weight_decay=self.config.train.weight_decay)
-        return [disc_optim, gen_optim], []
+        disc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=disc_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 50000),
+            eta_min=1e-6
+        )
+        gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=gen_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 50000),
+            eta_min=1e-6
+        )
+        return [disc_optim, gen_optim], [disc_scheduler, gen_scheduler]
 
 
 
@@ -403,7 +420,8 @@ if __name__ == '__main__':
         interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_every_n_epochs,
             dirpath=f'checkpoints/teacher/{config.exp_name}',
-            filename='interval-checkpoint'
+            filename='interval-checkpoint-{epoch:04d}',
+            save_top_k=-1
         )
         callbacks.append(interval_checkpoint_callback)
 

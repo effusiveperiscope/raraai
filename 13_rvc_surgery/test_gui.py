@@ -13,8 +13,33 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_singbase_04'
-#CHECKPOINTS_ROOT = 'checkpoints/titan_spk_v3_stage2'
+#CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_test02'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/finetune_fs_04'
+
+import pdb
+import sys
+import traceback
+def custom_excepthook(exc_type, exc_value, exc_traceback):
+    """
+    Custom exception hook that prints the exception information
+    and then drops into a pdb debugger session.
+    """
+    from PyQt5.QtCore import pyqtRemoveInputHook
+    pyqtRemoveInputHook()
+    # First, print the exception information as Python normally would.
+    # We use traceback.print_exception to ensure consistent formatting.
+    print("An unhandled exception occurred:")
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    print("\nDropping into debugger...")
+
+    # Then, drop into the pdb debugger.
+    # The post_mortem function starts the debugger at the point of the exception.
+    pdb.post_mortem(exc_traceback)
+
+# Set the custom exception hook
+sys.excepthook = custom_excepthook
+
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
@@ -30,6 +55,7 @@ class MainWindow(QMainWindow):
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
+        gui.addParam(DoubleParam(label="Noise Aug Scale", id='noise_aug', min=0, max=3, default=0.0))
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=config.model.spk_embed_dim - 1, default=0))
         # TODO - pitch smooth
         gui.addInference(Inference(
@@ -114,9 +140,13 @@ class MainWindow(QMainWindow):
             feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
             # feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
 
+            noise_aug = data['noise_aug']
+            #print(feats['whisp_feat'].std())
+            phone_aug = feats['whisp_feat'] + (torch.randn_like(feats['whisp_feat']) * noise_aug)
+
             with torch.no_grad():
                 o, x_mask, z_stats = self.net_g.infer(
-                    phone=feats['whisp_feat'].half(),
+                    phone=phone_aug.half(),
                     phone_lengths=lens, 
                     nsff0=feats['pitch_fine'].to('cuda').half(),
                     sid=torch.tensor([data['sid']]).to('cuda'),
@@ -132,7 +162,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/sing_base.yaml')
+    config = OmegaConf.load('configs/finetune.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()

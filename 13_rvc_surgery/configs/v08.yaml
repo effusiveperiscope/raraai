@@ -1,4 +1,4 @@
-exp_name: v08_test02
+exp_name: v08_test03
 train:
   lr: 5e-5
   batch_size: 8
@@ -13,15 +13,16 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
   lam_spk: 2.0
-  lam_grl: 5.0
-  phone_aug_scale: 0.5
+  lam_grl: 15.0
+  phone_aug_scale: 1.8
   spec_aug_scale: 0.2
   spec_am_min: 0.7
   spec_am_max: 1.3
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 10000
+  stage1_train_step: 0
+  cosine_anneal_end: 55000
   weight_decay: 1e-3
 model:
   segment_size: 32
