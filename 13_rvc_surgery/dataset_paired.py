@@ -124,7 +124,7 @@ def paired_feature_collator(batch):
         Dictionary with structure:
         {
             'A': {
-                'rvc_feat': padded tensor [batch_size, max_frames, channels],
+                'whisp_feat': padded tensor [batch_size, max_frames, channels],
                 'pitch': padded tensor [batch_size, max_frames],
                 'pitch_fine': padded tensor [batch_size, max_frames], 
                 'spec': padded tensor [batch_size, max_frames, spec_channels],
@@ -149,7 +149,7 @@ def paired_feature_collator(batch):
     sample_lengths = []
     
     for item in all_items:
-        frame_len = item['rvc_feat'].shape[0]
+        frame_len = item['whisp_feat'].shape[0]
         frame_lengths.append(frame_len)
         sample_lengths.append(item['wave'].shape[0])
     
@@ -159,7 +159,7 @@ def paired_feature_collator(batch):
     def collate_items(items):
         """Helper function to collate a list of items (either A or B)"""
         # Initialize lists to collect tensors
-        rvc_feats = []
+        whisp_feats = []
         pitches = []
         pitch_fines = []
         specs = []
@@ -168,20 +168,20 @@ def paired_feature_collator(batch):
         sids = []
         
         for item in items:
-            frame_len = item['rvc_feat'].shape[0]
+            frame_len = item['whisp_feat'].shape[0]
             sample_len = item['wave'].shape[0]
             
             # Pad frame-level features
-            rvc_feat = item['rvc_feat']  # [frames, channels]
+            whisp_feat = item['whisp_feat']  # [frames, channels]
             pitch_fine = item['pitch_fine']  # [frames]
             
             # Pad to max_frames
             if frame_len < max_frames:
                 pad_frames = max_frames - frame_len
-                rvc_feat = F.pad(rvc_feat, (0, 0, 0, pad_frames))  # pad last dim (frames)
+                whisp_feat = F.pad(whisp_feat, (0, 0, 0, pad_frames))  # pad last dim (frames)
                 pitch_fine = F.pad(pitch_fine, (0, pad_frames))
             
-            rvc_feats.append(rvc_feat)
+            whisp_feats.append(whisp_feat)
             pitch_fines.append(pitch_fine)
             
             # Handle spec (might not exist for all items)
@@ -212,7 +212,7 @@ def paired_feature_collator(batch):
         
         # Stack tensors
         result = {
-            'rvc_feat': torch.stack(rvc_feats),      # [batch_size, max_frames, channels]
+            'whisp_feat': torch.stack(whisp_feats),      # [batch_size, max_frames, channels]
             'pitch_fine': torch.stack(pitch_fines), # [batch_size, max_frames]
             'wave': torch.stack(waves),             # [batch_size, max_samples]
             'lengths': torch.tensor(lengths, dtype=torch.long),  # [batch_size]

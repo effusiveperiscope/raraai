@@ -5,6 +5,7 @@ from omegaconf import OmegaConf
 from modeling.grl import grad_reverse
 from modeling.commons import AttentionPooling, DepthwiseSeparableConv1d, SinusoidalPositionalEncoding
 from modeling.spk_cond import FiLMGenerator
+from torch.nn.utils import spectral_norm
 from commons import check_logits
 from einops import rearrange
 
@@ -170,6 +171,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
         ])
         self.pool = AttentionPooling(config.model.disc_channels)
         self.out_proj = nn.Linear(config.model.disc_channels, 1)
+        self.debug_flag = False
 
     def forward(self, x, x_mask, spk):
         g = self.emb_g(spk).unsqueeze(1)
@@ -212,7 +214,7 @@ class V09Encoder(nn.Module):
                 activation=F.silu,
                 batch_first=True
             ),
-            num_layers=3
+            num_layers=config.model.base_encoder_n_layers
         )
         self.pitch_cond = PitchConditioner(config)
         self.content_encoder = ContentEncoder(config)
@@ -233,9 +235,9 @@ class V09Encoder(nn.Module):
 
     def forward(self, h, h_mask, pitch, spk, noise_scale=1.0):
         c = self.content_encode(h, h_mask, pitch)
-        col = self.coloring_tower(c, h_mask, spk)
+        col, cf = self.coloring_tower(c, h_mask, spk)
         p = self.final_proj(col)
-        m_p, logs_p = p.chunk(2, dim=1)
+        m_p, logs_p = p.chunk(2, dim=-1)
         z = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
         return z, m_p, logs_p
 
@@ -257,7 +259,7 @@ class V09Encoder(nn.Module):
         )
 
         # Coloring is speaker-correct.
-        # Discriminator wants to classify AB as fake, B as real.
+        # Discriminator wants to classify BA as fake, A as real.
         # Upstream network wants to trick discriminator.
         col_A, _ = self.coloring_tower(c_A, h_A_mask, spk_A)
         col_BA, _ = self.coloring_tower(c_B, h_B_mask, spk_A)

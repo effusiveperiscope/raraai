@@ -7,10 +7,12 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general, smooth_random_amplitude_modulation
-from dataset import FeatureCollator, FeatureDataset
+from dataset_paired import FeatureDatasetPaired, paired_feature_collator
+from dataset import FeatureDataset, FeatureCollator
 from features import MyFeatures
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from modeling.v08.rvc import V08Synthesizer
+from modeling.v09.rvc import V09Synthesizer
+from svc_helper.svc.rvc.lib.infer_pack import commons
 from rvc_losses import discriminator_loss, feature_loss, generator_loss, kl_loss
 
 import pdb
@@ -36,9 +38,9 @@ sys.excepthook = custom_excepthook
 
 
 
-class V08TrainingModule(pl.LightningModule):
+class V09TrainingModule(pl.LightningModule):
     def __init__(self, 
-        net_g : V08Synthesizer, 
+        net_g : V09Synthesizer, 
         net_d: MultiPeriodDiscriminatorV2, 
         config : OmegaConf):
         super().__init__()
@@ -59,28 +61,19 @@ class V08TrainingModule(pl.LightningModule):
         else:
             return max
 
-    def on_train_step_start(self):
+    def on_train_batch_start(self):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
-            # Freeze prior and posterior
             self.stage1 = True
+            print("=== Stage 1 ===")
+            # Freeze everything except the prior
             for param in self.net_d.parameters():
-                param.requires_grad = True
+                param.requires_grad = False
             for param in self.net_g.parameters():
-                param.requires_grad = True
+                param.requires_grad = False
             for param in self.net_g.enc_p.parameters():
-                param.requires_grad = False
-            for param in self.net_g.enc_q.parameters():
-                param.requires_grad = False
-            # for param in self.net_g.flow.parameters():
-                # param.requires_grad = False
-
-            # Need to provide adversarial signal
-            for param in self.net_g.enc_p.spk_classifier.parameters():
-                param.requires_grad = True
-            for param in self.net_g.last_n_enc_parameters(
-                self.config.train.get('stage1_last_n', 2)):
                 param.requires_grad = True
         else:
+            print("=== Stage 2 ===")
             self.stage1 = False
             for param in self.net_d.parameters():
                 param.requires_grad = True
@@ -110,7 +103,7 @@ class V08TrainingModule(pl.LightningModule):
                 batch['pitch_fine'] = batch['pitch_fine'] * 2 # Octave transpose
                 batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine']).squeeze(0) # Recalculate coarse
             with torch.no_grad():
-                self.net_g : V08Synthesizer
+                self.net_g : V09Synthesizer
                 o, x_mask, z_stats = self.net_g.infer(
                     phone=batch['whisp_feat'].to(self.device).to(self.dtype), 
                     phone_lengths=batch['lengths'].to(self.device), 
@@ -130,48 +123,58 @@ class V08TrainingModule(pl.LightningModule):
 
     
     def step(self, batch, batch_idx, is_train=True, is_val=False):
-        phone = batch['whisp_feat']
-        phone_lengths = batch['lengths']
-        pitch = batch['pitch']
-        pitchf = batch['pitch_fine']
-        sids = batch['sids']
-        y = batch['spec']
-        wave = batch['wave']
-        spks = batch['spk'] # Speaker embeddings, [B, 256]
+        phone_A = batch['A']['whisp_feat']
+        phone_lengths_A = batch['A']['lengths']
+        phone_B = batch['B']['whisp_feat']
+        phone_lengths_B = batch['B']['lengths']
+        pitchf_A = batch['A']['pitch_fine'].to(phone_A.dtype)
+        pitchf_B = batch['B']['pitch_fine'].to(phone_A.dtype)
+        sids_A = batch['A']['sids']
+        spk_feat_A = batch['A']['spk_feat']
+        y_A = batch['A']['spec']
+        y_lengths_A = batch['A']['lengths']
+        wave_A = batch['A']['wave']
 
         disc_optim, gen_optim = self.optimizers()
         disc_scheduler, gen_scheduler = self.lr_schedulers()
 
         # --- Data augmentation ---
         # Speech feature noising
-        phone_aug = phone + torch.randn_like(phone) * self.config.train.phone_aug_scale
+        phone_aug_A = phone_A + torch.randn_like(phone_A) * self.config.train.phone_aug_scale
+        phone_aug_B = phone_B + torch.randn_like(phone_B) * self.config.train.phone_aug_scale
         # Spec power modulation
-        y_aug = smooth_random_amplitude_modulation(y,
+        y_aug_A = smooth_random_amplitude_modulation(y_A,
             min_gain=self.config.train.spec_am_min,
             max_gain=self.config.train.spec_am_max,
             points=self.config.train.spec_am_points)
         # Spec noise
-        y_aug = y_aug + torch.randn_like(y_aug) * self.config.train.spec_aug_scale
+        y_aug_A = y_aug_A + torch.randn_like(y_aug_A) * self.config.train.spec_aug_scale
 
-        if self.config.model.get('use_pitch_predictor', False):
-            pitchq = []
-            for f0 in pitchf:
-                pitchq.append(
-                    discretize_f0_log(
-                        f0, 
-                        self.config.model.get('pitch_quant_dim', 8), 
-                        hold_length=10))
-        else:
-            pitchq = None
-        y_hat, ids_slice, _, z_mask, \
+        # if self.config.model.get('use_pitch_predictor', False):
+            # pitchq = []
+            # for f0 in pitchf:
+                # pitchq.append(
+                    # discretize_f0_log(
+                        # f0, 
+                        # self.config.model.get('pitch_quant_dim', 8), 
+                        # hold_length=10))
+        # else:
+            # pitchq = None
+        pitchq_A = None # We will not train this for now
+
+        y_hat, z_mask, ids_slice, \
             (z, z_p, m_p, logs_p, m_q, logs_q), \
-                spk_emb_pred, f0_pred = self.net_g(
-                phone=phone_aug, phone_lengths=phone_lengths,
-                pitch=pitch, pitchf=pitchf.to(phone.dtype), 
-                y=y_aug, y_lengths=batch['lengths'],
-                ds = sids, lam_grl=self.config.train.lam_grl, pitchq=pitchq)
+                (loss_content_inv, spk_fake_loss, spk_real_loss) = self.net_g(
+                    phone_A = phone_aug_A, phone_A_mask = commons.sequence_mask(phone_lengths_A, phone_A.size(1)),
+                    phone_B = phone_aug_B, phone_B_mask = commons.sequence_mask(phone_lengths_B, phone_B.size(1)),
+                    pitchf_A = pitchf_A, pitchf_B = pitchf_B,
+                    y_A = y_aug_A, y_lengths_A = y_lengths_A,
+                    spk_A = sids_A, spk_feat_A = spk_feat_A,
+                    lam_grl = self.config.train.lam_grl,
+                    pitchq_A = pitchq_A
+                )
 
-        mel = spec_to_mel_torch(rearrange(y, 'b t d -> b d t'),
+        mel = spec_to_mel_torch(rearrange(y_A, 'b t d -> b d t'),
             self.config.data.n_fft, self.config.data.num_mels, 
             self.config.data.sampling_rate, self.config.data.fmin, 
             self.config.data.fmax)
@@ -190,7 +193,7 @@ class V08TrainingModule(pl.LightningModule):
             center=False
         )
         wave = slice_segments_general(
-            wave, ids_slice * self.config.data.hop_length, 
+            wave_A, ids_slice * self.config.data.hop_length, 
             self.config.data.segment_size
         )
         wave = wave[:, :y_hat.shape[2]] 
@@ -234,22 +237,22 @@ class V08TrainingModule(pl.LightningModule):
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) 
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, _ = generator_loss(y_d_hat_g)
-        loss_spk = F.cosine_embedding_loss(
-            spk_emb_pred, spks, torch.ones(spks.shape[0]).to(self.device))
+        loss_spk_disc = spk_fake_loss + spk_real_loss
         loss_gen_all = loss_gen + (
             loss_fm + 
             loss_mel*self.config.train.lam_mel + 
             loss_kl*self.config.train.lam_kl + 
-            loss_spk*self.config.train.lam_spk +
+            loss_content_inv*self.config.train.lam_content_inv +
+            loss_spk_disc * self.config.train.lam_spk_disc
             + loss_kl_reg)
-        if f0_pred is not None:
-            loss_f0 = F.l1_loss(f0_pred, pitchf)
-            loss_gen_all += loss_f0 * self.config.train.get('lam_f0', 0.0)
+
+        # if f0_pred is not None:
+        #     loss_f0 = F.l1_loss(f0_pred, pitchf)
+        #     loss_gen_all += loss_f0 * self.config.train.get('lam_f0', 0.0)
 
         if loss_gen_all.isnan().any():
             loss_gen_all = torch.zeros_like(loss_gen_all)
             print("Warning - NaN detected in loss_gen_all")
-            #import pdb; pdb.set_trace()
             return None
         
         if loss_gen_all.requires_grad:
@@ -269,7 +272,8 @@ class V08TrainingModule(pl.LightningModule):
             'loss_kl': loss_kl,
             'loss_kl_reg': loss_kl_reg,
             'loss_fm': loss_fm,
-            'loss_spk': loss_spk,
+            'loss_content_inv': loss_content_inv,
+            'loss_spk_disc': loss_spk_disc,
             'd_norm': d_norm,
             'g_norm': g_norm,
         }
@@ -296,7 +300,8 @@ class V08TrainingModule(pl.LightningModule):
         self.log('kl_loss', ret['loss_kl'], logger=True)
         self.log('loss_kl_reg', ret['loss_kl_reg'], logger=True, on_step=True)
         self.log('fm_loss', ret['loss_fm'], logger=True)
-        self.log('spk_loss', ret['loss_spk'], logger=True)
+        self.log('content_inv_loss', ret['loss_content_inv'], logger=True)
+        self.log('spk_disc_loss', ret['loss_spk_disc'], logger=True)
         if ret['loss_disc'] is not None:
             self.log('disc_loss', ret['loss_disc'], prog_bar=True, logger=True)
         if ret['d_norm'] is not None:
@@ -315,7 +320,8 @@ class V08TrainingModule(pl.LightningModule):
         self.log('val_mel_loss', ret['loss_mel'], on_epoch=True, logger=True)
         self.log('val_kl_loss', ret['loss_kl'], on_epoch=True, logger=True)
         self.log('val_fm_loss', ret['loss_fm'], on_epoch=True, logger=True)
-        self.log('val_spk_loss', ret['loss_spk'], on_epoch=True, logger=True)
+        self.log('val_content_inv_loss', ret['loss_content_inv'], logger=True)
+        self.log('val_spk_disc_loss', ret['loss_spk_disc'], logger=True)
         
         val_loss = ret['loss_gen_all']
         if ret['loss_disc'] is not None:
@@ -363,9 +369,7 @@ if __name__ == '__main__':
 
     config = OmegaConf.load(args.config)
 
-    net_g = V08Synthesizer(**config.model, is_half=True,
-        use_pitch_predictor=config.model.get('use_pitch_predictor', False),
-        pitch_quant_dim=config.model.get('pitch_quant_dim', 8))
+    net_g = V09Synthesizer(config)
     net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
     if args.stage1_ckpt is not None:
         print('Using stage 1 checkpoint:', args.stage1_ckpt)
@@ -382,19 +386,19 @@ if __name__ == '__main__':
         load_submodule_prefix(net_d, 'net_d.', state)
     else:
         print('!!! No checkpoint file found - starting from scratch !!!')
-    training_module = V08TrainingModule(net_g, net_d, config)
+    training_module = V09TrainingModule(net_g, net_d, config)
         
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=args.version
     )
-    train_dataset = FeatureDataset(config, is_train=True)
-    val_dataset = FeatureDataset(config, is_train=False)
+    train_dataset = FeatureDatasetPaired(config, is_train=True)
+    val_dataset = FeatureDatasetPaired(config, is_train=False)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size = config.train.batch_size,
         shuffle = True,
-        collate_fn = FeatureCollator(),
+        collate_fn = paired_feature_collator,
         num_workers=4,
         persistent_workers=True
     )
@@ -402,7 +406,7 @@ if __name__ == '__main__':
         val_dataset,
         batch_size = config.train.batch_size,
         shuffle = False,
-        collate_fn = FeatureCollator(),
+        collate_fn = paired_feature_collator,
         num_workers=4,
         persistent_workers=True
     )

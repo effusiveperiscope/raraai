@@ -29,7 +29,8 @@ class V09Synthesizer(nn.Module):
             upsample_kernel_sizes=config.model.upsample_kernel_sizes,
             gin_channels=config.model.gin_channels,
             spk_embed_dim=config.model.spk_embed_dim,
-            sr=config.model.sr)
+            sr=config.model.sr,
+            is_half=True)
         self.flow = ResidualCouplingBlock(
             channels=config.model.inter_channels,
             hidden_channels=config.model.hidden_channels,
@@ -46,13 +47,13 @@ class V09Synthesizer(nn.Module):
         phone_B, phone_B_mask,
         pitchf_A, pitchf_B,
         y_A, y_lengths_A,
-        spk_A, spk_emb_A, lam_grl=1.0, pitchq=None
+        spk_A, spk_feat_A, lam_grl=1.0, pitchq_A=None
     ):
         loss_content_inv, spk_fake_loss, spk_real_loss, m_p_A, logs_p_A, z_A = self.enc_p.train_step(
             h_A=phone_A, h_A_mask=phone_A_mask,
             h_B=phone_B, h_B_mask=phone_B_mask,
             pitch_A=pitchf_A, pitch_B=pitchf_B,
-            spk_A=spk_A, spk_emb_A=spk_emb_A,
+            spk_A=spk_A, spk_emb_A=spk_feat_A,
             lambda_grl=lam_grl
         )
         logs_p_A = rearrange(logs_p_A, 'b t c -> b c t')
@@ -69,6 +70,32 @@ class V09Synthesizer(nn.Module):
 
         return o, z_mask, ids_slice, (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
             (loss_content_inv, spk_fake_loss, spk_real_loss)
+
+    @torch.jit.export
+    def infer(
+        self,
+        phone: torch.Tensor,
+        phone_lengths: torch.Tensor,
+        nsff0: torch.Tensor,
+        sid: torch.Tensor,
+        noise_scale: float = 0.66666,
+    ):
+        z_p, m_p, logs_p = self.enc_p(
+            h=phone, 
+            h_mask = commons.sequence_mask(phone_lengths, phone.size(1)),
+            pitch=nsff0,
+            spk=sid, noise_scale=noise_scale)
+        z_p = rearrange(z_p, 'b t c -> b c t')
+        m_p = rearrange(m_p, 'b t c -> b c t')
+        logs_p = rearrange(logs_p, 'b t c -> b c t')
+
+        x_mask = commons.sequence_mask(
+            phone_lengths, phone.size(1)).unsqueeze(1)
+        z_p = z_p * x_mask
+
+        z = self.flow(z_p, x_mask, spk_id=sid, reverse=True)
+        o = self.dec(z * x_mask, nsff0, spk_id=sid)
+        return o, x_mask, (z, z_p, m_p, logs_p)
 
 if __name__ == '__main__':
     from omegaconf import OmegaConf
