@@ -1,6 +1,6 @@
-exp_name: base10
+exp_name: v09_test00
 train:
-  lr: 5e-5
+  lr: 1e-4
   batch_size: 8
   filelist: data/super_diverse/train.txt
   val_filelist: data/super_diverse/val.txt
@@ -8,12 +8,12 @@ train:
   octave_transpose_test: True
   noise_scale_test: 0.5
   epochs: 500
-  lam_mel: 40
+  lam_mel: 45
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
   lam_spk: 2.0
-  lam_grl: 10.0
+  lam_grl: 15.0
   phone_aug_scale: 1.8
   spec_aug_scale: 0.2
   spec_am_min: 0.7
@@ -21,16 +21,23 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 0
+  stage1_train_step: 40000
   cosine_anneal_end: 200000
   weight_decay: 1e-3
+  max_recon_id: 3 # inclusive
+
 model:
   segment_size: 32
   vevo_dim: 1024
   hubert_dim: 512 # whisper-base
   inter_channels: 192
   disc_channels: 256
-  content_size: 64
+
+  content_n_layers: 6
+  coloring_n_layers: 6
+  content_guide_layer: null
+  content_channels: 64
+
   spec_channels: 1025
   hidden_channels: 192
   filter_channels: 768
@@ -45,6 +52,7 @@ model:
   upsample_initial_channel: 512
   upsample_kernel_sizes: [24, 20, 4, 4]
   spk_embed_dim: 10 # Probably more than this cannot be represented (??)
+  spk_emb_channels: 256 # SVC5 speaker invariance embedding from mozilla TTS
   gin_channels: 256
   sr: 48000
 data:

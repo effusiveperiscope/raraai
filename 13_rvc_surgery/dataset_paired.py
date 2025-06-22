@@ -35,9 +35,10 @@ class FeatureDatasetPaired(Dataset):
         for sid in self.sorted_speaker_ids:
             self.files_by_speaker[sid].sort()
 
-        self.all_files = []
+        self.spk_A_files = []
         for sid in self.sorted_speaker_ids:
-            self.all_files += self.files_by_speaker[sid]
+            if sid <= config.train.max_recon_id:
+                self.spk_A_files += self.files_by_speaker[sid]
 
         self.config = config
         self.max_len = self.config.data.max_len
@@ -45,10 +46,10 @@ class FeatureDatasetPaired(Dataset):
         self.is_train = is_train
 
     def __len__(self):
-        return len(self.all_files)
+        return len(self.spk_A_files)
 
     def __getitem__(self, idx):
-        file = self.all_files[idx]
+        file = self.spk_A_files[idx]
         itemdict_A = self.itemdict(file)
 
         sid = itemdict_A['sid']
@@ -59,8 +60,8 @@ class FeatureDatasetPaired(Dataset):
         itemdict_B = self.itemdict(file)
 
         itemdict = {
-            'A': itemdict_A,
             'B': itemdict_B,
+            'A': itemdict_A,
         }
 
         return itemdict
@@ -76,10 +77,10 @@ class FeatureDatasetPaired(Dataset):
         wave = torch.load(os.path.join(load_dir, basename + '.wave'))
 
         if os.path.exists(os.path.join(load_dir, basename + '.whisp_feat')):
-            rvc_feat = torch.load(os.path.join(load_dir, basename + '.whisp_feat')).squeeze(0)
+            whisp_feat = torch.load(os.path.join(load_dir, basename + '.whisp_feat')).squeeze(0)
 
-        pitch = torch.load(os.path.join(load_dir, basename + '.pitch')).squeeze(0)
         pitch_fine = torch.load(os.path.join(load_dir, basename + '.pitch_fine')).squeeze(0)
+        spk_feat = torch.load(os.path.join(load_dir, basename + '.spk_feat')).squeeze(0)
 
         num_samples = wave.shape[0]
         max_len = min(self.max_len, num_samples)
@@ -95,9 +96,9 @@ class FeatureDatasetPaired(Dataset):
 
         item_dict = {
             'wave': wave[start_sample:end_sample],
-            'rvc_feat': rvc_feat[start_frame:end_frame],
-            'pitch': pitch[start_frame:end_frame],
+            'whisp_feat': whisp_feat[start_frame:end_frame],
             'pitch_fine': pitch_fine[start_frame:end_frame],
+            'spk_feat': spk_feat,
             'sid': sid
         }
         
@@ -172,18 +173,15 @@ def paired_feature_collator(batch):
             
             # Pad frame-level features
             rvc_feat = item['rvc_feat']  # [frames, channels]
-            pitch = item['pitch']       # [frames]
             pitch_fine = item['pitch_fine']  # [frames]
             
             # Pad to max_frames
             if frame_len < max_frames:
                 pad_frames = max_frames - frame_len
                 rvc_feat = F.pad(rvc_feat, (0, 0, 0, pad_frames))  # pad last dim (frames)
-                pitch = F.pad(pitch, (0, pad_frames))
                 pitch_fine = F.pad(pitch_fine, (0, pad_frames))
             
             rvc_feats.append(rvc_feat)
-            pitches.append(pitch)
             pitch_fines.append(pitch_fine)
             
             # Handle spec (might not exist for all items)
@@ -215,11 +213,11 @@ def paired_feature_collator(batch):
         # Stack tensors
         result = {
             'rvc_feat': torch.stack(rvc_feats),      # [batch_size, max_frames, channels]
-            'pitch': torch.stack(pitches),          # [batch_size, max_frames]
             'pitch_fine': torch.stack(pitch_fines), # [batch_size, max_frames]
             'wave': torch.stack(waves),             # [batch_size, max_samples]
             'lengths': torch.tensor(lengths, dtype=torch.long),  # [batch_size]
-            'sids': torch.tensor(sids, dtype=torch.long)         # [batch_size]
+            'sids': torch.tensor(sids, dtype=torch.long),         # [batch_size]
+            'spk_feat': torch.stack([item['spk_feat'] for item in items])
         }
         
         # Handle spec - check if any items actually have spec
@@ -251,7 +249,7 @@ def paired_feature_collator(batch):
     }
 
 if __name__ == '__main__':
-    config = OmegaConf.load('configs/base10v1.yaml')
+    config = OmegaConf.load('configs/v09.yaml')
     dataset = FeatureDatasetPaired(config, is_train=True)
     from torch.utils.data import DataLoader
     dataloader = DataLoader(
