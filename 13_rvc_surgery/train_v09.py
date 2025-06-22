@@ -359,7 +359,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/sing_base.yaml')
-    parser.add_argument('--stage1_ckpt', type=str, default=None)
+    parser.add_argument('--gen_ckpt', type=str, default=None)
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
@@ -371,10 +371,10 @@ if __name__ == '__main__':
 
     net_g = V09Synthesizer(config)
     net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-    if args.stage1_ckpt is not None:
-        print('Using stage 1 checkpoint:', args.stage1_ckpt)
-        state_dict = torch.load(args.stage1_ckpt, map_location='cpu')['state_dict']
-        load_submodule_prefix(net_g, 'net_g.', state_dict)
+    if args.gen_ckpt is not None:
+        print('Using gen checkpoint:', args.gen_ckpt)
+        state_dict = torch.load(args.gen_ckpt, map_location='cpu')['model'] 
+        load_state_dict_mismatch(net_g, state_dict)
         state_dict = torch.load(args.disc_ckpt, map_location='cpu')['model'] 
         load_state_dict_mismatch(net_d, state_dict)
     elif args.resume_from is not None:

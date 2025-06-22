@@ -1,7 +1,7 @@
 exp_name: v09_test00
 train:
   lr: 1e-4
-  batch_size: 8
+  batch_size: 6
   filelist: data/v09/train.txt
   val_filelist: data/v09/val.txt
   test_filelist: data/test_whisper/val.txt
