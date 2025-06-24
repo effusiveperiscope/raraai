@@ -61,19 +61,21 @@ class V09TrainingModule(pl.LightningModule):
         else:
             return max
 
-    def on_train_batch_start(self):
+    def on_train_batch_start(self, batch, batch_idx):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
             self.stage1 = True
-            print("=== Stage 1 ===")
-            # Freeze everything except the prior
+            # Freeze everything except the prior, posterior, and flow
             for param in self.net_d.parameters():
                 param.requires_grad = False
             for param in self.net_g.parameters():
                 param.requires_grad = False
             for param in self.net_g.enc_p.parameters():
                 param.requires_grad = True
+            for param in self.net_g.enc_q.parameters():
+                param.requires_grad = True
+            for param in self.net_g.flow.parameters():
+                param.requires_grad = True
         else:
-            print("=== Stage 2 ===")
             self.stage1 = False
             for param in self.net_d.parameters():
                 param.requires_grad = True
@@ -162,6 +164,10 @@ class V09TrainingModule(pl.LightningModule):
             # pitchq = None
         pitchq_A = None # We will not train this for now
 
+        lam_grl = self.step_lerp(max=self.config.train.lam_grl,
+                         start=0, end=self.config.train.grl_end)
+        if self.global_step % self.config.train.grl_every != 0:
+            lam_grl = 0
         y_hat, z_mask, ids_slice, \
             (z, z_p, m_p, logs_p, m_q, logs_q), \
                 (loss_content_inv, spk_fake_loss, spk_real_loss) = self.net_g(
@@ -170,7 +176,7 @@ class V09TrainingModule(pl.LightningModule):
                     pitchf_A = pitchf_A, pitchf_B = pitchf_B,
                     y_A = y_aug_A, y_lengths_A = y_lengths_A,
                     spk_A = sids_A, spk_feat_A = spk_feat_A,
-                    lam_grl = self.config.train.lam_grl,
+                    lam_grl = lam_grl,
                     pitchq_A = pitchq_A
                 )
 

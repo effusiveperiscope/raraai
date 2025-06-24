@@ -229,6 +229,7 @@ class V09Encoder(nn.Module):
     def content_encode(self, h, h_mask, pitch):
         x = self.in_proj(h) + self.pitch_cond(pitch)
         x = self.sipe(x)
+        x = x.to(h.dtype)
         x = self.base_encoder(x, src_key_padding_mask=~h_mask)
         x = self.content_encoder(x, h_mask)
         return x

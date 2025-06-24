@@ -1,4 +1,4 @@
-exp_name: v09_test00
+exp_name: v09_test01
 train:
   lr: 1e-4
   batch_size: 6
@@ -12,7 +12,11 @@ train:
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
+
   lam_grl: 15.0
+  grl_end: 400000
+  grl_every: 2
+
   lam_spk_disc: 1.0
   lam_content_inv: 1.0
   phone_aug_scale: 1.0
@@ -22,7 +26,7 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 20000
+  stage1_train_step: 100000
   cosine_anneal_end: 200000
   weight_decay: 1e-3
   max_recon_id: 3 # inclusive

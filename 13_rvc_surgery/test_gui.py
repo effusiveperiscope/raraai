@@ -3,7 +3,7 @@ from PyQt5.QtCore import pyqtRemoveInputHook
 from PyQt5.QtWidgets import QApplication, QMainWindow
 import librosa
 import numpy as np
-from modeling.v08.rvc import V08Synthesizer
+from modeling.v09.rvc import V09Synthesizer
 from logging import getLogger
 from svc_helper.gui import *
 from omegaconf import OmegaConf
@@ -14,7 +14,7 @@ import soundfile as sf
 
 logger = getLogger(__name__)
 #CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_test02'
-CHECKPOINTS_ROOT = 'checkpoints/teacher/base10'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/v09_test00'
 #CHECKPOINTS_ROOT = 'checkpoints/teacher/finetune_fs_04'
 
 import pdb
@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
         logger.info(f'Loading checkpoint {checkpoint_name}')
         checkpoint_path = os.path.join(CHECKPOINTS_ROOT, checkpoint_name)
         # Points to a lightning checkpoint
-        self.net_g = V08Synthesizer(**self.config.model, is_half=True)
+        self.net_g = V09Synthesizer(config)
         print(count_parameters(self.net_g.enc_p))
 
         state = torch.load(checkpoint_path, map_location='cpu')['state_dict']
@@ -138,7 +138,6 @@ class MainWindow(QMainWindow):
                 # (feats['pitch_fine'] * (2 ** (coarse / 12))).squeeze(0))
 
             # Truncate
-            feats['pitch'] = feats['pitch'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
             # feats['pitch_fine'] = feats['pitch_fine'].to('cuda')[:, :feats['whisp_feat'].shape[1]]
 
             noise_aug = data['noise_aug']
@@ -152,7 +151,6 @@ class MainWindow(QMainWindow):
                     nsff0=feats['pitch_fine'].to('cuda').half(),
                     sid=torch.tensor([data['sid']]).to('cuda'),
                     noise_scale = data['noise'],
-                    prior_pitch=(feats['pitch_fine'].to('cuda') * (2 ** (coarse / 12))).half(),
                     )
                 o_np = o.squeeze().cpu().float().numpy()
                 out.append(AudioResult(
@@ -163,7 +161,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/finetune.yaml')
+    config = OmegaConf.load('configs/v09.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()
