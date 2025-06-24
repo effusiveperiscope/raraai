@@ -369,6 +369,7 @@ if __name__ == '__main__':
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
+    parser.add_argument('--special_transfer', type=str, default=None)
     parser.add_argument('--version', type=int, default=None, help='tensorboard log version')
 
     args = parser.parse_args()
@@ -392,6 +393,14 @@ if __name__ == '__main__':
         load_submodule_prefix(net_d, 'net_d.', state)
     else:
         print('!!! No checkpoint file found - starting from scratch !!!')
+
+    # Transfer prior encoder from last iter
+    if args.special_transfer is not None:
+        print("Begin transfer from {}".format(args.special_transfer))
+        state = torch.load(args.special_transfer, map_location='cpu')['state_dict']
+        load_submodule_prefix(net_g.enc_p, 'net_g.enc_p.', state)
+        print("End transfer from {}".format(args.special_transfer))
+
     training_module = V09TrainingModule(net_g, net_d, config)
         
     logger = pl.loggers.TensorBoardLogger(

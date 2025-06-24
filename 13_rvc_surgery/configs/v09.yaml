@@ -1,11 +1,11 @@
-exp_name: v09_test01
+exp_name: v09_test02
 train:
   lr: 1e-4
   batch_size: 6
   filelist: data/v09/train.txt
   val_filelist: data/v09/val.txt
   test_filelist: data/test_whisper/val.txt
-  octave_transpose_test: True
+  octave_transpose_test: False
   noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
@@ -13,8 +13,8 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 15.0
-  grl_end: 400000
+  lam_grl: 1.0
+  grl_end: 100000
   grl_every: 2
 
   lam_spk_disc: 1.0
