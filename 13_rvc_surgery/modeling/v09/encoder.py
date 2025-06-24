@@ -45,8 +45,8 @@ class ContentEncoder(nn.Module):
                 in_channels=config.model.inter_channels, out_channels=config.model.inter_channels, 
                 kernel_size=3, padding=1) for _ in range(config.model.content_n_layers)
         ])
-        self.conditions = nn.ModuleList([
-            FiLMGenerator(config.model.gin_channels, config.model.inter_channels) for _ in self.convs
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(config.model.inter_channels) for _ in self.convs
         ])
         self.out_proj = nn.Linear(config.model.inter_channels, config.model.content_channels)
 
@@ -56,7 +56,10 @@ class ContentEncoder(nn.Module):
         for i, layer in enumerate(self.convs):
             r_x = x
             x = F.silu(x)
-            x = layer(x)
+
+            x = rearrange(x, "b c t -> b t c")
+            x = self.norms[i](x)
+            x = rearrange(x, "b t c -> b c t")
 
             x = x * rearrange(mask, "b t -> b 1 t")
             x += r_x
@@ -78,6 +81,9 @@ class ColoringTower(nn.Module):
             DepthwiseSeparableConv1d(
                 in_channels=config.model.inter_channels, out_channels=config.model.inter_channels, 
                 kernel_size=3, padding=1) for _ in range(config.model.coloring_n_layers)
+        ])
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(config.model.inter_channels) for _ in self.convs
         ])
         self.conditions = nn.ModuleList([
             FiLMGenerator(config.model.gin_channels, config.model.inter_channels) for _ in self.convs
@@ -101,11 +107,11 @@ class ColoringTower(nn.Module):
                 content_feature = rearrange(x, "b c t -> b t c")
 
             x = F.silu(x)
-            x = layer(x)
 
             gamma, beta = self.conditions[i](g.unsqueeze(1))
             x = rearrange(x, "b c t -> b t c")
             x = gamma * x + beta
+            x = self.norms[i](x)
             x = rearrange(x, "b t c -> b c t")
 
             x = x * rearrange(mask, "b t -> b 1 t")
@@ -126,15 +132,23 @@ class SpeakerEncoder(nn.Module):
                 embed_dim, embed_dim, kernel_size=5, padding=2, spectral_norm=True) for _ in range(n_layers)
             ]
         )
+        self.norms = nn.ModuleList(
+            [nn.LayerNorm(embed_dim) for _ in range(n_layers)]
+        )
         self.final_proj = DepthwiseSeparableConv1d(
             embed_dim, spk_dim, kernel_size=3, padding=1
         )
 
     def forward(self, x, mask):
         x = rearrange(x, "b t c -> b c t")
-        for layer in self.encoder:
+        for i,layer in enumerate(self.encoder):
             x = layer(x)
             x = x * rearrange(mask, "b t -> b 1 t")
+
+            x = rearrange(x, "b c t -> b t c")
+            x = self.norms[i](x)
+            x = rearrange(x, "b t c -> b c t")
+
             x = F.silu(x)
         outputs = self.final_proj(x)
         outputs = torch.mean(outputs, dim=-1)
@@ -164,7 +178,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
                 kernel_size=3, padding=1, spectral_norm=True),
         ])
         self.norms = nn.ModuleList([
-            nn.GroupNorm(1, config.model.disc_channels) for _ in range(len(self.convs))
+            nn.LayerNorm(config.model.disc_channels) for _ in range(len(self.convs))
         ])
         self.conditions = nn.ModuleList([
             FiLMGenerator(config.model.gin_channels, conv.in_channels) for conv in self.convs
@@ -187,9 +201,9 @@ class SpeakerConditionalDiscriminator(nn.Module):
             gamma, beta = self.conditions[i](g)
             x = rearrange(x, "b c t -> b t c")
             x = gamma * x + beta
+            x = self.norms[i](x)
             x = rearrange(x, "b t c -> b c t")
 
-            x = self.norms[i](x)
             x = conv(x) * x_mask.unsqueeze(1)
 
             x = x + xs
@@ -265,7 +279,9 @@ class V09Encoder(nn.Module):
         col_A, _ = self.coloring_tower(c_A, h_A_mask, spk_A)
         col_BA, _ = self.coloring_tower(c_B, h_B_mask, spk_A)
         disc_logits_BA = self.speaker_discriminator(
-            grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
+            # less GRL here because it is deeper in the network 
+            # and harder to train
+            grad_reverse(col_BA, lambda_grl * 0.3), h_B_mask, spk_A)
         disc_logits_A = self.speaker_discriminator(
             col_A.detach(), h_A_mask, spk_A)
         bce = nn.BCEWithLogitsLoss()
