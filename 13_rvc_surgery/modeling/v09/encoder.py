@@ -260,17 +260,19 @@ class V09Encoder(nn.Module):
         h_A, h_A_mask, # h is hubert features
         h_B, h_B_mask,
         pitch_A, pitch_B, spk_A, 
-        spk_emb_A, lambda_grl, label_alpha=0.1):
+        spk_emb_B,
+        lambda_grl, label_alpha=0.1):
 
         c_A = self.content_encode(h_A, h_A_mask, pitch_A)
         c_B = self.content_encode(h_B, h_B_mask, pitch_B)
 
         # Content is speaker agnostic.
         # so-vits-svc 5.0 disentanglement objective
-        spk_emb_pred_A = self.speaker_encoder(
-            grad_reverse(c_A, lambda_grl), h_A_mask)
+        # We do this on B because that gets the full diversity of speakers
+        spk_emb_pred_B = self.speaker_encoder(
+            grad_reverse(c_B, lambda_grl), h_A_mask)
         loss_content_inv = F.cosine_embedding_loss(
-            spk_emb_pred_A, spk_emb_A, torch.ones(spk_emb_A.shape[0]).to(h_A.device)
+            spk_emb_pred_B, spk_emb_B, torch.ones(spk_emb_B.shape[0]).to(h_A.device)
         )
 
         # Coloring is speaker-correct.

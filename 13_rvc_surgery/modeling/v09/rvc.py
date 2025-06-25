@@ -47,13 +47,13 @@ class V09Synthesizer(nn.Module):
         phone_B, phone_B_mask,
         pitchf_A, pitchf_B,
         y_A, y_lengths_A,
-        spk_A, spk_feat_A, lam_grl=1.0, pitchq_A=None
+        spk_A, spk_feat_B, lam_grl=1.0, pitchq_A=None
     ):
         loss_content_inv, spk_fake_loss, spk_real_loss, m_p_A, logs_p_A, z_A = self.enc_p.train_step(
             h_A=phone_A, h_A_mask=phone_A_mask,
             h_B=phone_B, h_B_mask=phone_B_mask,
             pitch_A=pitchf_A, pitch_B=pitchf_B,
-            spk_A=spk_A, spk_emb_A=spk_feat_A,
+            spk_A=spk_A, spk_emb_B=spk_feat_B,
             lambda_grl=lam_grl
         )
         logs_p_A = rearrange(logs_p_A, 'b t c -> b c t')

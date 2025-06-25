@@ -132,7 +132,7 @@ class V09TrainingModule(pl.LightningModule):
         pitchf_A = batch['A']['pitch_fine'].to(phone_A.dtype)
         pitchf_B = batch['B']['pitch_fine'].to(phone_A.dtype)
         sids_A = batch['A']['sids']
-        spk_feat_A = batch['A']['spk_feat']
+        spk_feat_B = batch['B']['spk_feat']
         y_A = batch['A']['spec']
         y_lengths_A = batch['A']['lengths']
         wave_A = batch['A']['wave']
@@ -175,7 +175,7 @@ class V09TrainingModule(pl.LightningModule):
                     phone_B = phone_aug_B, phone_B_mask = commons.sequence_mask(phone_lengths_B, phone_B.size(1)),
                     pitchf_A = pitchf_A, pitchf_B = pitchf_B,
                     y_A = y_aug_A, y_lengths_A = y_lengths_A,
-                    spk_A = sids_A, spk_feat_A = spk_feat_A,
+                    spk_A = sids_A, spk_feat_B = spk_feat_B,
                     lam_grl = lam_grl,
                     pitchq_A = pitchq_A
                 )
