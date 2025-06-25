@@ -1,4 +1,4 @@
-exp_name: v09_test03
+exp_name: v09_test04
 train:
   lr: 1e-4
   batch_size: 6
@@ -13,7 +13,7 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 1.0
+  lam_grl: 0.40
   grl_end: 100000
   grl_every: 2
 
