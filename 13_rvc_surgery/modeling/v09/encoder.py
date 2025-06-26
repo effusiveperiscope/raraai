@@ -283,7 +283,7 @@ class V09Encoder(nn.Module):
         disc_logits_BA = self.speaker_discriminator(
             # less GRL here because it is deeper in the network 
             # and harder to train
-            grad_reverse(col_BA, lambda_grl * 0.5), h_B_mask, spk_A)
+            grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
         disc_logits_A = self.speaker_discriminator(
             col_A.detach(), h_A_mask, spk_A)
         bce = nn.BCEWithLogitsLoss()

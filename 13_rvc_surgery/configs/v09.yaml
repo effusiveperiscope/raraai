@@ -1,4 +1,4 @@
-exp_name: v09_test07
+exp_name: v09_test08
 train:
   lr: 5e-5
   batch_size: 6
@@ -13,12 +13,12 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.20
+  lam_grl: 0.12
   grl_end: 100000
   grl_every: 2
 
   lam_spk_disc: 1.0
-  lam_content_inv: 1.0
+  lam_content_inv: 3.0
   phone_aug_scale: 1.0
   spec_aug_scale: 0.2
   spec_am_min: 0.7
