@@ -218,6 +218,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
 class V09Encoder(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
+        self.config = config
         self.in_proj = nn.Linear(config.model.get('hubert_dim', 768), config.model.inter_channels)
         self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
         self.base_encoder = nn.TransformerEncoder(
@@ -270,7 +271,7 @@ class V09Encoder(nn.Module):
         # so-vits-svc 5.0 disentanglement objective
         # We do this on B because that gets the full diversity of speakers
         spk_emb_pred_B = self.speaker_encoder(
-            grad_reverse(c_B, lambda_grl), h_A_mask)
+            grad_reverse(c_B, lambda_grl * self.config.train.mul_grl_content), h_A_mask)
         loss_content_inv = F.cosine_embedding_loss(
             spk_emb_pred_B, spk_emb_B, torch.ones(spk_emb_B.shape[0]).to(h_A.device)
         )

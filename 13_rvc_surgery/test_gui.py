@@ -14,7 +14,7 @@ import soundfile as sf
 
 logger = getLogger(__name__)
 #CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_test02'
-CHECKPOINTS_ROOT = 'checkpoints/teacher/v09_test03'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/v09_test12'
 #CHECKPOINTS_ROOT = 'checkpoints/teacher/finetune_fs_04'
 
 import pdb
