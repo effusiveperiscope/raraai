@@ -14,6 +14,7 @@ from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 from modeling.v09.rvc import V09Synthesizer
 from svc_helper.svc.rvc.lib.infer_pack import commons
 from rvc_losses import discriminator_loss, feature_loss, generator_loss, kl_loss
+import random
 
 import pdb
 import sys
@@ -142,8 +143,11 @@ class V09TrainingModule(pl.LightningModule):
 
         # --- Data augmentation ---
         # Speech feature noising
-        phone_aug_A = phone_A + torch.randn_like(phone_A) * self.config.train.phone_aug_scale
-        phone_aug_B = phone_B + torch.randn_like(phone_B) * self.config.train.phone_aug_scale
+        phone_aug_level_A = random.random() * self.config.train.phone_aug_max
+        phone_aug_level_B = random.random() * self.config.train.phone_aug_max
+        phone_aug_A = phone_A + torch.randn_like(phone_A) * phone_aug_level_A
+        phone_aug_B = phone_B + torch.randn_like(phone_B) * phone_aug_level_B
+
         # Spec power modulation
         y_aug_A = smooth_random_amplitude_modulation(y_A,
             min_gain=self.config.train.spec_am_min,

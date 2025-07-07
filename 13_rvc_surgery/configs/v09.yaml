@@ -1,4 +1,4 @@
-exp_name: v09_test13
+exp_name: v09_test17
 train:
   lr: 5e-5
   batch_size: 6
@@ -14,20 +14,20 @@ train:
   lam_kl_reg_mus: 0.03
 
   lam_grl: 0.1
-  mul_grl_content: 0.1
-  grl_end: 300000
+  mul_grl_content: 0.15
+  grl_end: 50000
   grl_every: 2
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0
-  phone_aug_scale: 1.0
+  phone_aug_max: 2.0
   spec_aug_scale: 0.2
   spec_am_min: 0.7
   spec_am_max: 1.3
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 0
+  stage1_train_step: 50000
   cosine_anneal_end: 700000
   weight_decay: 1e-3
   max_recon_id: 3 # inclusive
@@ -40,8 +40,8 @@ model:
   disc_channels: 256
 
   base_encoder_n_layers: 3
-  content_n_layers: 6
-  coloring_n_layers: 6
+  content_n_layers: 8
+  coloring_n_layers: 8
   content_guide_layer: null
   content_channels: 64
 

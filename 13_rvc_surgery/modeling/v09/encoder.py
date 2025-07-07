@@ -257,6 +257,12 @@ class V09Encoder(nn.Module):
         z = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
         return z, m_p, logs_p
 
+    def disc_logits(self, h, h_mask, pitch, spk):
+        c = self.content_encode(h, h_mask, pitch)
+        col, cf = self.coloring_tower(c, h_mask, spk)
+        disc_logits = self.speaker_discriminator(col, h_mask, spk)
+        return disc_logits
+
     def train_step(self,
         h_A, h_A_mask, # h is hubert features
         h_B, h_B_mask,

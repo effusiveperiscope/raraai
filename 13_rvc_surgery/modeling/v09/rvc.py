@@ -97,6 +97,16 @@ class V09Synthesizer(nn.Module):
         o = self.dec(z * x_mask, nsff0, spk_id=sid)
         return o, x_mask, (z, z_p, m_p, logs_p)
 
+    def enc_disc_logits(self,
+        phone,
+        phone_lengths,
+        nsff0,
+        sid):
+        disc_logits = self.enc_p.disc_logits(
+            h=phone, h_mask=commons.sequence_mask(phone_lengths, phone.size(1)),
+            pitch=nsff0, spk=sid)
+        return disc_logits
+
 if __name__ == '__main__':
     from omegaconf import OmegaConf
     config = OmegaConf.load('configs/v09.yaml')

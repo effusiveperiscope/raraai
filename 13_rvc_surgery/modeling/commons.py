@@ -20,8 +20,8 @@ class AttentionPooling(nn.Module):
         if (valid_tokens == 0).any():
             print("Warning: Found sequences with no valid tokens!")
 
-        attn_scores = attn_scores.masked_fill(x_mask == 0, -1e9)
-        attn_weights = F.softmax(attn_scores, dim=-1)  # (B, T)
+        attn_scores = attn_scores.float().masked_fill(x_mask == 0, -1e9)
+        attn_weights = F.softmax(attn_scores, dim=-1).to(x.dtype)  # (B, T)
         pooled = (x * attn_weights.unsqueeze(-1)).sum(dim=1)  # (B, C)
         return pooled
 
