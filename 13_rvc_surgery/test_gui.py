@@ -14,7 +14,7 @@ import soundfile as sf
 
 logger = getLogger(__name__)
 #CHECKPOINTS_ROOT = 'checkpoints/teacher/v08_test02'
-CHECKPOINTS_ROOT = 'checkpoints/teacher/v09_test12'
+CHECKPOINTS_ROOT = 'checkpoints/teacher/v09_test16'
 #CHECKPOINTS_ROOT = 'checkpoints/teacher/finetune_fs_04'
 
 import pdb
@@ -152,6 +152,14 @@ class MainWindow(QMainWindow):
                     sid=torch.tensor([data['sid']]).to('cuda'),
                     noise_scale = data['noise'],
                     )
+                disc_logits = self.net_g.enc_disc_logits(
+                    phone=phone_aug.half(),
+                    phone_lengths=lens, 
+                    nsff0=feats['pitch_fine'].to('cuda').half(),
+                    sid=torch.tensor([data['sid']]).to('cuda'),
+                )
+                disc_prob = disc_logits.sigmoid()
+                print(f'Disc prob: {disc_prob.item()}')
                 o_np = o.squeeze().cpu().float().numpy()
                 out.append(AudioResult(
                     label=os.path.basename(file)+data['model_labels'][0],
