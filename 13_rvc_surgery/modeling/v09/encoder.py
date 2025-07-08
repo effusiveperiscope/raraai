@@ -163,19 +163,23 @@ class SpeakerConditionalDiscriminator(nn.Module):
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 
-                kernel_size=7, padding=3, spectral_norm=True),
-            DepthwiseSeparableConv1d(
-                in_channels=config.model.disc_channels, 
-                out_channels=config.model.disc_channels, 
-                kernel_size=5, padding=2, spectral_norm=True),
-            DepthwiseSeparableConv1d(
-                in_channels=config.model.disc_channels, 
-                out_channels=config.model.disc_channels, 
                 kernel_size=3, padding=1, spectral_norm=True),
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 
-                kernel_size=3, padding=1, spectral_norm=True),
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=1, padding=0, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=1, padding=0, spectral_norm=True),
         ])
         self.norms = nn.ModuleList([
             nn.LayerNorm(config.model.disc_channels) for _ in range(len(self.convs))
