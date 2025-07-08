@@ -1,4 +1,4 @@
-exp_name: v09_test18
+exp_name: v09_test19
 train:
   lr: 5e-5
   batch_size: 6
@@ -13,10 +13,10 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.1
-  mul_grl_content: 0.15
+  lam_grl: 0.05
+  mul_grl_content: 0.3
   grl_end: 50000
-  grl_every: 2
+  grl_every: 3
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0
@@ -27,7 +27,7 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 50000
+  stage1_train_step: 4000
   cosine_anneal_end: 700000
   weight_decay: 1e-3
   max_recon_id: 3 # inclusive
@@ -37,7 +37,7 @@ model:
   vevo_dim: 1024
   hubert_dim: 512 # whisper-base
   inter_channels: 192
-  disc_channels: 256
+  disc_channels: 384
 
   base_encoder_n_layers: 3
   content_n_layers: 8

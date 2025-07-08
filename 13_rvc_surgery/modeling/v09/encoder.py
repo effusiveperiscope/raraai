@@ -157,7 +157,7 @@ class SpeakerEncoder(nn.Module):
 class SpeakerConditionalDiscriminator(nn.Module):
     def __init__(self, config : OmegaConf):
         super().__init__()
-        self.emb_g = nn.Embedding(config.model.spk_embed_dim, config.model.disc_channels)
+        self.emb_g = nn.Embedding(config.model.spk_embed_dim, config.model.gin_channels)
         self.in_proj = nn.Linear(config.model.inter_channels, config.model.disc_channels)
         self.convs = nn.ModuleList([
             DepthwiseSeparableConv1d(
@@ -167,7 +167,7 @@ class SpeakerConditionalDiscriminator(nn.Module):
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 
-                kernel_size=1, padding=0, spectral_norm=True),
+                kernel_size=3, padding=1, spectral_norm=True),
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 

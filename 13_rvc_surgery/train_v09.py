@@ -65,17 +65,24 @@ class V09TrainingModule(pl.LightningModule):
     def on_train_batch_start(self, batch, batch_idx):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
             self.stage1 = True
-            # Freeze everything except the prior, posterior, and flow
             for param in self.net_d.parameters():
                 param.requires_grad = False
             for param in self.net_g.parameters():
                 param.requires_grad = False
-            for param in self.net_g.enc_p.parameters():
+            # Only train encoder speaker discriminator
+            for param in self.net_g.enc_p.speaker_discriminator.parameters():
                 param.requires_grad = True
-            for param in self.net_g.enc_q.parameters():
-                param.requires_grad = True
-            for param in self.net_g.flow.parameters():
-                param.requires_grad = True
+            
+            # for param in self.net_d.parameters():
+                # param.requires_grad = False
+            # for param in self.net_g.parameters():
+                # param.requires_grad = False
+            # for param in self.net_g.enc_p.parameters():
+                # param.requires_grad = True
+            # for param in self.net_g.enc_q.parameters():
+                # param.requires_grad = True
+            # for param in self.net_g.flow.parameters():
+                # param.requires_grad = True
         else:
             self.stage1 = False
             for param in self.net_d.parameters():
