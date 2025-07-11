@@ -6,7 +6,8 @@ from torch.utils.data import Dataset
 import torch.nn.functional as F
 
 class FeatureDataset(Dataset):
-    def __init__(self, config: OmegaConf, is_train=True, override_filelist=None):
+    def __init__(self, config: OmegaConf, is_train=True, override_filelist=None,
+        default_sid=0):
         filelist_to_use = config.train.filelist if is_train else config.train.val_filelist
         filelist_to_use = override_filelist if override_filelist is not None else filelist_to_use
         self.feature_dir = os.path.dirname(filelist_to_use)
@@ -31,6 +32,7 @@ class FeatureDataset(Dataset):
         self.config = config
         self.max_len = self.config.data.max_len
         self.hop_length = self.config.data.hop_length
+        self.default_sid = default_sid
 
     def __len__(self):
         return len(self.files)
@@ -41,7 +43,7 @@ class FeatureDataset(Dataset):
             sid = self.files[idx][1]
         else:
             path = self.files[idx]
-            sid = 0
+            sid = self.default_sid
         basename = os.path.basename(path)
         load_dir = self.feature_dir if self.feature_dir else '.'
 

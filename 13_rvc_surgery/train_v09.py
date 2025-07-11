@@ -65,24 +65,24 @@ class V09TrainingModule(pl.LightningModule):
     def on_train_batch_start(self, batch, batch_idx):
         if self.global_step < self.config.train.get('stage1_train_step', 0):
             self.stage1 = True
-            for param in self.net_d.parameters():
-                param.requires_grad = False
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-            # Only train encoder speaker discriminator
-            for param in self.net_g.enc_p.speaker_discriminator.parameters():
-                param.requires_grad = True
-            
             # for param in self.net_d.parameters():
                 # param.requires_grad = False
             # for param in self.net_g.parameters():
                 # param.requires_grad = False
-            # for param in self.net_g.enc_p.parameters():
+            # Only train encoder speaker discriminator
+            # for param in self.net_g.enc_p.speaker_discriminator.parameters():
                 # param.requires_grad = True
-            # for param in self.net_g.enc_q.parameters():
-                # param.requires_grad = True
-            # for param in self.net_g.flow.parameters():
-                # param.requires_grad = True
+            
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_q.parameters():
+                param.requires_grad = True
+            for param in self.net_g.flow.parameters():
+                param.requires_grad = True
         else:
             self.stage1 = False
             for param in self.net_d.parameters():
@@ -99,7 +99,8 @@ class V09TrainingModule(pl.LightningModule):
 
         if not hasattr(self, 'test_dataset'):
             self.test_dataset = FeatureDataset(self.config, is_train=False, 
-                override_filelist=self.config.train.test_filelist)
+                override_filelist=self.config.train.test_filelist,
+                default_sid=self.config.train.sid_test)
             self.test_dataloader = torch.utils.data.DataLoader(
                 self.test_dataset,
                 batch_size=self.config.train.batch_size,
@@ -439,7 +440,7 @@ if __name__ == '__main__':
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='val_loss',
-        dirpath=f'checkpoints/teacher/{config.exp_name}',
+        dirpath=f'checkpoints/{config.exp_name}',
         filename='best-checkpoint',
         save_top_k=2,
         mode='min',
@@ -449,7 +450,7 @@ if __name__ == '__main__':
     if config.train.get('save_every_n_epochs'):
         interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_every_n_epochs,
-            dirpath=f'checkpoints/teacher/{config.exp_name}',
+            dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}',
             save_top_k=-1
         )
