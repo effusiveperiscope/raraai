@@ -61,7 +61,8 @@ class ContentEncoder(nn.Module):
             x = self.norms[i](x)
             x = rearrange(x, "b t c -> b c t")
 
-            x = x * rearrange(mask, "b t -> b 1 t")
+            x = layer(x) * rearrange(mask, "b t -> b 1 t")
+
             x += r_x
         x = rearrange(x, "b c t -> b t c")
         return self.out_proj(x)
@@ -114,7 +115,7 @@ class ColoringTower(nn.Module):
             x = self.norms[i](x)
             x = rearrange(x, "b t c -> b c t")
 
-            x = x * rearrange(mask, "b t -> b 1 t")
+            x = layer(x) * rearrange(mask, "b t -> b 1 t")
 
             x += r_x
         x = rearrange(x, "b c t -> b t c")
@@ -260,6 +261,19 @@ class V09Encoder(nn.Module):
         m_p, logs_p = p.chunk(2, dim=-1)
         z = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
         return z, m_p, logs_p
+
+    def finetune_step(self, h, h_mask, pitch, spk, spk_emb, lambda_grl, noise_scale=1.0):
+        c = self.content_encode(h, h_mask, pitch)
+        col, cf = self.coloring_tower(c, h_mask, spk)
+        p = self.final_proj(col)
+        m_p, logs_p = p.chunk(2, dim=-1)
+        z = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
+
+        spk_emb_pred = self.speaker_encoder(
+            grad_reverse(c, lambda_grl * self.config.train.mul_grl_content), h_mask)
+        loss_content_inv = F.cosine_embedding_loss(
+            spk_emb_pred, spk_emb, torch.ones(spk_emb.shape[0]).to(h.device))
+        return z, m_p, logs_p, loss_content_inv
 
     def disc_logits(self, h, h_mask, pitch, spk):
         c = self.content_encode(h, h_mask, pitch)
