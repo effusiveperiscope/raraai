@@ -1,49 +1,86 @@
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
-from features import MyFeatures
-from modeling.v05.rvc import SynthesizerV05
-from dataset_paired import FeatureDatasetPaired, paired_feature_collator
-from dataset import FeatureDataset, FeatureCollator
-from rvc_losses import feature_loss, discriminator_loss, generator_loss, kl_loss
-from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-import torch.nn.functional as F
-from commons import (
-    slice_segments_general, load_state_dict_mismatch,
-    smooth_random_amplitude_modulation, random_subsample_segments)
-from omegaconf import OmegaConf
-import pytorch_lightning as pl
-import torch
 from einops import rearrange
+from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from svc_helper.pitch.utils import discretize_f0_log
+from omegaconf import OmegaConf
+import torch
+import pytorch_lightning as pl
+import torch.nn.functional as F
 
-class V07FinetuneModule(pl.LightningModule):
+from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general, smooth_random_amplitude_modulation
+from dataset import FeatureDataset, FeatureCollator
+from features import MyFeatures
+from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
+from modeling.v09.rvc import V09Synthesizer
+from svc_helper.svc.rvc.lib.infer_pack import commons
+from rvc_losses import discriminator_loss, feature_loss, generator_loss, kl_loss
+import random
+
+import pdb
+import sys
+import traceback
+def custom_excepthook(exc_type, exc_value, exc_traceback):
+    """
+    Custom exception hook that prints the exception information
+    and then drops into a pdb debugger session.
+    """
+    # First, print the exception information as Python normally would.
+    # We use traceback.print_exception to ensure consistent formatting.
+    print("An unhandled exception occurred:")
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    print("\nDropping into debugger...")
+
+    # Then, drop into the pdb debugger.
+    # The post_mortem function starts the debugger at the point of the exception.
+    pdb.post_mortem(exc_traceback)
+
+# Set the custom exception hook
+sys.excepthook = custom_excepthook
+
+
+
+class V09TrainingModule(pl.LightningModule):
     def __init__(self, 
-        net_g : SynthesizerV05, 
-        net_d: MultiPeriodDiscriminatorV2, config : OmegaConf):
+        net_g : V09Synthesizer, 
+        net_d: MultiPeriodDiscriminatorV2, 
+        config : OmegaConf):
         super().__init__()
         self.net_g = net_g
         self.net_d = net_d
         self.config = config
         self.automatic_optimization = False
+        self.stage1 = False
 
     def on_train_start(self):
         self.test()
 
-    def on_train_step_start(self):
-        for param in self.net_g.parameters():
-            param.requires_grad = True
+    def step_lerp(self, min=0, max=1, start=0, end=10000):
+        if self.global_step < start:
+            return min
+        elif self.global_step < end:
+            return (self.global_step - start) / (end - start) * (max - min) + min
+        else:
+            return max
+
+    def on_train_batch_start(self, batch, batch_idx):
         for param in self.net_d.parameters():
             param.requires_grad = True
-        # Freeze content encoder
-        for param in self.net_g.enc_p.content_encoder.parameters():
-            param.requires_grad = False
+        for param in self.net_g.parameters():
+            param.requires_grad = True
+        # Freeze the content encoder
+        # for param in self.net_g.enc_p.content_encoder.parameters():
+            # param.requires_grad = False
 
     def test(self):
+        if self.current_epoch % self.config.train.get('test_every_n_epochs', 1):
+            return
         print('=== Testing ===')
         self.net_g.eval()
         self.net_d.eval()
 
         if not hasattr(self, 'test_dataset'):
             self.test_dataset = FeatureDataset(self.config, is_train=False, 
-                override_filelist=self.config.train.test_filelist)
+                override_filelist=self.config.train.test_filelist,
+                default_sid=self.config.train.sid_test)
             self.test_dataloader = torch.utils.data.DataLoader(
                 self.test_dataset,
                 batch_size=self.config.train.batch_size,
@@ -57,12 +94,12 @@ class V07FinetuneModule(pl.LightningModule):
                 batch['pitch_fine'] = batch['pitch_fine'] * 2 # Octave transpose
                 batch['pitch'] = MyFeatures.f0_to_coarse(batch['pitch_fine']).squeeze(0) # Recalculate coarse
             with torch.no_grad():
+                self.net_g : V09Synthesizer
                 o, x_mask, z_stats = self.net_g.infer(
-                    batch['whisp_feat'].to(self.device).to(self.dtype), 
-                    batch['lengths'].to(self.device), 
-                    batch['pitch'].to(self.device), 
-                    batch['pitch_fine'].to(self.device).to(self.dtype),
-                    batch['sids'].to(self.device),
+                    phone=batch['whisp_feat'].to(self.device).to(self.dtype), 
+                    phone_lengths=batch['lengths'].to(self.device), 
+                    nsff0=batch['pitch_fine'].to(self.device).to(self.dtype),
+                    sid=batch['sids'].to(self.device),
                     noise_scale=self.config.train.noise_scale_test
                 )
                 for i, audio in enumerate(o):
@@ -75,19 +112,25 @@ class V07FinetuneModule(pl.LightningModule):
                     )
                 self.logger.experiment.flush()
 
+    
     def step(self, batch, batch_idx, is_train=True, is_val=False):
         phone = batch['whisp_feat']
         phone_lengths = batch['lengths']
-        pitchf = batch['pitch_fine']
-        spks = batch['sids']
+        pitchf = batch['pitch_fine'].to(phone.dtype)
+        sids = batch['sids']
+        spk_feat = batch['spk']
         y = batch['spec']
+        y_lengths = batch['lengths']
         wave = batch['wave']
 
         disc_optim, gen_optim = self.optimizers()
+        disc_scheduler, gen_scheduler = self.lr_schedulers()
 
         # --- Data augmentation ---
         # Speech feature noising
-        phone_aug = phone + torch.randn_like(phone) * self.config.train.phone_aug_scale
+        phone_aug_level = random.random() * self.config.train.phone_aug_max
+        phone_aug = phone + torch.randn_like(phone) * phone_aug_level
+
         # Spec power modulation
         y_aug = smooth_random_amplitude_modulation(y,
             min_gain=self.config.train.spec_am_min,
@@ -96,15 +139,27 @@ class V07FinetuneModule(pl.LightningModule):
         # Spec noise
         y_aug = y_aug + torch.randn_like(y_aug) * self.config.train.spec_aug_scale
 
-        # During stage 1, the discriminator isn't touched by any gradients
+        # if self.config.model.get('use_pitch_predictor', False):
+            # pitchq = []
+            # for f0 in pitchf:
+                # pitchq.append(
+                    # discretize_f0_log(
+                        # f0, 
+                        # self.config.model.get('pitch_quant_dim', 8), 
+                        # hold_length=10))
+        # else:
+            # pitchq = None
+        pitchq = None # We will not train this for now
 
+        lam_grl = self.step_lerp(max=self.config.train.lam_grl,
+                         start=0, end=self.config.train.grl_end)
+        if self.global_step % self.config.train.grl_every != 0:
+            lam_grl = 0
         y_hat, z_mask, ids_slice, \
-            (z, z_p, m_p, logs_p, m_q, logs_q) = self.net_g.step_finetune(
-                phone=phone_aug, phone_lengths=phone_lengths,
-                pitchf=pitchf, 
-                spks=spks,
-                y=y_aug, y_lengths=batch['lengths'],
-            )
+            (z, z_p, m_p, logs_p, m_q, logs_q), loss_content_inv = self.net_g.finetune_step(
+                phone=phone_aug, phone_mask=commons.sequence_mask(phone_lengths, phone.size(1)),
+                pitchf=pitchf, y=y_aug, y_lengths=y_lengths,
+                spk=sids, spk_feat=spk_feat, lambda_grl=lam_grl, pitchq=pitchq)
 
         mel = spec_to_mel_torch(rearrange(y, 'b t d -> b d t'),
             self.config.data.n_fft, self.config.data.num_mels, 
@@ -148,16 +203,16 @@ class V07FinetuneModule(pl.LightningModule):
             self.manual_backward(loss_disc)
             d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1000.)
             disc_optim.step()
+            disc_scheduler.step()
         else:
             d_norm = None
 
         # Train generator
         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(wave.unsqueeze(1), y_hat)
         loss_mel = F.l1_loss(y_mel, y_hat_mel)
+
         # Regularization of prior to prevent numerical instability
-
         active_elements = torch.sum(z_mask)
-
         if active_elements == 0:
             loss_kl_reg = torch.tensor(0.0, device=self.device)
         else:
@@ -165,19 +220,23 @@ class V07FinetuneModule(pl.LightningModule):
                 self.config.train.lam_kl_reg_logs / active_elements \
                 + torch.sum(m_p ** 2 * z_mask) * \
                 self.config.train.lam_kl_reg_mus / active_elements
+
         loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) 
         loss_fm = feature_loss(fmap_r, fmap_g)
         loss_gen, _ = generator_loss(y_d_hat_g)
         loss_gen_all = loss_gen + (
             loss_fm + 
             loss_mel*self.config.train.lam_mel + 
-            loss_kl*self.config.train.lam_kl + 
-            + loss_kl_reg)
+            loss_kl*self.config.train.lam_kl + loss_kl_reg +
+            loss_content_inv*self.config.train.lam_content_inv)
+
+        # if f0_pred is not None:
+        #     loss_f0 = F.l1_loss(f0_pred, pitchf)
+        #     loss_gen_all += loss_f0 * self.config.train.get('lam_f0', 0.0)
 
         if loss_gen_all.isnan().any():
             loss_gen_all = torch.zeros_like(loss_gen_all)
             print("Warning - NaN detected in loss_gen_all")
-            #import pdb; pdb.set_trace()
             return None
         
         if loss_gen_all.requires_grad:
@@ -185,6 +244,7 @@ class V07FinetuneModule(pl.LightningModule):
             self.manual_backward(loss_gen_all)
             g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 10000.)
             gen_optim.step()
+            gen_scheduler.step()
         else:
             g_norm = None
 
@@ -195,6 +255,7 @@ class V07FinetuneModule(pl.LightningModule):
             'loss_mel': loss_mel,
             'loss_kl': loss_kl,
             'loss_kl_reg': loss_kl_reg,
+            'loss_content_inv': loss_content_inv,
             'loss_fm': loss_fm,
             'd_norm': d_norm,
             'g_norm': g_norm,
@@ -222,6 +283,7 @@ class V07FinetuneModule(pl.LightningModule):
         self.log('kl_loss', ret['loss_kl'], logger=True)
         self.log('loss_kl_reg', ret['loss_kl_reg'], logger=True, on_step=True)
         self.log('fm_loss', ret['loss_fm'], logger=True)
+        self.log('content_inv_loss', ret['loss_content_inv'], logger=True)
         if ret['loss_disc'] is not None:
             self.log('disc_loss', ret['loss_disc'], prog_bar=True, logger=True)
         if ret['d_norm'] is not None:
@@ -240,6 +302,7 @@ class V07FinetuneModule(pl.LightningModule):
         self.log('val_mel_loss', ret['loss_mel'], on_epoch=True, logger=True)
         self.log('val_kl_loss', ret['loss_kl'], on_epoch=True, logger=True)
         self.log('val_fm_loss', ret['loss_fm'], on_epoch=True, logger=True)
+        self.log('val_content_inv_loss', ret['loss_content_inv'], logger=True)
         
         val_loss = ret['loss_gen_all']
         if ret['loss_disc'] is not None:
@@ -254,98 +317,91 @@ class V07FinetuneModule(pl.LightningModule):
 
     def configure_optimizers(self):
         disc_optim = torch.optim.AdamW(
-            self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
+            self.net_d.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999),
+            weight_decay=self.config.train.weight_decay)
         gen_optim = torch.optim.AdamW(
-            self.net_g.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999))
-        return [disc_optim, gen_optim], []
+            self.net_g.parameters(), lr=self.config.train.lr, betas=(0.9, 0.999),
+            weight_decay=self.config.train.weight_decay)
+        disc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=disc_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 50000),
+            eta_min=1e-6
+        )
+        gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=gen_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 50000),
+            eta_min=1e-6
+        )
+        return [disc_optim, gen_optim], [disc_scheduler, gen_scheduler]
+
+
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/v07.yaml')
-    parser.add_argument('--gen_ckpt', type=str, default=None) # RVC G_ checkpoint
+    parser.add_argument('--config', type=str, default='configs/sing_base.yaml')
+    parser.add_argument('--gen_ckpt', type=str, default=None)
     parser.add_argument('--disc_ckpt', type=str, default=None) # RVC D_ checkpoint
     parser.add_argument('--resume_from', type=str, default=None)
-    parser.add_argument('--transfer_from', type=str, default=None) # transfer learning
+    parser.add_argument('--transfer_from', type=str, default=None)
+    parser.add_argument('--special_transfer', type=str, default=None)
     parser.add_argument('--version', type=int, default=None, help='tensorboard log version')
 
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config)
 
+    net_g = V09Synthesizer(config)
+    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
     if args.gen_ckpt is not None:
-        if args.disc_ckpt is None:
-            print('Error: disc_ckpt is required when gen_ckpt is specified')
-            exit(1)
-
-        print('Using RVC G_ checkpoint: {}'.format(args.gen_ckpt))
-        print('Using RVC D_ checkpoint: {}'.format(args.disc_ckpt))
-
-        gen_state = torch.load(args.gen_ckpt, map_location='cpu')
-        net_g = SynthesizerV05(config, **config.model, is_half=True)
-        load_state_dict_mismatch(net_g, gen_state['model'])
-
-        disc_state = torch.load(args.disc_ckpt, map_location='cpu')
-        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-        net_d.load_state_dict(disc_state['model'])
-        training_module = V07FinetuneModule(net_g, net_d, config)
-
+        print('Using gen checkpoint:', args.gen_ckpt)
+        state_dict = torch.load(args.gen_ckpt, map_location='cpu')['model'] 
+        load_state_dict_mismatch(net_g, state_dict)
+        state_dict = torch.load(args.disc_ckpt, map_location='cpu')['model'] 
+        load_state_dict_mismatch(net_d, state_dict)
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
-        net_g = SynthesizerV05(config, **config.model, is_half=True)
-        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-        training_module = V07FinetuneModule(net_g, net_d, config)
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
-        net_g = SynthesizerV05(config, **config.model, is_half=True)
-        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
         state = torch.load(args.transfer_from, map_location='cpu')['state_dict']
-        submodule_prefix = 'net_g.'
-        state_dict = {
-            k[len(submodule_prefix):]: v 
-            for k, v in state.items() 
-            if k.startswith(submodule_prefix)
-        }
-        # We will experiment with different param shapes here
-        load_state_dict_mismatch(net_g, state_dict)
-        submodule_prefix = 'net_d.'
-        state_dict = {
-            k[len(submodule_prefix):]: v 
-            for k, v in state.items() 
-            if k.startswith(submodule_prefix)
-        }
-        net_d.load_state_dict(state_dict, strict=False)
-        training_module = V07FinetuneModule(net_g, net_d, config)
+        load_submodule_prefix(net_g, 'net_g.', state)
+        load_submodule_prefix(net_d, 'net_d.', state)
     else:
-        print('!!! Warning: No checkpoint provided. Training from scratch. !!!')
-        net_g = SynthesizerV05(config, **config.model, is_half=True)
-        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-        training_module = V07FinetuneModule(net_g, net_d, config)
+        print('!!! No checkpoint file found - starting from scratch !!!')
 
+    # Transfer prior encoder from last iter
+    if args.special_transfer is not None:
+        print("Begin transfer from {}".format(args.special_transfer))
+        state = torch.load(args.special_transfer, map_location='cpu')['state_dict']
+        load_submodule_prefix(net_g.enc_p, 'net_g.enc_p.', state)
+        print("End transfer from {}".format(args.special_transfer))
+
+    training_module = V09TrainingModule(net_g, net_d, config)
+        
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=args.version
     )
-
     train_dataset = FeatureDataset(config, is_train=True)
     val_dataset = FeatureDataset(config, is_train=False)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=config.train.batch_size,
-        collate_fn=paired_feature_collator,
-        shuffle=True,
-        num_workers=config.data.num_workers,
+        batch_size = config.train.batch_size,
+        shuffle = True,
+        collate_fn = FeatureCollator(),
+        num_workers=4,
         persistent_workers=True
     )
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=config.train.batch_size,
-        collate_fn=paired_feature_collator,
-        num_workers=config.data.num_workers,
+        batch_size = config.train.batch_size,
+        shuffle = False,
+        collate_fn = FeatureCollator(),
+        num_workers=4,
         persistent_workers=True
     )
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='val_loss',
         dirpath=f'checkpoints/{config.exp_name}',
         filename='best-checkpoint',
@@ -353,13 +409,21 @@ if __name__ == '__main__':
         mode='min',
         save_last=True
     )
+    callbacks = [val_checkpoint_callback]
+    if config.train.get('save_every_n_epochs'):
+        interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            every_n_epochs=config.train.save_every_n_epochs,
+            dirpath=f'checkpoints/{config.exp_name}',
+            filename='interval-checkpoint-{epoch:04d}',
+            save_top_k=-1
+        )
+        callbacks.append(interval_checkpoint_callback)
 
     trainer = pl.Trainer(
-        max_epochs=config.train.epochs,
-        accelerator='auto',
         logger=logger,
-        precision='bf16',
-        callbacks=[checkpoint_callback],
-        # detect_anomaly=True
+        accelerator='gpu',
+        precision='bf16-mixed',
+        max_epochs=config.train.epochs,
+        callbacks=callbacks,
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
