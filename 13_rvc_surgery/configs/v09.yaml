@@ -1,4 +1,4 @@
-exp_name: v09_test21
+exp_name: v09_test22
 train:
   lr: 5e-5
   batch_size: 6

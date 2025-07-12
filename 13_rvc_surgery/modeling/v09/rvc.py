@@ -71,6 +71,27 @@ class V09Synthesizer(nn.Module):
         return o, z_mask, ids_slice, (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), \
             (loss_content_inv, spk_fake_loss, spk_real_loss)
 
+    def finetune_step(self,
+        phone, phone_mask,
+        pitchf, y, y_lengths,
+        spk, spk_feat, lambda_grl=1.0, pitchq=None):
+
+        z, m_p, logs_p, loss_content_inv = self.enc_p.finetune_step(
+            h=phone, h_mask=phone_mask, pitch=pitchf, spk=spk, spk_emb=spk_feat, lambda_grl=lambda_grl)
+        logs_p = rearrange(logs_p, 'b t c -> b c t')
+        m_p = rearrange(m_p, 'b t c -> b c t')
+
+        z, m_q, logs_q, z_mask = self.enc_q(rearrange(y, 'b t c -> b c t'), y_lengths, spk_id=spk)
+
+        z_p = self.flow(z, z_mask, spk_id=spk)
+        z_slice, ids_slice = commons.rand_slice_segments(
+            z, y_lengths, self.segment_size
+        )
+        pitchf = commons.slice_segments2(pitchf, ids_slice, self.segment_size)
+        o = self.dec(z_slice, pitchf, spk_id=spk)
+
+        return o, z_mask, ids_slice, (z, z_p, m_p, logs_p, m_q, logs_q), loss_content_inv\
+
     @torch.jit.export
     def infer(
         self,
@@ -117,15 +138,15 @@ if __name__ == '__main__':
     phone_B_mask = torch.ones((2, 100), dtype=torch.bool)
     pitchf_A = torch.randn((2, 100)) * 100
     pitchf_B = torch.randn((2, 100)) * 100
-    y_A = torch.randn((2, 100, config.model.spec_channels))
-    y_lengths_A = torch.tensor([100, 100])
-    spk_A = (torch.randn((2)).abs() * 2).round().long()
+    y = torch.randn((2, 100, config.model.spec_channels))
+    y_lengths = torch.tensor([100, 100])
+    spk = (torch.randn((2)).abs() * 2).round().long()
     spk_emb_A = torch.randn((2, config.model.gin_channels))
 
     o, z_mask, ids_slice, (z, z_p, m_p_A, logs_p_A, m_q_A, logs_q_A), (loss_content_inv, spk_fake_loss, spk_real_loss) = synth(
         phone_A=phone_A, phone_A_mask=phone_A_mask,
         phone_B=phone_B, phone_B_mask=phone_B_mask,
         pitchf_A=pitchf_A, pitchf_B=pitchf_B,
-        y_A=y_A, y_lengths_A=y_lengths_A,
-        spk_A=spk_A, spk_emb_A=spk_emb_A
+        y_A=y, y_lengths_A=y_lengths,
+        spk_A=spk, spk_emb_A=spk_emb_A
     )

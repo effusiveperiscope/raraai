@@ -239,7 +239,7 @@ class V09Encoder(nn.Module):
         self.pitch_cond = PitchConditioner(config)
         self.content_encoder = ContentEncoder(config)
         self.coloring_tower = ColoringTower(config)
-        self.speaker_encoder = SpeakerEncoder(config, n_layers=2) # so-vits-svc 5.0 disentanglement objective
+        self.speaker_encoder = SpeakerEncoder(config, n_layers=3) # so-vits-svc 5.0 disentanglement objective
         self.speaker_discriminator = SpeakerConditionalDiscriminator(config)
 
         self.final_proj = nn.Sequential(
