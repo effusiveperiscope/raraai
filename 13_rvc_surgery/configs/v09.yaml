@@ -1,4 +1,4 @@
-exp_name: v09_test22
+exp_name: v09_singbase
 train:
   lr: 5e-5
   batch_size: 6
@@ -6,7 +6,7 @@ train:
   val_filelist: data/v09_01/val.txt
   test_filelist: data/test_whisper/val.txt
   octave_transpose_test: True
-  sid_test: 1
+  sid_test: 0
   noise_scale_test: 0.5
   epochs: 500
   lam_mel: 45
@@ -14,10 +14,10 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.1
+  lam_grl: 0.06
   mul_grl_content: 0.2
-  grl_end: 50000
-  grl_every: 2
+  grl_end: 200000
+  grl_every: 3
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0
@@ -31,7 +31,7 @@ train:
   stage1_train_step: 0
   cosine_anneal_end: 700000
   weight_decay: 1e-3
-  max_recon_id: 3 # inclusive
+  max_recon_id: 7 # inclusive
 
 model:
   segment_size: 32

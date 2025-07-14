@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/ft_v09_test01'
+CHECKPOINTS_ROOT = 'checkpoints/v09_test22'
 
 import pdb
 import sys
