@@ -1,4 +1,4 @@
-exp_name: v09_singbase
+exp_name: v09_singbase_01
 train:
   lr: 5e-5
   batch_size: 6
@@ -14,10 +14,10 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.06
-  mul_grl_content: 0.2
-  grl_end: 200000
-  grl_every: 3
+  lam_grl: 0.08
+  mul_grl_content: 0.1
+  grl_end: 40000
+  grl_every: 2
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0

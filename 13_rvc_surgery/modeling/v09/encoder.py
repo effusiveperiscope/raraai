@@ -172,6 +172,14 @@ class SpeakerConditionalDiscriminator(nn.Module):
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 
+                kernel_size=3, padding=1, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
+                kernel_size=3, padding=1, spectral_norm=True),
+            DepthwiseSeparableConv1d(
+                in_channels=config.model.disc_channels, 
+                out_channels=config.model.disc_channels, 
                 kernel_size=1, padding=0, spectral_norm=True),
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
@@ -239,7 +247,7 @@ class V09Encoder(nn.Module):
         self.pitch_cond = PitchConditioner(config)
         self.content_encoder = ContentEncoder(config)
         self.coloring_tower = ColoringTower(config)
-        self.speaker_encoder = SpeakerEncoder(config, n_layers=3) # so-vits-svc 5.0 disentanglement objective
+        self.speaker_encoder = SpeakerEncoder(config, n_layers=6) # so-vits-svc 5.0 disentanglement objective
         self.speaker_discriminator = SpeakerConditionalDiscriminator(config)
 
         self.final_proj = nn.Sequential(
@@ -311,11 +319,13 @@ class V09Encoder(nn.Module):
             grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
         disc_logits_A = self.speaker_discriminator(
             col_A.detach(), h_A_mask, spk_A)
-        bce = nn.BCEWithLogitsLoss()
-        spk_fake_loss = bce(
-            disc_logits_BA, torch.zeros_like(disc_logits_BA, device=h_A.device))
-        spk_real_loss = bce(
-            disc_logits_A, torch.full_like(disc_logits_A, 1.0 - label_alpha, device=h_A.device))
+
+        # LSGAN loss
+        mse = nn.MSELoss()
+        # For fake samples
+        spk_fake_loss = mse(disc_logits_BA, torch.zeros_like(disc_logits_BA, device=h_A.device))
+        # For real samples
+        spk_real_loss = mse(disc_logits_A, torch.ones_like(disc_logits_A, device=h_A.device) * (1.0 - label_alpha))
 
         # Get stats for downstream KL div.
         p_A = self.final_proj(col_A)

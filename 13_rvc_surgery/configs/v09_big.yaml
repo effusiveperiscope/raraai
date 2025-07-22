@@ -1,25 +1,24 @@
-# First finetune
-exp_name: ft_v09_test01
+# Idea: In pretrain we rely more on the discriminator and less on the mel loss - we want plausible speakers more than resembling ones
+exp_name: v09_big
 train:
   lr: 5e-5
   batch_size: 6
-  filelist: data/fluttershy_no_anchor/train.txt
-  val_filelist: data/fluttershy_no_anchor/val.txt
+  filelist: data/v09_01/train.txt
+  val_filelist: data/v09_01/val.txt
   test_filelist: data/test_whisper/val.txt
-  test_every_n_epochs: 10
   octave_transpose_test: True
-  sid_test: 1
+  sid_test: 0
   noise_scale_test: 0.5
-  epochs: 200
+  epochs: 500
   lam_mel: 45
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.1
+  lam_grl: 0.08
   mul_grl_content: 0.2
-  grl_end: 40000
-  grl_every: 2
+  grl_end: 400000
+  grl_every: 1
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0
@@ -31,9 +30,9 @@ train:
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
   stage1_train_step: 0
-  cosine_anneal_end: 200000
+  cosine_anneal_end: 700000
   weight_decay: 1e-3
-  max_recon_id: 3 # inclusive
+  max_recon_id: 181 # inclusive
 
 model:
   segment_size: 32
@@ -61,7 +60,7 @@ model:
   upsample_rates: [12, 10, 2, 2]
   upsample_initial_channel: 512
   upsample_kernel_sizes: [24, 20, 4, 4]
-  spk_embed_dim: 10 # Probably more than this cannot be represented (??)
+  spk_embed_dim: 200 
   spk_emb_channels: 256 # SVC5 speaker invariance embedding from mozilla TTS
   gin_channels: 256
   sr: 48000
