@@ -172,14 +172,6 @@ class SpeakerConditionalDiscriminator(nn.Module):
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
                 out_channels=config.model.disc_channels, 
-                kernel_size=3, padding=1, spectral_norm=True),
-            DepthwiseSeparableConv1d(
-                in_channels=config.model.disc_channels, 
-                out_channels=config.model.disc_channels, 
-                kernel_size=3, padding=1, spectral_norm=True),
-            DepthwiseSeparableConv1d(
-                in_channels=config.model.disc_channels, 
-                out_channels=config.model.disc_channels, 
                 kernel_size=1, padding=0, spectral_norm=True),
             DepthwiseSeparableConv1d(
                 in_channels=config.model.disc_channels, 
@@ -314,8 +306,6 @@ class V09Encoder(nn.Module):
         col_A, _ = self.coloring_tower(c_A, h_A_mask, spk_A)
         col_BA, _ = self.coloring_tower(c_B, h_B_mask, spk_A)
         disc_logits_BA = self.speaker_discriminator(
-            # less GRL here because it is deeper in the network 
-            # and harder to train
             grad_reverse(col_BA, lambda_grl), h_B_mask, spk_A)
         disc_logits_A = self.speaker_discriminator(
             col_A.detach(), h_A_mask, spk_A)
@@ -324,8 +314,8 @@ class V09Encoder(nn.Module):
         mse = nn.MSELoss()
         # For fake samples
         spk_fake_loss = mse(disc_logits_BA, torch.zeros_like(disc_logits_BA, device=h_A.device))
-        # For real samples
-        spk_real_loss = mse(disc_logits_A, torch.ones_like(disc_logits_A, device=h_A.device) * (1.0 - label_alpha))
+        # For real samples - we do not use label smoothing
+        spk_real_loss = mse(disc_logits_A, torch.ones_like(disc_logits_A, device=h_A.device))
 
         # Get stats for downstream KL div.
         p_A = self.final_proj(col_A)

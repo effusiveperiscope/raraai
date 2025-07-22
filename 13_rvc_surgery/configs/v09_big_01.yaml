@@ -1,5 +1,5 @@
 # Idea: In pretrain we rely more on the discriminator and less on the mel loss - we want plausible speakers more than resembling ones
-exp_name: v09_big_02
+exp_name: v09_big_03
 train:
   lr: 5e-5
   batch_size: 6

@@ -2,18 +2,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from einops import rearrange
 
 class AttentionPooling(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
         self.attn = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
-            nn.Tanh(),
-            nn.Linear(input_dim // 2, 1)
+            DepthwiseSeparableConv1d(
+                input_dim, input_dim, 
+                kernel_size=3, padding=1,
+                spectral_norm=True),
+            nn.SiLU(),
+            DepthwiseSeparableConv1d(
+                input_dim, input_dim // 2, 
+                kernel_size=3, padding=1,
+                spectral_norm=True),
+            nn.SiLU(),
+            DepthwiseSeparableConv1d(
+                input_dim // 2, 1, 
+                kernel_size=3, padding=1,
+                spectral_norm=True),
+            nn.SiLU(),
         )
 
     def forward(self, x, x_mask):
+        x = rearrange(x, "b t c -> b c t")
         attn_scores = self.attn(x).squeeze(-1)  # (B, T)
+        x = rearrange(x, "b c t -> b t c")
 
         # Check if any sequence has all tokens masked
         valid_tokens = x_mask.sum(dim=-1)  # (B,)
