@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 from omegaconf import OmegaConf
 from svc_helper.svc.rvc.lib.infer_pack import attentions, commons, modules
@@ -36,18 +37,18 @@ class V10Encoder(nn.Module):
         f0=True,
     ):
         super(V10Encoder, self).__init__()
-        self.out_channels = config.out_channels
+        self.out_channels = config.inter_channels
         self.hidden_channels = config.hidden_channels
         self.filter_channels = config.filter_channels
         self.n_heads = config.n_heads
         self.n_layers = config.n_layers
         self.kernel_size = config.kernel_size
         self.p_dropout = float(config.p_dropout)
-        self.emb_phone = nn.Linear(512, config.hidden_channels)
+        self.emb_phone = nn.Linear(768, config.hidden_channels)
         self.lrelu = nn.LeakyReLU(0.1, inplace=True)
         if f0 == True:
             self.emb_pitch = PitchConditioner(config.hidden_channels)
-        self.sipe = SinusoidalPositionalEncoding(config.model.inter_channels)
+        self.sipe = SinusoidalPositionalEncoding(config.inter_channels)
         self.encoder = attentions.Encoder(
             config.hidden_channels,
             config.filter_channels,
@@ -56,7 +57,7 @@ class V10Encoder(nn.Module):
             config.kernel_size,
             float(config.p_dropout),
         )
-        self.proj = nn.Conv1d(config.hidden_channels, config.out_channels * 2, 1)
+        self.proj = nn.Conv1d(config.hidden_channels, config.inter_channels * 2, 1)
         self.speaker_encoder = SpeakerEncoder(config, n_layers=6) # so-vits-svc 5.0 disentanglement objective
 
     def forward(self, phone: torch.Tensor, pitchf: torch.Tensor, lengths: torch.Tensor,
@@ -84,7 +85,7 @@ class V10Encoder(nn.Module):
 
         x = self.encoder(x * x_mask, x_mask) 
         pre_proj_x = x
-        spk_feat_pred = self.speaker_encoder(grad_reverse(x, lam_grl))
+        spk_feat_pred = self.speaker_encoder(grad_reverse(x, lam_grl), x_mask)
 
         stats = self.proj(x) * x_mask
 
@@ -94,8 +95,8 @@ class V10Encoder(nn.Module):
 class SpeakerEncoder(nn.Module):
     def __init__(self, config, n_layers=2):
         super(SpeakerEncoder, self).__init__()
-        embed_dim = config.model.content_channels
-        spk_dim = config.model.spk_emb_channels
+        embed_dim = config.hidden_channels
+        spk_dim = config.spk_emb_channels
 
         self.encoder = nn.ModuleList(
             [
@@ -111,10 +112,8 @@ class SpeakerEncoder(nn.Module):
         )
 
     def forward(self, x, mask):
-        x = rearrange(x, "b t c -> b c t")
         for i,layer in enumerate(self.encoder):
             x = layer(x)
-            x = x * rearrange(mask, "b t -> b 1 t")
 
             x = rearrange(x, "b c t -> b t c")
             x = self.norms[i](x)

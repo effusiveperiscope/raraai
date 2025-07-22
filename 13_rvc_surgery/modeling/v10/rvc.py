@@ -9,7 +9,7 @@ from modeling.v05.rvc import PosteriorEncoder, ResidualCouplingBlock
 class V10Synthesizer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.enc_p = V10Encoder(config)
+        self.enc_p = V10Encoder(config.model)
         self.enc_q = PosteriorEncoder(
             in_channels=config.model.spec_channels,
             out_channels=config.model.inter_channels,
@@ -80,3 +80,15 @@ class V10Synthesizer(nn.Module):
         z = self.flow(z_p, x_mask, spk_id=sid, reverse=True)
         o = self.dec(z * x_mask, nsff0, spk_id=sid)
         return o, x_mask, (z, z_p, m_p, logs_p)
+    
+if __name__ == '__main__':
+    from omegaconf import OmegaConf
+    config = OmegaConf.load('configs/v10.yaml')
+    synth = V10Synthesizer(config)
+    phone = torch.randn((2, 100, config.model.hubert_dim))
+    phone_lengths = torch.tensor([100, 100])
+    pitchf = torch.randn((2, 100)) * 100
+    y = torch.randn((2, 100, config.model.spec_channels))
+    y_lengths = torch.tensor([100, 100])
+    ds = torch.tensor([0, 1])
+    synth(phone, phone_lengths, pitchf, y, y_lengths, ds)
