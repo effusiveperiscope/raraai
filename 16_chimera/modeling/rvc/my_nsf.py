@@ -236,7 +236,7 @@ class MyGeneratorNSF(torch.nn.Module):
             hp.gen.upsample_input, hp.gen.upsample_initial_channel, 7, 1, padding=3
         )
         resblock = modules.ResBlock1 if hp.gen.resblock == "1" else modules.ResBlock2
-        self.adapter = SpeakerAdapter(hp.vits.spk_dim, hp.gen.upsample_initial_channel)
+        self.adapter = SpeakerAdapter(hp.vits.spk_dim, hp.gen.upsample_input)
 
         self.ups = nn.ModuleList()
         for i, (u, k) in enumerate(zip(hp.gen.upsample_rates, hp.gen.upsample_kernel_sizes)):
@@ -301,8 +301,6 @@ class MyGeneratorNSF(torch.nn.Module):
         x = x + torch.randn_like(x) * perturb_scale
         # Adapter
         x = self.adapter(x, spk)
-        x = self.conv_pre(x)
-        x = x * torch.tanh(F.softplus(x))
 
         # We don't actually need the noise from here
         har_source, _ = self.m_source(f0, self.upp) 
@@ -314,6 +312,9 @@ class MyGeneratorNSF(torch.nn.Module):
         uv = F.interpolate(uv.unsqueeze(1), har_source.shape[-1], mode='nearest')
 
         env = self.env_gen(rearrange(x, "b c t -> b t c"), f0.unsqueeze(-1))
+
+        x = self.conv_pre(x)
+        x = x * torch.tanh(F.softplus(x))
 
         # torch.jit.script() does not support direct indexing of torch modules
         # That's why I wrote this

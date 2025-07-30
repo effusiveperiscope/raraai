@@ -212,7 +212,7 @@ if __name__ == "__main__":
     ppg = torch.randn(1, 356, 1280)
     vec = torch.randn(1, 356, 256)
     pit = torch.randn(1, 356)
-    spec = torch.randn(1, 356, 100)
+    spec = torch.randn(1, 769, 356) # Apparently the model expects the channel to be first for spec
     spk = torch.randn(1, 256)
     ppg_l = torch.tensor([356])
     spec_l = torch.tensor([356])
