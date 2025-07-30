@@ -1,21 +1,24 @@
-exp_name: v10_01
+# Only train speaker embeddings + prior encoder first. Plus aggressive anneal curve
+exp_name: v10_flutter_so5
 train:
-  lr: 5e-5
-  batch_size: 6
-  filelist: data/v09_01/train.txt
-  val_filelist: data/v09_01/val.txt
+  lr: 1e-4
+  batch_size: 12
+  filelist: data/fluttershy_sing_only/train.txt
+  val_filelist: data/fluttershy_sing_only/val.txt
   test_filelist: data/test_whisper/val.txt
   octave_transpose_test: True
   sid_test: 0
   noise_scale_test: 0.5
-  epochs: 500
+  epochs: 2000
+  test_every_n_epochs: 100
+  save_every_n_epochs: 250
   lam_mel: 45
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.16
-  grl_end: 400000
+  lam_grl: 0.5
+  grl_end: 20000
   grl_every: 1
   freeze_prior: False
 
@@ -28,9 +31,10 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 0
-  cosine_anneal_end: 700000
+  stage1_train_step: 4000
+  cosine_anneal_end: 20000
   weight_decay: 1e-3
+  max_use_id: 11 # inclusive
 
 model:
   segment_size: 32

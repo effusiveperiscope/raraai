@@ -1,9 +1,9 @@
-exp_name: v10_01
+exp_name: derpy
 train:
   lr: 5e-5
   batch_size: 6
-  filelist: data/v09_01/train.txt
-  val_filelist: data/v09_01/val.txt
+  filelist: data/derpy/train.txt
+  val_filelist: data/derpy/val.txt
   test_filelist: data/test_whisper/val.txt
   octave_transpose_test: True
   sid_test: 0
@@ -14,10 +14,10 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.16
-  grl_end: 400000
-  grl_every: 1
-  freeze_prior: False
+  lam_grl: 0.08
+  mul_grl_content: 0.1
+  grl_end: 40000
+  grl_every: 2
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0
@@ -31,6 +31,7 @@ train:
   stage1_train_step: 0
   cosine_anneal_end: 700000
   weight_decay: 1e-3
+  max_recon_id: 7 # inclusive
 
 model:
   segment_size: 32

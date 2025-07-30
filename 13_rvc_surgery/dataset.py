@@ -14,6 +14,8 @@ class FeatureDataset(Dataset):
         self.files = []
 
         log_ons = False
+        log_ons2 = False
+        log_ons3 = False
 
         with open(filelist_to_use, 'r', encoding='utf-8') as f:
             for line in f.readlines():
@@ -26,6 +28,21 @@ class FeatureDataset(Dataset):
                     split = line.strip().split('|')
                     line = split[0]
                     sid = int(split[1])
+                    if config.train.get('max_use_id', None) is not None:
+                        if not log_ons2:
+                            print("Using max_use_id: {}".format(config.train.max_use_id))
+                            log_ons2=True
+                        if config.train.get('min_use_id', None) is not None:
+                            if not log_ons3:
+                                print ("Using min_use_id: {}".format(config.train.min_use_id))
+                                log_ons3=True
+                            if sid < config.train.min_use_id:
+                                continue
+                            if sid > config.train.max_use_id:
+                                continue
+                            sid = sid - config.train.min_use_id
+                        elif sid > config.train.max_use_id:
+                            continue
                     self.files.append((line, sid))
                 else:
                     self.files.append(line.strip())

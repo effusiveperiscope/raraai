@@ -3,7 +3,7 @@ from PyQt5.QtCore import pyqtRemoveInputHook
 from PyQt5.QtWidgets import QApplication, QMainWindow
 import librosa
 import numpy as np
-from modeling.v09.rvc import V09Synthesizer
+from modeling.v10.rvc import V10Synthesizer
 from logging import getLogger
 from svc_helper.gui import *
 from omegaconf import OmegaConf
@@ -13,7 +13,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/v09_big_01'
+CHECKPOINTS_ROOT = 'checkpoints/v10_flutter_so11'
 
 import pdb
 import sys
@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         logger.info(f'Loading checkpoint {checkpoint_name}')
         checkpoint_path = os.path.join(CHECKPOINTS_ROOT, checkpoint_name)
         # Points to a lightning checkpoint
-        self.net_g = V09Synthesizer(config)
+        self.net_g = V10Synthesizer(config)
         print(count_parameters(self.net_g.enc_p))
 
         state = torch.load(checkpoint_path, map_location='cpu')['state_dict']
@@ -150,14 +150,6 @@ class MainWindow(QMainWindow):
                     sid=torch.tensor([data['sid']]).to('cuda'),
                     noise_scale = data['noise'],
                     )
-                disc_logits = self.net_g.enc_disc_logits(
-                    phone=phone_aug.half(),
-                    phone_lengths=lens, 
-                    nsff0=feats['pitch_fine'].to('cuda').half(),
-                    sid=torch.tensor([data['sid']]).to('cuda'),
-                )
-                disc_prob = disc_logits.sigmoid()
-                print(f'Disc prob: {disc_prob.item()}')
                 o_np = o.squeeze().cpu().float().numpy()
                 out.append(AudioResult(
                     label=os.path.basename(file)+data['model_labels'][0],

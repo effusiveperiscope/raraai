@@ -50,6 +50,8 @@ class V10TrainingModule(pl.LightningModule):
         self.automatic_optimization = False
         self.stage1 = False
 
+        self.debounce_log = False
+
     def on_train_start(self):
         self.test()
 
@@ -66,9 +68,33 @@ class V10TrainingModule(pl.LightningModule):
             param.requires_grad = True
         for param in self.net_g.parameters():
             param.requires_grad = True
-        # Freeze the content encoder
-        # for param in self.net_g.enc_p.content_encoder.parameters():
-            # param.requires_grad = False
+        if self.config.train.get('freeze_prior', False):
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = False
+        if self.config.train.get('freeze_decoder', False): # Except for speaker embedding
+            for param in self.net_g.dec.parameters():
+                param.requires_grad = False
+            for param in self.net_g.dec.emb_g.parameters():
+                param.requires_grad = True
+        if self.config.train.get('strategy1', False):
+            self.strategy1()
+
+    def strategy1(self):
+        # Try to freeze the last few layers of the decoder
+        # Hopefully prevents the degrading of high frequency information
+        dec = self.net_g.dec
+        i = 0
+        for noise_conv, har_conv, resblock in zip(dec.noise_convs,
+            dec.har_convs, dec.resblocks):
+            if i > 2:
+                for param in noise_conv.parameters():
+                    param.requires_grad = False
+                for param in har_conv.parameters():
+                    param.requires_grad = False
+                for param in resblock.parameters():
+                    param.requires_grad = False
+            i = i + 1
+        pass
 
     def test(self):
         if self.current_epoch % self.config.train.get('test_every_n_epochs', 1):
@@ -428,5 +454,6 @@ if __name__ == '__main__':
         precision='bf16-mixed',
         max_epochs=config.train.epochs,
         callbacks=callbacks,
+        check_val_every_n_epoch=config.train.get('val_every_n_epochs', 1),
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

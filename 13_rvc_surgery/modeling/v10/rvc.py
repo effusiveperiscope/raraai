@@ -67,11 +67,9 @@ class V10Synthesizer(nn.Module):
         sid: torch.Tensor,
         noise_scale: float = 0.66666,
     ):
-        z_p, m_p, logs_p = self.enc_p(
+        m_p, logs_p, _, _, _ = self.enc_p(
             phone=phone, pitchf=nsff0, lengths=phone_lengths)
-        z_p = rearrange(z_p, 'b t c -> b c t')
-        m_p = rearrange(m_p, 'b t c -> b c t')
-        logs_p = rearrange(logs_p, 'b t c -> b c t')
+        z_p = m_p + torch.exp(logs_p) * torch.randn_like(m_p) * noise_scale
 
         x_mask = commons.sequence_mask(
             phone_lengths, phone.size(1)).unsqueeze(1)

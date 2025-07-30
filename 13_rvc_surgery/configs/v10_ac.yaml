@@ -1,7 +1,7 @@
-exp_name: v10_01
+exp_name: v10_ac_01
 train:
   lr: 5e-5
-  batch_size: 6
+  batch_size: 8
   filelist: data/v09_01/train.txt
   val_filelist: data/v09_01/val.txt
   test_filelist: data/test_whisper/val.txt
@@ -14,8 +14,8 @@ train:
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.16
-  grl_end: 400000
+  lam_grl: 0.24
+  grl_end: 0
   grl_every: 1
   freeze_prior: False
 
@@ -29,8 +29,9 @@ train:
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
   stage1_train_step: 0
-  cosine_anneal_end: 700000
+  cosine_anneal_end: 100000
   weight_decay: 1e-3
+  max_use_id: 11
 
 model:
   segment_size: 32

@@ -1,26 +1,38 @@
-exp_name: v10_01
+# Two sources of regularization:
+# 1. Increase GRL dramatically as a form of regularization for KL
+# 2. Freeze decoder layers to avoid acoustic info degradation
+# Also increase LR
+# 8 - increase GRL even more
+# 9 - freeze decoder, don't use strategy1, reduce lam_kl to 0.5 because it keeps overfitting
+# 10 - reduce content inv (will overfit on small dataset), raise lam_kl back to original, reduce lam_grl to 0.6
+# 11 - use strategy1, re-increase grl to 1.0
+exp_name: v10_flutter_so11
 train:
-  lr: 5e-5
-  batch_size: 6
-  filelist: data/v09_01/train.txt
-  val_filelist: data/v09_01/val.txt
+  lr: 1e-4
+  batch_size: 12
+  filelist: data/fluttershy_sing_only/train.txt
+  val_filelist: data/fluttershy_sing_only/val.txt
   test_filelist: data/test_whisper/val.txt
   octave_transpose_test: True
   sid_test: 0
   noise_scale_test: 0.5
-  epochs: 500
+  epochs: 2001
+  val_every_n_epochs: 5
+  test_every_n_epochs: 50
+  save_every_n_epochs: 100
   lam_mel: 45
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.16
-  grl_end: 400000
+  lam_grl: 1.0
+  grl_end: 0
   grl_every: 1
   freeze_prior: False
+  freeze_decoder: False 
+  strategy1: True
 
-  lam_spk_disc: 1.0
-  lam_content_inv: 3.0
+  lam_content_inv: 1.0
   phone_aug_max: 2.0
   spec_aug_scale: 0.2
   spec_am_min: 0.7
@@ -28,9 +40,10 @@ train:
   spec_am_points: 100
   label_alpha: 0.05 # GAN label smoothing
   disc_noise_scale: 0.0003
-  stage1_train_step: 0
-  cosine_anneal_end: 700000
+  stage1_train_step: 4000
+  cosine_anneal_end: 20000
   weight_decay: 1e-3
+  max_use_id: 11 # inclusive
 
 model:
   segment_size: 32

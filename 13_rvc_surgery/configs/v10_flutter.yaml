@@ -1,23 +1,25 @@
-exp_name: v10_01
+exp_name: v10_flutter
 train:
   lr: 5e-5
   batch_size: 6
-  filelist: data/v09_01/train.txt
-  val_filelist: data/v09_01/val.txt
+  filelist: data/fluttershy_no_anchor/train.txt
+  val_filelist: data/fluttershy_no_anchor/val.txt
   test_filelist: data/test_whisper/val.txt
   octave_transpose_test: True
   sid_test: 0
   noise_scale_test: 0.5
   epochs: 500
+  test_every_n_epochs: 10
+  save_every_n_epochs: 50
   lam_mel: 45
   lam_kl: 1.0
   lam_kl_reg_logs: 0.3
   lam_kl_reg_mus: 0.03
 
-  lam_grl: 0.16
+  lam_grl: 0.24
   grl_end: 400000
   grl_every: 1
-  freeze_prior: False
+  freeze_prior: True
 
   lam_spk_disc: 1.0
   lam_content_inv: 3.0
@@ -31,6 +33,7 @@ train:
   stage1_train_step: 0
   cosine_anneal_end: 700000
   weight_decay: 1e-3
+  max_use_id: 11 # inclusive
 
 model:
   segment_size: 32
