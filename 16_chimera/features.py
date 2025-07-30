@@ -11,7 +11,7 @@ class MyFeatures:
     def __init__(self, 
         device='cuda',
         config='config/svc5_base.yaml',
-        feats_to_extract : set[str] = {'whisper', 'hubert', 'spk', 'f0', 'spec'}):
+        feats_to_extract : set[str] = {'whisper', 'hubert', 'spk', 'f0', 'spec', 'wave'}):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract
         self.expected_sample_rate=16000
@@ -53,6 +53,9 @@ class MyFeatures:
             data_spec = librosa.util.normalize(data_spec)
             feat['spec'] = self.stft.mel_spectrogram(torch.from_numpy(data_spec).unsqueeze(0).to(
                 self.device)).squeeze(0).transpose(0, 1)
+        if 'wave' in self.feats_to_extract:
+            data_spec, _ = librosa.load(file, sr=self.config.data.sampling_rate)
+            feat['wave'] = torch.from_numpy(data_spec)
         return feat
 
 if __name__ == '__main__':
