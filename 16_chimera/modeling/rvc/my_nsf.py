@@ -235,7 +235,7 @@ class MyGeneratorNSF(torch.nn.Module):
         self.conv_pre = Conv1d(
             hp.gen.upsample_input, hp.gen.upsample_initial_channel, 7, 1, padding=3
         )
-        resblock = modules.ResBlock1 if resblock == "1" else modules.ResBlock2
+        resblock = modules.ResBlock1 if hp.gen.resblock == "1" else modules.ResBlock2
         self.adapter = SpeakerAdapter(hp.vits.spk_dim, hp.gen.upsample_initial_channel)
 
         self.ups = nn.ModuleList()
