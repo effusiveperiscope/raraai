@@ -4,6 +4,7 @@ from svc_helper.pitch.rmvpe import RMVPEModel
 from utils import print_memory_usage
 from vits_extend.stft import TacotronSTFT
 import librosa
+from modeling.vits import utils, spectrogram
 import torch
 from omegaconf import OmegaConf
 
@@ -24,15 +25,6 @@ class MyFeatures:
         if 'f0' in feats_to_extract:
             self.rmvpe_model = RMVPEModel(device=device, is_half=True)
         if 'spec' in feats_to_extract:
-            self.stft = TacotronSTFT(filter_length=config.data.filter_length,
-                                hop_length=config.data.hop_length,
-                                win_length=config.data.win_length,
-                                n_mel_channels=config.data.mel_channels,
-                                sampling_rate=config.data.sampling_rate,
-                                mel_fmin=config.data.mel_fmin,
-                                mel_fmax=config.data.mel_fmax,
-                                center=False,
-                                device=device)
             self.config = config
             self.device = device
 
@@ -49,10 +41,20 @@ class MyFeatures:
         if 'f0' in self.feats_to_extract:
             feat['f0'] = torch.from_numpy(self.rmvpe_model.extract_pitch(torch.from_numpy(data))) # f0
         if 'spec' in self.feats_to_extract:
-            data_spec, _ = librosa.load(file, sr=self.config.data.sampling_rate)
-            data_spec = librosa.util.normalize(data_spec)
-            feat['spec'] = self.stft.mel_spectrogram(torch.from_numpy(data_spec).unsqueeze(0).to(
-                self.device)).squeeze(0).transpose(0, 1)
+
+            audio, sampling_rate = utils.load_wav_to_torch(file)
+            hps = self.config.data
+            assert sampling_rate == hps.sampling_rate, f"{sampling_rate} is not {hps.sampling_rate}"
+
+            audio_norm = audio / hps.max_wav_value
+            audio_norm = audio_norm.unsqueeze(0)
+            n_fft = hps.filter_length
+            sampling_rate = hps.sampling_rate
+            hop_size = hps.hop_length
+            win_size = hps.win_length
+
+            feat['spec'] = spectrogram.spectrogram_torch(
+                audio_norm, n_fft, sampling_rate, hop_size, win_size, center=False).squeeze(0).transpose(0, 1)
         if 'wave' in self.feats_to_extract:
             data_spec, _ = librosa.load(file, sr=self.config.data.sampling_rate)
             feat['wave'] = torch.from_numpy(data_spec)
@@ -65,7 +67,7 @@ if __name__ == '__main__':
     # hubert [1, 356, 256]
     # pitch [1, 356]
     # spk [1, 256]
-    # spec [1, 356, 100]
+    # spec [1, 356, 769]
 
     extractor = MyFeatures()
     feats = extractor.extract_features('test/test.wav')
