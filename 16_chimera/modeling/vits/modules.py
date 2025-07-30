@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from vits import commons
+from . import commons
 
 
 LRELU_SLOPE = 0.1

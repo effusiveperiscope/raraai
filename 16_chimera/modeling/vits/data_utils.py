@@ -5,7 +5,7 @@ import torch
 import torch.utils.data
 
 
-from vits.utils import load_wav_to_torch
+from .utils import load_wav_to_torch
 
 def longpath(path):
     import platform

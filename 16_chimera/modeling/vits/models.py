@@ -3,12 +3,12 @@ import torch
 
 from torch import nn
 from torch.nn import functional as F
-from vits import attentions
-from vits import commons
-from vits import modules
-from vits.utils import f0_to_coarse
-from vits.modules_grl import SpeakerClassifier
-from modeling.rvc.my_nsf import MyGeneratorNSF
+from . import attentions
+from . import commons
+from . import modules
+from .utils import f0_to_coarse
+from .modules_grl import SpeakerClassifier
+from ..rvc.my_nsf import MyGeneratorNSF
 
 
 class TextEncoder(nn.Module):
@@ -207,50 +207,24 @@ class SynthesizerTrn(nn.Module):
         o = self.dec(spk, z * ppg_mask, f0=pit)
         return o
 
+if __name__ == "__main__":
+    from omegaconf import OmegaConf
+    ppg = torch.randn(1, 356, 1280)
+    vec = torch.randn(1, 356, 256)
+    pit = torch.randn(1, 356)
+    spec = torch.randn(1, 356, 100)
+    spk = torch.randn(1, 256)
+    ppg_l = torch.tensor([356])
+    spec_l = torch.tensor([356])
 
-class SynthesizerInfer(nn.Module):
-    def __init__(
-        self,
-        spec_channels,
-        segment_size,
-        hp
-    ):
-        super().__init__()
-        self.segment_size = segment_size
-        self.enc_p = TextEncoder(
-            hp.vits.ppg_dim,
-            hp.vits.vec_dim,
-            hp.vits.inter_channels,
-            hp.vits.hidden_channels,
-            hp.vits.filter_channels,
-            2,
-            6,
-            3,
-            0.1,
-        )
-        self.flow = ResidualCouplingBlock(
-            hp.vits.inter_channels,
-            hp.vits.hidden_channels,
-            5,
-            1,
-            4,
-            gin_channels=hp.vits.spk_dim
-        )
-        self.dec = Generator(hp=hp)
+    hp = OmegaConf.load("config/svc5_base.yaml")
 
-    def remove_weight_norm(self):
-        self.flow.remove_weight_norm()
-        self.dec.remove_weight_norm()
-
-    def pitch2source(self, f0):
-        return self.dec.pitch2source(f0)
-
-    def source2wav(self, source):
-        return self.dec.source2wav(source)
-
-    def inference(self, ppg, vec, pit, spk, ppg_l, source):
-        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg, ppg_l, vec, f0=f0_to_coarse(pit))
-        z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
-        o = self.dec.inference(spk, z * ppg_mask, source)
-        return o
+    model = SynthesizerTrn(
+        spec_channels=hp.data.filter_length // 2 + 1,
+        segment_size=hp.data.segment_size // hp.data.hop_length,
+        hp=hp
+    )
+    audio, ids_slice, spec_mask, (
+        z_f, z_r, z_p, m_p, logs_p, z_q, 
+        m_q, logs_q, logdet_f, logdet_r), spk_preds = \
+        model(ppg, vec, pit, spec, spk, ppg_l, spec_l)
