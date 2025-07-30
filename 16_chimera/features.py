@@ -65,7 +65,7 @@ if __name__ == '__main__':
     # hubert [1, 356, 256]
     # pitch [1, 356]
     # spk [1, 256]
-    # spec [1, 356]
+    # spec [1, 356, 100]
 
     extractor = MyFeatures()
     feats = extractor.extract_features('test/test.wav')
