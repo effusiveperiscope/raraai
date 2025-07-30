@@ -42,12 +42,10 @@ class MyFeatures:
             feat['f0'] = torch.from_numpy(self.rmvpe_model.extract_pitch(torch.from_numpy(data))) # f0
         if 'spec' in self.feats_to_extract:
 
-            audio, sampling_rate = utils.load_wav_to_torch(file)
             hps = self.config.data
-            assert sampling_rate == hps.sampling_rate, f"{sampling_rate} is not {hps.sampling_rate}"
-
-            audio_norm = audio / hps.max_wav_value
-            audio_norm = audio_norm.unsqueeze(0)
+            audio, _ = librosa.load(file, sr=hps.sampling_rate)
+            audio_norm = librosa.util.normalize(audio)
+            audio_norm = torch.from_numpy(audio_norm).unsqueeze(0)
             n_fft = hps.filter_length
             sampling_rate = hps.sampling_rate
             hop_size = hps.hop_length
