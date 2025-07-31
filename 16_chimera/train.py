@@ -117,12 +117,8 @@ class TrainingModule(pl.LightningModule):
 
         for param in self.net_g.enc_q.parameters():
             param.requires_grad = True
-        for param in self.net_g.flow.parameters():
-            param.requires_grad = False
         for param in self.net_g.dec.parameters():
             param.requires_grad = True
-        for param in self.net_g.dec.adapter.parameters(): # keep from svc5
-            param.requires_grad = False
 
     def configure_optimizers(self):
         disc_optim = torch.optim.AdamW(
