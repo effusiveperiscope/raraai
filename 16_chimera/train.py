@@ -29,6 +29,7 @@ class TrainingModule(pl.LightningModule):
         self.automatic_optimization = False
 
         self.stage = 1
+        self.use_adv = True # use adversarial losses
 
     def setup(self, stage=None):
         hp = self.config
@@ -76,42 +77,39 @@ class TrainingModule(pl.LightningModule):
     def on_train_start(self):
         self.test()
 
+    def on_train_epoch_start(self):
+        self.update_stage()
+
     def on_train_epoch_end(self):
         self.test()
-        self.update_stage()
         return super().on_train_epoch_end()
 
     def update_stage(self):
         if self.current_epoch >= self.config.train.stage2_epoch:
             self.stage = 2
+            self.use_adv = True
         else:
             self.stage = 1
+            self.use_adv = False # don't use adversarial training for stage 1
+            # (we only rely on reconstruction/kl losses at this point)
 
     def on_train_batch_start(self, batch, batch_idx):
-        if self.stage == 1:
-            # Reconciling the RVC and so-vits-svc5 models
-            # The discriminator is from RVC; we assume it does not change
+        # Reconciling the RVC and so-vits-svc5 models
+        # The discriminator is from RVC; we assume it does not change
 
-            # We also want to train as little of the generator as possible to 
-            # minimize forgetting
+        # We also want to train as little of the generator as possible to 
+        # minimize forgetting
+        for param in self.net_d.parameters():
+            param.requires_grad = True
+        for param in self.net_g.parameters():
+            param.requires_grad = False
 
-            for param in self.net_d.parameters():
-                param.requires_grad = True
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-
-            for param in self.net_g.enc_q.parameters():
-                param.requires_grad = True
-            for param in self.net_g.flow.parameters():
-                param.requires_grad = True
-            for param in self.net_g.dec.parameters():
-                param.requires_grad = True
-        else:
-            # Train everything
-            for param in self.net_d.parameters():
-                param.requires_grad = True
-            for param in self.net_g.parameters():
-                param.requires_grad = True
+        for param in self.net_g.enc_q.parameters():
+            param.requires_grad = True
+        for param in self.net_g.flow.parameters():
+            param.requires_grad = True
+        for param in self.net_g.dec.parameters():
+            param.requires_grad = True
 
     def configure_optimizers(self):
         disc_optim = torch.optim.AdamW(
@@ -153,6 +151,7 @@ class TrainingModule(pl.LightningModule):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r), spk_preds = self.net_g(
                 ppg, vec, pit, spec, spk, ppg_len, spec_len)
+
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
         # Spk Loss
@@ -174,11 +173,14 @@ class TrainingModule(pl.LightningModule):
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
         # Generator Loss
-        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
-        score_loss, _ = generator_loss(y_d_hat_g)
-
-        # # Feature Loss
-        feat_loss = feature_loss(fmap_r, fmap_g)
+        if self.use_adv:
+            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
+            score_loss, _ = generator_loss(y_d_hat_g)
+            # # Feature Loss
+            feat_loss = feature_loss(fmap_r, fmap_g)
+        else:
+            score_loss = torch.tensor(0.0).to(self.device)
+            feat_loss = torch.tensor(0.0).to(self.device)
 
         # Kl Loss
         loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
@@ -196,8 +198,11 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
-        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
-        loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+        if self.use_adv:
+            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
+            loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+        else:
+            loss_d = torch.tensor(0.0).to(self.device)
 
         if loss_d.requires_grad:
             optim_d.zero_grad()
