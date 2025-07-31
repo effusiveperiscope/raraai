@@ -299,8 +299,6 @@ class MyGeneratorNSF(torch.nn.Module):
 
         # Perturbation
         x = x + torch.randn_like(x) * perturb_scale
-        # Adapter
-        x = self.adapter(x, spk)
 
         # We don't actually need the noise from here
         har_source, _ = self.m_source(f0, self.upp) 
@@ -313,9 +311,13 @@ class MyGeneratorNSF(torch.nn.Module):
 
         env = self.env_gen(rearrange(x, "b c t -> b t c"), f0.unsqueeze(-1))
 
+        # Adapter
+        x = self.adapter(x, spk)
+
         x = self.conv_pre(x)
 
         # Why is this here?
+        # This is the mish activation function.
         # x = x * torch.tanh(F.softplus(x))
 
         # torch.jit.script() does not support direct indexing of torch modules
