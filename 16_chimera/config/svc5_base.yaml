@@ -1,4 +1,4 @@
-exp_name: test01
+exp_name: test03
 data:
   filter_length: 1536
   hop_length: 480

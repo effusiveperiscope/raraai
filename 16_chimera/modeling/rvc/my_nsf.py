@@ -314,7 +314,9 @@ class MyGeneratorNSF(torch.nn.Module):
         env = self.env_gen(rearrange(x, "b c t -> b t c"), f0.unsqueeze(-1))
 
         x = self.conv_pre(x)
-        x = x * torch.tanh(F.softplus(x))
+
+        # Why is this here?
+        # x = x * torch.tanh(F.softplus(x))
 
         # torch.jit.script() does not support direct indexing of torch modules
         # That's why I wrote this
