@@ -59,6 +59,8 @@ class MyFeatures:
                 audio, n_fft, sampling_rate, hop_size, win_size, center=False).squeeze(0).transpose(0, 1)
         if 'wave' in self.feats_to_extract:
             data_spec, _ = librosa.load(file, sr=self.config.data.sampling_rate)
+            if self.do_normalize:
+                data_spec = librosa.util.normalize(data_spec)
             feat['wave'] = torch.from_numpy(data_spec)
         return feat
 
