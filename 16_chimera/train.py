@@ -15,7 +15,7 @@ from vits_extend.stft_loss import MultiResolutionSTFTLoss
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from rvc_losses import generator_loss, discriminator_loss, feature_loss
 from dataset import dataset
-from commons import load_state_dict_mismatch, load_submodule_prefix
+from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
 
 class TrainingModule(pl.LightningModule):
     def __init__(self,
@@ -153,7 +153,7 @@ class TrainingModule(pl.LightningModule):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r), spk_preds = self.net_g(
                 ppg, vec, pit, spec, spk, ppg_len, spec_len)
-        audio = commons.slice_segments(
+        audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
         # Spk Loss
         spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
