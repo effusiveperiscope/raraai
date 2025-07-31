@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 import random
+import matplotlib.pyplot as plt
+import numpy as np
 
 def random_subsample_segments(x: torch.Tensor,
                               x_mask: torch.Tensor,
@@ -220,3 +222,39 @@ def f0_to_mel(pitch: torch.Tensor) -> torch.Tensor:
     """Converts f0 to mel representation."""
     f0_mel = 1127 * torch.log(1 + pitch / 700)
     return f0_mel
+
+def plot_spectrogram(
+    spectrogram: np.ndarray,
+    title: str = "Spectrogram",
+    xlabel: str = "Time",
+    ylabel: str = "Mel Frequency",
+    save_path: str = None,
+    dpi: int = 150
+):
+    """
+    Plots a linear spectrogram using the viridis colormap.
+
+    Parameters:
+    - spectrogram: np.ndarray of shape [seq_dim, num_mels]
+    - title: title of the plot
+    - xlabel: label for the x-axis
+    - ylabel: label for the y-axis
+    - save_path: if provided, saves the figure to this path
+    - dpi: resolution of saved figure
+    """
+    if spectrogram.ndim != 2:
+        raise ValueError("Input spectrogram must be a 2D array of shape [seq_dim, num_mels]")
+
+    plt.figure(figsize=(10, 4))
+    plt.imshow(spectrogram.T, aspect='auto', origin='lower', cmap='viridis')
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.colorbar(format='%+2.0f dB')
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=dpi)
+        print(f"Figure saved to {save_path}")
+    else:
+        plt.show()
