@@ -61,9 +61,10 @@ train:
   pretrain: ./vits_pretrain/sovits5.0_bigvgan_mix_v2.pth
   seed: 1234
 
-  train_filelist: ./data/expresso/train.txt
-  val_filelist: ./data/expresso/val.txt
-  test_filelist: ./data/test/train.txt
+  train_filelist: ./data/fs_orig/train.txt
+  val_filelist: ./data/fs_orig/val.txt
+  spk_index: ./data/fs_orig/sid_avgs.pt
+  test_filelist: ./data/test_orig/train.txt
   test_interval: 1
   val_interval: 1
   save_interval: 10

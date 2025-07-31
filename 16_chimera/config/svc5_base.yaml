@@ -60,6 +60,7 @@ train:
 
   train_filelist: ./data/expresso/train.txt
   val_filelist: ./data/expresso/val.txt
+  spk_index: ./data/expresso/sid_avgs.pt
   test_filelist: ./data/test/train.txt
   test_interval: 1
   val_interval: 1

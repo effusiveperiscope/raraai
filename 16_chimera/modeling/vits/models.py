@@ -183,7 +183,7 @@ class SynthesizerTrn(nn.Module):
 
     def forward(self, ppg, vec, pit, spec, spk, ppg_l, spec_l):
         ppg = ppg + torch.randn_like(ppg) * 1  # Perturbation
-        vec = vec + torch.randn_like(vec) * 2  # Perturbatio
+        vec = vec + torch.randn_like(vec) * 2  # Perturbation
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg, ppg_l, vec, f0=f0_to_coarse(pit))
@@ -199,6 +199,14 @@ class SynthesizerTrn(nn.Module):
         # speaker
         spk_preds = self.speaker_classifier(x)
         return audio, ids_slice, spec_mask, (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds
+
+    def posterior_test(self, spec, spec_l, spk):
+        g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
+        z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
+        z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
+            z_q, pit, spec_l, self.segment_size)
+        audio = self.dec(spk, z_slice, pit_slice)
+        return audio
 
     def infer(self, ppg, vec, pit, spk, ppg_l):
         ppg = ppg + torch.randn_like(ppg) * 0.0001  # Perturbation
@@ -270,6 +278,14 @@ class SynthesizerTrnOrig(nn.Module):
         # speaker
         spk_preds = self.speaker_classifier(x)
         return audio, ids_slice, spec_mask, (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds
+
+    def posterior_test(self, spec, spec_l, spk):
+        g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
+        z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
+        z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
+            z_q, pit, spec_l, self.segment_size)
+        audio = self.dec(spk, z_slice, pit_slice)
+        return audio
 
     def infer(self, ppg, vec, pit, spk, ppg_l):
         ppg = ppg + torch.randn_like(ppg) * 0.0001  # Perturbation

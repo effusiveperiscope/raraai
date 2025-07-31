@@ -15,7 +15,7 @@ class Discriminator(nn.Module):
         self.MSD = ScaleDiscriminator()
 
     def forward(self, x):
-        r = self.MRD(x)
+        r = self.MRD(x.float())
         p = self.MPD(x)
         s = self.MSD(x)
         return r + p + s

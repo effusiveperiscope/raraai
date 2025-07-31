@@ -8,6 +8,7 @@ from features import MyFeatures
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--filelist', type=str, required=True, help='path to filelist')
+    parser.add_argument('--config', type=str, default='config/svc5_base.yaml')
     parser.add_argument('--val_fraction', type=float, default=0.05)
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--shuffle_seed', type=int, default=42)
@@ -22,7 +23,7 @@ if __name__ == '__main__':
     random.seed(args.shuffle_seed)
     random.shuffle(lines)
 
-    extractor = MyFeatures()
+    extractor = MyFeatures(config = args.config)
 
     is_multispk = False
     new_lines = []
