@@ -125,7 +125,7 @@ class PosteriorEncoder(nn.Module):
     def forward(self, x, x_lengths, g=None):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
-        )
+        ).to(x.device)
         x = self.pre(x) * x_mask
         x = self.enc(x, x_mask, g=g)
         stats = self.proj(x) * x_mask
