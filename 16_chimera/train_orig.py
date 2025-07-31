@@ -67,7 +67,7 @@ class TrainingModule(pl.LightningModule):
                 # We should NOT be using this
                 # spk = batch['spk'].to(self.dtype).to(self.device) 
                 spk = self.spk_index['0'].to(self.dtype).to(self.device).unsqueeze(0)
-                spec = batch['spec'].to(self.dtype).to(self.device)
+                spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
                 out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len)
                 out_audio_post = self.net_g.posterior_test(spec, ppg_len, spk)
