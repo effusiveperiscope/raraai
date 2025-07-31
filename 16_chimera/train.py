@@ -95,13 +95,13 @@ class TrainingModule(pl.LightningModule):
             # We also want to train as little of the generator as possible to 
             # minimize forgetting
 
-            # Since we assume both components are already working,
-            # we only train discriminator, decoder, and flow
             for param in self.net_d.parameters():
                 param.requires_grad = True
             for param in self.net_g.parameters():
                 param.requires_grad = False
 
+            for param in self.net_g.enc_q.parameters():
+                param.requires_grad = True
             for param in self.net_g.flow.parameters():
                 param.requires_grad = True
             for param in self.net_g.dec.parameters():
