@@ -29,7 +29,7 @@ class TrainingModule(pl.LightningModule):
 
         self.stage = 1
 
-    def setup(self):
+    def setup(self, stage=None):
         hp = self.config
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
