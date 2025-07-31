@@ -52,7 +52,7 @@ train:
   c_stft: 9
   epochs: 602
   eps: 1e-9
-  learning_rate: 5e-5
+  lr: 5e-5
   lr_decay: 0.999875
   grad_clip_thresh: 10000.
   model: sovits
