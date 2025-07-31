@@ -16,6 +16,7 @@ from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from rvc_losses import generator_loss, discriminator_loss, feature_loss
 from dataset import dataset
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
+from utils import dump_batched_audio, dump_batched_spectrogram
 
 class TrainingModule(pl.LightningModule):
     def __init__(self,
@@ -168,6 +169,12 @@ class TrainingModule(pl.LightningModule):
         mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
         mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
 
+        # # audio is of shape [b, 1, t]
+        # dump_batched_audio(audio, prefix="gt_", sr=hp.data.sampling_rate)
+        # # mels are of shape [b, 100, t]
+        # dump_batched_spectrogram(mel_real, prefix="mel_real_")
+        # exit(0)
+
         # Multi-Resolution STFT Loss
         sc_loss, mag_loss = self.stft_criterion(fake_audio.squeeze(1), audio.squeeze(1))
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
@@ -252,6 +259,7 @@ if __name__ == '__main__':
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
     parser.add_argument('--rvc_disc_ckpt', type=str, default=None) # RVC D_ checkpoint
+    parser.add_argument('--svc5_ckpt_use_orig', type=str, default=None)
 
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
@@ -266,7 +274,11 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    if args.svc5_ckpt_use_orig is not None:
+        from modeling.vits_decoder.discriminator import Discriminator
+        net_d = Discriminator(hp)
+    else:
+        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
@@ -287,6 +299,12 @@ if __name__ == '__main__':
         state = torch.load(args.transfer_from, map_location='cpu')['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
         load_submodule_prefix(net_d, 'net_d.', state)
+    elif args.svc5_ckpt_use_orig is not None:
+        print("Loading SVC5 checkpoint (original): {}".format(args.svc5_ckpt_use_orig))
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
+        load_state_dict_mismatch(net_g, state_dict)
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
+        load_state_dict_mismatch(net_d, state_dict)
     else:
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')

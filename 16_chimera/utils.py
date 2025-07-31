@@ -1,4 +1,6 @@
 import torch
+import soundfile as sf
+from commons import plot_spectrogram
 
 def print_memory_usage():
     # Allocated memory (actively used by tensors)
@@ -9,3 +11,17 @@ def print_memory_usage():
 
     print(f"Allocated: {allocated:.2f} MB")
     print(f"Reserved: {reserved:.2f} MB")
+
+def dump_batched_audio(audio : torch.Tensor, 
+    prefix : str = "audio_",
+    sr : int = 48000):
+    # audio [b, 1, t]
+    for i,audio in enumerate(audio):
+        audio = audio.squeeze(1).detach().cpu().numpy()
+        sf.write(f"{prefix}{i}.wav", audio.squeeze(), sr)
+
+def dump_batched_spectrogram(spec : torch.Tensor,
+    prefix : str = "spec_"):
+    spec = spec.transpose(1,2)
+    for i,spec in enumerate(spec):
+        plot_spectrogram(spec.detach().cpu(), save_path=f"{prefix}{i}.png")

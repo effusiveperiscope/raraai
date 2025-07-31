@@ -8,8 +8,6 @@ data:
   mel_fmin: 50.0
   sampling_rate: 48000
   segment_size: 8000
-  training_files: files/train.txt
-  validation_files: files/valid.txt
   win_length: 1536
 dist_config:
   dist_backend: nccl
