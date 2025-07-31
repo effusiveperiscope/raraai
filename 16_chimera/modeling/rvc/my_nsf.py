@@ -318,7 +318,7 @@ class MyGeneratorNSF(torch.nn.Module):
 
         # Why is this here?
         # This is the mish activation function.
-        # x = x * torch.tanh(F.softplus(x))
+        x = x * torch.tanh(F.softplus(x))
 
         # torch.jit.script() does not support direct indexing of torch modules
         # That's why I wrote this
