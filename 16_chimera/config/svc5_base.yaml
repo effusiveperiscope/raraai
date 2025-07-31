@@ -39,7 +39,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 8
+  batch_size: 16
 
   weight_decay: 1e-4
   cosine_anneal_end: 500000

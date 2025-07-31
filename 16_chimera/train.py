@@ -292,8 +292,10 @@ if __name__ == '__main__':
     train_dataset = dataset(config.train.train_filelist, is_train=True)
     val_dataset = dataset(config.train.val_filelist, is_train=False)
     print("Creating dataloaders...")
-    train_dataloader = train_dataset.loader()
-    val_dataloader = val_dataset.loader()
+    train_dataloader = train_dataset.loader(
+        batch_size=config.train.batch_size, shuffle=True)
+    val_dataloader = val_dataset.loader(
+        batch_size=config.train.batch_size)
     print("Done")
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
