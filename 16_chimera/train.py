@@ -233,7 +233,11 @@ class TrainingModule(pl.LightningModule):
             if v is None:
                 continue
             self.log('val_' + k, v, logger=True)
-        return ret
+
+        val_loss = ret['loss_g']
+        self.log('val_loss', val_loss, prog_bar=True, logger=True)
+
+        return val_loss
 
 if __name__ == '__main__':
     import argparse
