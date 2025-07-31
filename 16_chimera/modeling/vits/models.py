@@ -40,7 +40,7 @@ class TextEncoder(nn.Module):
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
-        )
+        ).to(x.device)
         x = self.pre(x) * x_mask
         v = torch.transpose(v, 1, -1)  # [b, h, t]
         v = self.hub(v) * x_mask

@@ -13,6 +13,7 @@ from modeling.vits import commons
 from vits_extend.stft import TacotronSTFT
 from vits_extend.stft_loss import MultiResolutionSTFTLoss
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from rvc_losses import generator_loss, discriminator_loss, feature_loss
 from dataset import dataset
 from commons import load_state_dict_mismatch, load_submodule_prefix
 
@@ -52,11 +53,13 @@ class TrainingModule(pl.LightningModule):
         self.net_g.eval()
         self.net_d.eval()
         for batch in self.test_dataloader:
-            with torch.inference_mode():
-                ppg = batch['whisper']
-                vec = batch['hubert']
-                pit = batch['f0']
-                spk = batch['spk']
+            with torch.no_grad():
+                # because we created this dataloader ourselves
+                # we have to manually move the data to the device
+                ppg = batch['whisper'].to(self.dtype).to(self.device) 
+                vec = batch['hubert'].to(self.dtype).to(self.device)
+                pit = batch['f0'].to(self.dtype).to(self.device)
+                spk = batch['spk'].to(self.dtype).to(self.device)
                 ppg_len = batch['whisper_length']
                 out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len)
             for i, audio in enumerate(out_audio):
@@ -151,10 +154,16 @@ class TrainingModule(pl.LightningModule):
             logs_q, logdet_f, logdet_r), spk_preds = self.net_g(
                 ppg, vec, pit, spec, spk, ppg_len, spec_len)
         audio = commons.slice_segments(
-            wave, ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
+            wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
         # Spk Loss
         spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
                             .to(self.device).fill_(1.0))
+        
+        # Sometimes these have slightly different lengths. Should still be aligned
+        min_dim = min(fake_audio.shape[2], audio.shape[2])
+        fake_audio = fake_audio[:, :, :min_dim]
+        audio = audio[:, :, :min_dim]
+
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
         mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
@@ -165,20 +174,11 @@ class TrainingModule(pl.LightningModule):
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
         # Generator Loss
-        disc_fake = self.net_d(fake_audio)
-        score_loss = 0.0
-        for (_, score_fake) in disc_fake:
-            score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
-        score_loss = score_loss / len(disc_fake)
+        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
+        score_loss, _ = generator_loss(y_d_hat_g)
 
-        # Feature Loss
-        disc_real = self.net_d(audio)
-        feat_loss = 0.0
-        for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
-            for fake, real in zip(feat_fake, feat_real):
-                feat_loss += torch.mean(torch.abs(fake - real))
-        feat_loss = feat_loss / len(disc_fake)
-        feat_loss = feat_loss * 2
+        # # Feature Loss
+        feat_loss = feature_loss(fmap_r, fmap_g)
 
         # Kl Loss
         loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
@@ -186,7 +186,6 @@ class TrainingModule(pl.LightningModule):
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + loss_kl_r * 0.5 + spk_loss * 2
-        loss_g.backward()
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -197,14 +196,8 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
-        disc_fake = self.net_d(fake_audio.detach())
-        disc_real = self.net_d(audio)
-
-        loss_d = 0.0
-        for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
-            loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
-            loss_d += torch.mean(torch.pow(score_fake, 2))
-        loss_d = loss_d / len(disc_fake)
+        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
+        loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
         if loss_d.requires_grad:
             optim_d.zero_grad()
@@ -226,6 +219,8 @@ class TrainingModule(pl.LightningModule):
         
         prog_bar_set = {'loss_g', 'loss_d'}
         for k,v in ret.items():
+            if v is None:
+                continue
             self.log(k, v, prog_bar=k in prog_bar_set, logger=True)
         return ret
 
@@ -235,6 +230,8 @@ class TrainingModule(pl.LightningModule):
             return None
         
         for k,v in ret.items():
+            if v is None:
+                continue
             self.log('val_' + k, v, logger=True)
         return ret
 
