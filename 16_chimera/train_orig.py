@@ -70,7 +70,7 @@ class TrainingModule(pl.LightningModule):
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
                 out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len)
-                out_audio_post = self.net_g.posterior_test(spec, ppg_len, spk)
+                out_audio_post = self.net_g.posterior_test(spec, ppg_len, pit, spk)
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
                 audio = audio[:int(ppg_len[i] * self.config.data.hop_length)]
