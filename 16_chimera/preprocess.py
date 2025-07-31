@@ -26,6 +26,8 @@ if __name__ == '__main__':
 
     is_multispk = False
     new_lines = []
+    sid_avgs = {}
+    sid_sums = {}
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
         orig_line = line
         if 'longform' in line:
@@ -37,14 +39,35 @@ if __name__ == '__main__':
             is_multispk = True
             split = line.split('|')
             line = split[0]
+            sid = split[1]
+        else:
+            sid = 0
         if not os.path.exists(line):
             print(f'File not found: {line}')
             continue
-        new_lines.append(line)
 
         feats = extractor.extract_features(line)
+        savepaths = {}
         for key, value in feats.items():
-            torch.save(value, os.path.join(args.output_dir, os.path.basename(line) + '.' + key))
+            savepath = os.path.join(args.output_dir, os.path.basename(line) + '.' + key)
+            savepaths[key] = savepath
+            torch.save(value, savepath)
+
+        newline = '|'.join([
+            savepaths['whisper'],
+            savepaths['hubert'],
+            savepaths['f0'],
+            savepaths['spec'],
+            savepaths['spk'],
+            savepaths['wave'],
+        ])
+        new_lines.append(newline)
+
+        if not sid in sid_avgs:
+            sid_avgs[sid] = torch.zeros_like(feats['spk'])
+            sid_sums[sid] = 0
+        sid_avgs[sid] += feats['spk']
+        sid_sums[sid] += 1
 
     if args.val_fraction > 0:
         val_lines = new_lines[-int(len(lines) * args.val_fraction):]
@@ -53,7 +76,11 @@ if __name__ == '__main__':
         val_lines = []
         train_lines = new_lines
 
+    for sid, avg in sid_avgs.items():
+        sid_avgs[sid] = sid_avgs[sid] / sid_sums[sid]
+
     with open(os.path.join(args.output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(train_lines))
     with open(os.path.join(args.output_dir, 'val.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(val_lines))
+    torch.save(sid_avgs, os.path.join(args.output_dir, 'sid_avgs.pt'))

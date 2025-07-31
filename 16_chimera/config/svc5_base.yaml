@@ -1,3 +1,4 @@
+exp_name: test01
 data:
   filter_length: 1536
   hop_length: 480
@@ -18,18 +19,14 @@ gen:
   resblock: '1'
   resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
   resblock_kernel_sizes: [3, 7, 11]
-  upsample_initial_channel: 320
+  upsample_initial_channel: 512
   upsample_kernel_sizes: [24, 20, 4, 4]
   upsample_rates: [12, 10, 2, 2]
   upsample_input: 192
 log:
-  eval_interval: 5
-  info_interval: 100
-  keep_ckpts: 2
   log_dir: logs
   num_audio: 6
   pth_dir: chkpt
-  save_interval: 10
 mpd:
   kernel_size: 5
   lReLU_slope: 0.2
@@ -42,11 +39,14 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  accum_step: 2
-  batch_size: 16
+  batch_size: 8
+
+  weight_decay: 1e-4
+  cosine_anneal_end: 500000
   betas:
   - 0.8
   - 0.99
+
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
@@ -54,10 +54,21 @@ train:
   eps: 1e-9
   learning_rate: 5e-5
   lr_decay: 0.999875
+  grad_clip_thresh: 10000.
   model: sovits
   port: 8001
   pretrain: ./vits_pretrain/sovits5.0_bigvgan_mix_v2.pth
   seed: 1234
+
+  train_filelist: ./data/expresso/train.txt
+  val_filelist: ./data/expresso/val.txt
+  test_filelist: ./data/test/train.txt
+  test_interval: 1
+  val_interval: 1
+  save_interval: 10
+  keep_ckpts: 2
+
+  stage2_epoch: 20
 vits:
   filter_channels: 640
   gin_channels: 256

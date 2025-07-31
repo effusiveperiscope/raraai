@@ -1,0 +1,5 @@
+D:\DataAugmentation\MyTestMe\03-Vocals-250605_1005.wav
+D:\DataAugmentation\MyTestMe\03-Vocals-250605_1006-01.wav
+D:\DataAugmentation\MyTestMe\03-Vocals-250605_1006-04.wav
+D:\DataAugmentation\MyTestMe\03-Vocals-250605_1006.wav
+D:\DataAugmentation\MyTestMe\03-Vocals-250605_1007.wav
