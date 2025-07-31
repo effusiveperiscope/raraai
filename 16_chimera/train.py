@@ -133,8 +133,9 @@ class TrainingModule(pl.LightningModule):
         ppg = batch['whisper']
         ppg_len = batch['whisper_length']
         vec = batch['hubert']
-        pit = batch['f0']
+        pit = batch['f0'].to(ppg.dtype)
         spec = batch['spec']
+        spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
         spec_len = batch['spec_length']
         spk = batch['spk']
         wave = batch['wave']
@@ -145,7 +146,6 @@ class TrainingModule(pl.LightningModule):
         # augmentation is baked into the model for so-vits-svc 5.0, 
         # so we don't perform any ourselves
         hp = self.config
-        spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r), spk_preds = self.net_g(
