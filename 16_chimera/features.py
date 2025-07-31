@@ -12,7 +12,8 @@ class MyFeatures:
     def __init__(self, 
         device='cuda',
         config='config/svc5_base.yaml',
-        feats_to_extract : set[str] = {'whisper', 'hubert', 'spk', 'f0', 'spec', 'wave'}):
+        feats_to_extract : set[str] = {'whisper', 'hubert', 'spk', 'f0', 'spec', 'wave'},
+        do_normalize=True):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract
         self.expected_sample_rate=16000
@@ -27,10 +28,12 @@ class MyFeatures:
         if 'spec' in feats_to_extract:
             self.config = config
             self.device = device
+        self.do_normalize = do_normalize
 
     def extract_features(self, file : str):
         data, _ = librosa.load(file, sr=self.expected_sample_rate)
-        data = librosa.util.normalize(data)
+        if self.do_normalize:
+            data = librosa.util.normalize(data)
         feat = {}
         if 'whisper' in self.feats_to_extract:
             feat['whisper'] = self.svc5_whisper_model.extract_features(torch.from_numpy(data)) # ppg
@@ -44,19 +47,34 @@ class MyFeatures:
 
             hps = self.config.data
             audio, _ = librosa.load(file, sr=hps.sampling_rate)
-            audio_norm = librosa.util.normalize(audio)
-            audio_norm = torch.from_numpy(audio_norm).unsqueeze(0)
+            if self.do_normalize:
+                audio = librosa.util.normalize(audio)
+            audio = torch.from_numpy(audio).unsqueeze(0)
             n_fft = hps.filter_length
             sampling_rate = hps.sampling_rate
             hop_size = hps.hop_length
             win_size = hps.win_length
 
             feat['spec'] = spectrogram.spectrogram_torch(
-                audio_norm, n_fft, sampling_rate, hop_size, win_size, center=False).squeeze(0).transpose(0, 1)
+                audio, n_fft, sampling_rate, hop_size, win_size, center=False).squeeze(0).transpose(0, 1)
         if 'wave' in self.feats_to_extract:
             data_spec, _ = librosa.load(file, sr=self.config.data.sampling_rate)
             feat['wave'] = torch.from_numpy(data_spec)
         return feat
+
+    def orig_spectrogram(self, file : str):
+        # linear spectrogram using the original so-vits-svc 5.0 params
+        audio, _ = librosa.load(file, sr=32000)
+        if self.do_normalize:
+            audio = librosa.util.normalize(audio)
+        audio = torch.from_numpy(audio).unsqueeze(0)
+        n_fft = 1024
+        sampling_rate = 32000
+        hop_size = 320
+        win_size = 1024
+
+        return spectrogram.spectrogram_torch(
+            audio, n_fft, sampling_rate, hop_size, win_size, center=False).squeeze(0).transpose(0, 1)
 
 if __name__ == '__main__':
     import os
@@ -67,7 +85,7 @@ if __name__ == '__main__':
     # spk [1, 256]
     # spec [1, 356, 769]
 
-    extractor = MyFeatures()
+    extractor = MyFeatures(do_normalize=False)
     feats = extractor.extract_features('test/test.wav')
     print_memory_usage()
 
