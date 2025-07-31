@@ -267,7 +267,6 @@ if __name__ == '__main__':
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
     parser.add_argument('--rvc_disc_ckpt', type=str, default=None) # RVC D_ checkpoint
-    parser.add_argument('--svc5_ckpt', type=str, default=None)
 
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
