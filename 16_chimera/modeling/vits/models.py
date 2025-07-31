@@ -200,7 +200,7 @@ class SynthesizerTrn(nn.Module):
         spk_preds = self.speaker_classifier(x)
         return audio, ids_slice, spec_mask, (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds
 
-    def posterior_test(self, spec, spec_l, spk):
+    def posterior_test(self, spec, spec_l, pit, spk):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
