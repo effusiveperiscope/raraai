@@ -123,23 +123,23 @@ class TrainingModule(pl.LightningModule):
             param.requires_grad = False
 
     def configure_optimizers(self):
-        disc_optim = torch.optim.AdamW(
-            self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
-            weight_decay=self.config.train.weight_decay)
         gen_optim = torch.optim.AdamW(
             self.net_g.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
-        disc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer=disc_optim, 
-            T_max=self.config.train.get('cosine_anneal_end', 500000),
-            eta_min=1e-6
-        )
+        disc_optim = torch.optim.AdamW(
+            self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            weight_decay=self.config.train.weight_decay)
         gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=gen_optim, 
             T_max=self.config.train.get('cosine_anneal_end', 500000),
             eta_min=1e-6
         )
-        return [disc_optim, gen_optim], [disc_scheduler, gen_scheduler]
+        disc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=disc_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 500000),
+            eta_min=1e-6
+        )
+        return [gen_optim, disc_optim], [gen_scheduler, disc_scheduler]
 
     def step(self, batch, batch_idx, is_train=True):
         ppg = batch['whisper']
@@ -209,6 +209,7 @@ class TrainingModule(pl.LightningModule):
         if loss_g.requires_grad:
             optim_g.zero_grad()
             self.manual_backward(loss_g)
+
             g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), hp.train.grad_clip_thresh)
             optim_g.step()
             sched_g.step()
