@@ -56,21 +56,33 @@ class TrainingModule(pl.LightningModule):
         print('=== Testing ===')
         self.net_g.eval()
         self.net_d.eval()
-        for batch in self.test_dataloader:
+        for j,batch in enumerate(self.test_dataloader):
             with torch.no_grad():
                 # because we created this dataloader ourselves
                 # we have to manually move the data to the device
                 ppg = batch['whisper'].to(self.dtype).to(self.device) 
                 vec = batch['hubert'].to(self.dtype).to(self.device)
                 pit = batch['f0'].to(self.dtype).to(self.device)
+                # We should NOT be using this
+                # spk = batch['spk'].to(self.dtype).to(self.device) 
                 spk = self.spk_index['0'].to(self.dtype).to(self.device).unsqueeze(0)
+                spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
                 out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len)
+                out_audio_post = self.net_g.posterior_test(spec, ppg_len, spk)
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
                 audio = audio[:int(ppg_len[i] * self.config.data.hop_length)]
                 self.logger.experiment.add_audio(
-                    tag=f'test_{i}',
+                    tag=f'test_prior_{i}_{j}',
+                    snd_tensor=audio,
+                    global_step=self.global_step,
+                    sample_rate=self.config.data.sampling_rate
+                )
+            for i, audio in enumerate(out_audio_post):
+                audio = audio.squeeze(0).cpu().numpy()
+                self.logger.experiment.add_audio(
+                    tag=f'test_posterior_{i}_{j}',
                     snd_tensor=audio,
                     global_step=self.global_step,
                     sample_rate=self.config.data.sampling_rate
