@@ -107,11 +107,8 @@ class TrainingModule(pl.LightningModule):
             # (we only rely on reconstruction/kl losses at this point)
 
     def on_train_batch_start(self, batch, batch_idx):
-        # Reconciling the RVC and so-vits-svc5 models
-        # We also want to train as little of the generator as possible to 
-        # minimize forgetting
         for param in self.net_d.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
         for param in self.net_g.parameters():
             param.requires_grad = False
 
