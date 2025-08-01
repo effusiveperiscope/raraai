@@ -1,4 +1,4 @@
-exp_name: test05
+exp_name: test05_stage2
 data:
   filter_length: 1536
   hop_length: 480
@@ -67,7 +67,7 @@ train:
   save_interval: 10
   keep_ckpts: 2
 
-  stage2_epoch: 20 # start training using gen/disc losses
+  stage2_epoch: 0 # start training using gen/disc losses
 vits:
   filter_channels: 640
   gin_channels: 256

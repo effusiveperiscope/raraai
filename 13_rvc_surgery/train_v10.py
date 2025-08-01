@@ -227,7 +227,7 @@ class V10TrainingModule(pl.LightningModule):
         if loss_disc.requires_grad:
             disc_optim.zero_grad()
             self.manual_backward(loss_disc)
-            d_norm = torch.nn.utils.clip_grad_norm_(self.net_d.parameters(), 1000.)
+            d_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 100000.)
             disc_optim.step()
             disc_scheduler.step()
         else:
@@ -271,7 +271,7 @@ class V10TrainingModule(pl.LightningModule):
         if loss_gen_all.requires_grad:
             gen_optim.zero_grad()
             self.manual_backward(loss_gen_all)
-            g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 10000.)
+            g_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), 100000.)
             gen_optim.step()
             gen_scheduler.step()
         else:

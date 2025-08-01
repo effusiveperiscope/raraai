@@ -25,3 +25,14 @@ def dump_batched_spectrogram(spec : torch.Tensor,
     spec = spec.transpose(1,2)
     for i,spec in enumerate(spec):
         plot_spectrogram(spec.detach().cpu(), save_path=f"{prefix}{i}.png")
+
+def check_param_updates(model, tag):
+    print(f"[{tag}] Checking for updated parameters:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.grad is None:
+                print(f" - {name}: ❌ No grad")
+            elif torch.all(param.grad == 0):
+                print(f" - {name}: ⚠️ Grad is all zero")
+            else:
+                print(f" - {name}: ✅ Grad exists")
