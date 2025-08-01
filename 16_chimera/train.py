@@ -299,7 +299,7 @@ if __name__ == '__main__':
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
-        state = torch.load(args.transfer_from, map_location='cpu')['state_dict']
+        state = torch.load(args.transfer_from, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
         load_submodule_prefix(net_d, 'net_d.', state)
     else:
