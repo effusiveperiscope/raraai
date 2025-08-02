@@ -1,11 +1,13 @@
 import pdb
 import sys
 import traceback
+from PyQt5.QtCore import pyqtRemoveInputHook
 def custom_excepthook(exc_type, exc_value, exc_traceback):
     """
     Custom exception hook that prints the exception information
     and then drops into a pdb debugger session.
     """
+    pyqtRemoveInputHook()
     # First, print the exception information as Python normally would.
     # We use traceback.print_exception to ensure consistent formatting.
     print("An unhandled exception occurred:")
