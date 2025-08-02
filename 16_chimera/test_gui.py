@@ -19,6 +19,7 @@ CHECKPOINTS_ROOT = 'checkpoints/test05_stage3'
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
         super().__init__()
+        self.config = config
         self.setWindowTitle("16 CHIMERA TEST GUI")
         self.setGeometry(100, 100, 800, 600)
 
@@ -31,7 +32,8 @@ class MainWindow(QMainWindow):
         gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
         gui.addParam(DoubleParam(label="Noise Aug Scale", id='noise_aug', min=0, max=3, default=0.0))
-        gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=config.model.spk_embed_dim - 1, default=0))
+        self.spk_index = torch.load(self.config.train.spk_index)
+        gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=len(self.spk_index) - 1, default=0))
         # TODO - pitch smooth
         gui.addInference(Inference(
             info=InferenceInfo(sr=48000, extension='flac'),
@@ -51,7 +53,6 @@ class MainWindow(QMainWindow):
         # self.hubert_feat_norm_std = torch.tensor(stat["std"])
 
         self.config = config
-        self.spk_index = torch.load(self.config.train.spk_index)
 
     def getCheckpoints(self):
         return os.listdir(CHECKPOINTS_ROOT)
@@ -62,16 +63,17 @@ class MainWindow(QMainWindow):
         # Points to a lightning checkpoint
         self.net_g = SynthesizerTrn(
             spec_channels=self.config.data.filter_length // 2 + 1,
-            segment_size=self.config.train.segment_size // self.config.data.hop_length,
+            segment_size=self.config.data.segment_size // self.config.data.hop_length,
             hp=self.config
         )
         # These components are not necessary for inference
         del self.net_g.enc_q
         del self.net_g.speaker_classifier
 
-        state = torch.load(checkpoint_path, map_location='cpu')['state_dict']
+        state = torch.load(
+            checkpoint_path, map_location='cpu', weights_only=False)['state_dict']
         submodule_prefix = 'net_g.'
-        load_submodule_prefix(self.net_g, submodule_prefix, state)
+        load_submodule_prefix(self.net_g, submodule_prefix, state, quiet=True)
         self.net_g.to('cuda')
         self.net_g.eval()
         self.net_g.half()
@@ -130,7 +132,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('configs/v09_big.yaml')
+    config = OmegaConf.load('config/svc5_base.yaml')
     window = MainWindow(config)
     window.show()
     app.exec_()
