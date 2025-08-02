@@ -131,7 +131,7 @@ def slice_segments_general(x, ids_str, segment_size=4, pad_value=0.0):
 
     return ret
 
-def load_state_dict_mismatch(model, state_dict):
+def load_state_dict_mismatch(model, state_dict, quiet=False):
     model_state_dict = model.state_dict()
     filtered_state_dict = {}
     mismatched_keys = []
@@ -145,18 +145,18 @@ def load_state_dict_mismatch(model, state_dict):
         else:
             mismatched_keys.append((key, state_dict[key].shape, None))  # Key not in model
 
-    if mismatched_keys:
+    if mismatched_keys and not quiet:
         print("Mismatched or missing keys (skipped):")
         for key, shape_ckpt, shape_model in mismatched_keys:
             print(f"{key}: checkpoint shape = {shape_ckpt}, model shape = {shape_model}")
 
     model.load_state_dict(filtered_state_dict, strict=False)
 
-def load_submodule_prefix(model, prefix : str, state_dict: dict):
+def load_submodule_prefix(model, prefix : str, state_dict: dict, quiet=False):
     state_dict = {
         k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)
     }
-    load_state_dict_mismatch(model, state_dict)
+    load_state_dict_mismatch(model, state_dict, quiet)
 
 def smooth_random_amplitude_modulation(spectrogram: torch.Tensor, 
                                        min_gain: float = 0.7, 
