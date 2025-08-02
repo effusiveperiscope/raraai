@@ -1,4 +1,7 @@
-exp_name: test05_stage2
+# stage 1 = no adversarial training
+# stage 2 = train discriminator, posterior, and decoder
+# stage 3 = train everything
+exp_name: test05_stage3
 data:
   filter_length: 1536
   hop_length: 480
@@ -37,7 +40,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 12
+  batch_size: 8
 
   weight_decay: 1e-4
   cosine_anneal_end: 500000
@@ -62,6 +65,7 @@ train:
   val_filelist: ./data/expresso/val.txt
   spk_index: ./data/expresso/sid_avgs.pt
   test_filelist: ./data/test/train.txt
+  test_noise_scale: 0.34
   test_interval: 1
   val_interval: 1
   save_interval: 10

@@ -66,7 +66,8 @@ class TrainingModule(pl.LightningModule):
                 spk = self.spk_index['0'].to(self.dtype).to(self.device).unsqueeze(0)
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
-                out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len)
+                out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len, noise_scale = 
+                    self.config.train.get('test_noise_scale', 0.34))
                 out_audio_post = self.net_g.posterior_test(spec, ppg_len, pit, spk)
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
@@ -110,14 +111,19 @@ class TrainingModule(pl.LightningModule):
         for param in self.net_d.parameters():
             param.requires_grad = True
         for param in self.net_g.parameters():
-            param.requires_grad = False
+            param.requires_grad = True
 
-        for param in self.net_g.enc_q.parameters():
-            param.requires_grad = True
-        for param in self.net_g.dec.parameters():
-            param.requires_grad = True
-        for param in self.net_g.dec.adapter.parameters():
-            param.requires_grad = False
+        # for param in self.net_d.parameters():
+        #     param.requires_grad = True
+        # for param in self.net_g.parameters():
+        #     param.requires_grad = False
+
+        # for param in self.net_g.enc_q.parameters():
+        #     param.requires_grad = True
+        # for param in self.net_g.dec.parameters():
+        #     param.requires_grad = True
+        # for param in self.net_g.dec.adapter.parameters():
+        #     param.requires_grad = False
 
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(

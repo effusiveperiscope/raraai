@@ -208,10 +208,10 @@ class SynthesizerTrn(nn.Module):
         audio = self.dec(spk, z_slice, pit_slice)
         return audio
 
-    def infer(self, ppg, vec, pit, spk, ppg_l):
+    def infer(self, ppg, vec, pit, spk, ppg_l, noise_scale=0.3):
         ppg = ppg + torch.randn_like(ppg) * 0.0001  # Perturbation
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg, ppg_l, vec, f0=f0_to_coarse(pit))
+            ppg, ppg_l, vec, f0=f0_to_coarse(pit), noise_scale=noise_scale)
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
         o = self.dec(spk, z * ppg_mask, f0=pit)
         return o
