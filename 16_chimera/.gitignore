@@ -2,3 +2,6 @@
 pretrain/*.pth
 data/*
 logs/*
+recordings
+outputs
+models

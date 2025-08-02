@@ -10,6 +10,7 @@ from svc_helper.gui import *
 from omegaconf import OmegaConf
 from features import MyFeatures
 from commons import load_submodule_prefix
+from dataset import interp_row
 import torch
 import soundfile as sf
 
@@ -27,7 +28,6 @@ class MainWindow(QMainWindow):
         gui.addCheckpoint(Checkpoint(
             get_checkpoints=self.getCheckpoints, load_checkpoint=self.loadCheckpoint))
         gui.addFileInput(AudioFileInput())
-        gui.addParam(IntParam(label="Feature Transpose", id='feat_transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
@@ -92,7 +92,6 @@ class MainWindow(QMainWindow):
         logger.info(f'Checkpoint {checkpoint_name} loaded')
 
     def inferAction(self, data: dict):
-        feat_transpose = data['feat_transpose']
         transpose = data['transpose']
         files = data['audio_files']['files']
 
@@ -104,8 +103,8 @@ class MainWindow(QMainWindow):
 
         out = []
         for file in files:
-            data_16k, _ = librosa.load(file, sr=16000)
-            feats = self.my_feats.get_features(data_16k, pitch_shift=feat_transpose)
+            feats = self.my_feats.extract_features(file)
+            feats = interp_row(feats)
             lens = torch.tensor([feats['whisper'].shape[1]]).to('cuda')
 
             # Tranpsose
@@ -114,13 +113,14 @@ class MainWindow(QMainWindow):
             # Truncate
             noise_aug = data['noise_aug']
             phone_aug = feats['whisper'] + (torch.randn_like(feats['whisper']) * noise_aug)
+            feats['f0'] = feats['f0'][:phone_aug.shape[0]]
 
             with torch.no_grad():
                 o = self.net_g.infer(
-                    ppg=phone_aug.half().to(self.device),
-                    vec=feats['hubert'].half().to(self.device),
-                    pit=feats['f0'].half().to(self.device),
-                    spk=self.spk_index[data['sid']].half().to(self.device),
+                    ppg=phone_aug.half().to(self.device).unsqueeze(0),
+                    vec=feats['hubert'].half().to(self.device).unsqueeze(0),
+                    pit=feats['f0'].half().to(self.device).unsqueeze(0),
+                    spk=self.spk_index[str(data['sid'])].half().to(self.device).unsqueeze(0),
                     ppg_l=lens,
                     noise_scale=data['noise'])
                 o_np = o.squeeze().cpu().float().numpy()
