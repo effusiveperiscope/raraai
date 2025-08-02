@@ -67,6 +67,7 @@ train:
   test_filelist: ./data/test/train.txt
   test_noise_scale: 0.34
   test_interval: 1
+  test_transpose: 0
   val_interval: 1
   save_interval: 10
   keep_ckpts: 2
