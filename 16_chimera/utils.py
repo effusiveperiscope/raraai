@@ -2,6 +2,19 @@ import torch
 import soundfile as sf
 from commons import plot_spectrogram
 
+def scale_gradients(module, scale):
+    """
+    Multiplies the gradients of all parameters in the given module by `scale`
+    right after they are computed during backward().
+    """
+    def hook(module, grad_input, grad_output):
+        # grad_input is a tuple of gradients w.r.t. the input tensors
+        # grad_output is a tuple of gradients w.r.t. the output tensors
+        return tuple(g * scale if g is not None else None for g in grad_input)
+
+    handle = module.register_full_backward_hook(hook)
+    return handle
+
 def print_memory_usage():
     # Allocated memory (actively used by tensors)
     allocated = torch.cuda.memory_allocated() / 1024**2  # in MB
