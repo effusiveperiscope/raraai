@@ -63,7 +63,7 @@ class TrainingModule(pl.LightningModule):
                 ppg = batch['whisper'].to(self.dtype).to(self.device) 
                 vec = batch['hubert'].to(self.dtype).to(self.device)
                 pit = batch['f0'].to(self.dtype).to(self.device)
-                pit = pit * (2 ** (self.config.data.get('test_transpose', 0) / 12))
+                pit = pit * (2 ** (self.config.train.get('test_transpose', 0) / 12))
                 spk = self.spk_index['0'].to(self.dtype).to(self.device).unsqueeze(0)
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
@@ -351,7 +351,7 @@ if __name__ == '__main__':
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',
-        max_epochs=config.train.epochs,
+        max_steps=config.train.get('max_steps', 160000),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
     )
