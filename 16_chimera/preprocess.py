@@ -1,3 +1,5 @@
+# file: preprocess.py
+
 import argparse
 import os
 import random
@@ -5,35 +7,27 @@ import torch
 from tqdm import tqdm
 from features import MyFeatures
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--filelist', type=str, required=True, help='path to filelist')
-    parser.add_argument('--config', type=str, default='config/svc5_base.yaml')
-    parser.add_argument('--val_fraction', type=float, default=0.05)
-    parser.add_argument('--output_dir', type=str, required=True)
-    parser.add_argument('--shuffle_seed', type=int, default=42)
+def process_filelist(filelist_path, config='config/svc5_base.yaml', val_fraction=0.05,
+                     output_dir='output', shuffle_seed=42):
+    with open(filelist_path, 'r', encoding='utf-8') as f:
+        lines = [line.strip() for line in f.readlines()]
 
-    args = parser.parse_args()
-    with open(args.filelist, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-        lines = [line.strip() for line in lines]
+    os.makedirs(output_dir, exist_ok=True)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    random.seed(args.shuffle_seed)
+    random.seed(shuffle_seed)
     random.shuffle(lines)
 
-    extractor = MyFeatures(config = args.config)
+    extractor = MyFeatures(config=config)
 
     is_multispk = False
     new_lines = []
     sid_avgs = {}
     sid_sums = {}
+
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
-        orig_line = line
         if 'longform' in line:
-            # These are for longform in Expresso - will cause OOM
             continue
+
         if '|' in line:
             if not is_multispk:
                 print('=== Multispeaker filelist detected! ===')
@@ -43,6 +37,7 @@ if __name__ == '__main__':
             sid = split[1]
         else:
             sid = 0
+
         if not os.path.exists(line):
             print(f'File not found: {line}')
             continue
@@ -50,7 +45,7 @@ if __name__ == '__main__':
         feats = extractor.extract_features(line)
         savepaths = {}
         for key, value in feats.items():
-            savepath = os.path.join(args.output_dir, os.path.basename(line) + '.' + key)
+            savepath = os.path.join(output_dir, os.path.basename(line) + '.' + key)
             savepaths[key] = savepath
             torch.save(value, savepath)
 
@@ -64,15 +59,16 @@ if __name__ == '__main__':
         ])
         new_lines.append(newline)
 
-        if not sid in sid_avgs:
+        if sid not in sid_avgs:
             sid_avgs[sid] = torch.zeros_like(feats['spk'])
             sid_sums[sid] = 0
         sid_avgs[sid] += feats['spk']
         sid_sums[sid] += 1
 
-    if args.val_fraction > 0:
-        val_lines = new_lines[-int(len(lines) * args.val_fraction):]
-        train_lines = new_lines[:-int(len(lines) * args.val_fraction)]
+    if val_fraction > 0:
+        val_size = int(len(lines) * val_fraction)
+        val_lines = new_lines[-val_size:]
+        train_lines = new_lines[:-val_size]
     else:
         val_lines = []
         train_lines = new_lines
@@ -80,8 +76,29 @@ if __name__ == '__main__':
     for sid, avg in sid_avgs.items():
         sid_avgs[sid] = sid_avgs[sid] / sid_sums[sid]
 
-    with open(os.path.join(args.output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(train_lines))
-    with open(os.path.join(args.output_dir, 'val.txt'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(output_dir, 'val.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(val_lines))
-    torch.save(sid_avgs, os.path.join(args.output_dir, 'sid_avgs.pt'))
+    torch.save(sid_avgs, os.path.join(output_dir, 'sid_avgs.pt'))
+
+    del extractor
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--filelist', type=str, required=True, help='path to filelist')
+    parser.add_argument('--config', type=str, default='config/svc5_base.yaml')
+    parser.add_argument('--val_fraction', type=float, default=0.05)
+    parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--shuffle_seed', type=int, default=42)
+
+    args = parser.parse_args()
+
+    process_filelist(
+        filelist_path=args.filelist,
+        config=args.config,
+        val_fraction=args.val_fraction,
+        output_dir=args.output_dir,
+        shuffle_seed=args.shuffle_seed
+    )

@@ -2,6 +2,7 @@
 pretrain/*.pth
 data/*
 logs/*
+archived_logs
 recordings
 outputs
 models
