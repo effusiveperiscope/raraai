@@ -1,7 +1,6 @@
 from omegaconf import OmegaConf
 from torch import nn
-from modeling.spk_cond import FiLMGenerator
-from modeling.commons import SinusoidalPositionalEncoding
+import torch
 import torch.nn.functional as F
 from einops import rearrange
 
@@ -35,13 +34,12 @@ class F0Predictor(nn.Module):
         super().__init__()
 
         self.speech_proj = nn.Sequential( # Bottleneck to avoid leaking too much info
-            nn.Lineaer(speech_dim, 32),
-            nn.Lineaer(32, hidden_dim),
+            nn.Linear(speech_dim, 32),
+            nn.Linear(32, hidden_dim),
             )
         self.mean_proj = nn.Linear(1, hidden_dim)
         self.pitch_emb = nn.Embedding(pitch_quant_dim + 1, hidden_dim) # +1 for unvoiced
-        self.speech_cond = FiLMGenerator(hidden_dim, hidden_dim)
-        self.spk_cond = FiLMGenerator(spk_emb_dim, hidden_dim)
+        self.speech_cond = nn.Conv1d(hidden_dim, 2 * hidden_dim, 1)
 
         self.speech_conv = SiLUResBlock([
             nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
@@ -65,21 +63,15 @@ class F0Predictor(nn.Module):
         x = x + self.mean_proj(target_f0_mean) * speech_mask
 
         speech = self.speech_proj(speech) * speech_mask
-
         speech = self.speech_conv(rearrange(speech, "b t c -> b c t")) 
-        speech = rearrange(speech, "b c t -> b t c") * speech_mask
-
-        gamma, beta = self.speech_cond(speech)
-        x = gamma * x + beta
+        speech = speech * rearrange(speech_mask, "b t -> b 1 t")
 
         x = rearrange(x, "b t c -> b c t")
+
+        m, v = self.speech_cond(speech)
+        x = (x - m) * torch.exp(-v) * rearrange(speech_mask, "b t -> b 1 t")
+
         x = self.inter_conv(x)
-        x = rearrange(x, "b c t -> b t c")
-
-        gamma, beta = self.spk_cond(spk_emb.unsqueeze(1))
-        x = gamma * x + beta
-
-        x = rearrange(x, "b t c -> b c t")
         x = self.final_conv(x)
         x = rearrange(x, "b c t -> b t c")
 
