@@ -9,7 +9,6 @@ data:
   sampling_rate: 48000
   segment_size: 8000
   win_length: 1536
-  pitch_quant_dim: 10
 dist_config:
   dist_backend: nccl
   dist_url: tcp://localhost:54321
@@ -79,3 +78,4 @@ vits:
   spk_dim: 256
   vec_dim: 256
   use_pitch_predictor: true
+  pitch_quant_dim: 10

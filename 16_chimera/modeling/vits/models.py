@@ -211,7 +211,7 @@ class SynthesizerTrn(nn.Module):
             assert hasattr(self, 'pitch_predictor')
             assert target_f0_mean is not None
             f0_pred = self.pitch_predictor(quant_pitch, target_f0_mean, 
-                commons.sequence_mask(ppg_l, quant_pitch.size(1)))
+                commons.sequence_mask(ppg_l, quant_pitch.size(1))).squeeze(-1)
         else:
             f0_pred = None
 

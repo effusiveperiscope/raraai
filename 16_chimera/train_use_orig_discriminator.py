@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -13,7 +14,7 @@ from modeling.vits.losses import kl_loss
 from modeling.vits import commons
 from vits_extend.stft import TacotronSTFT
 from vits_extend.stft_loss import MultiResolutionSTFTLoss
-from svc_helper.pitch.utils import nonzero_mean, f0_quantilize
+from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
 from rvc_losses import generator_loss, discriminator_loss, feature_loss
 from dataset import dataset
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
@@ -163,8 +164,25 @@ class TrainingModule(pl.LightningModule):
         # pitch items
         if self.config.vits.get('use_pitch_predictor', False):
             np_pit = batch['f0'].to(ppg.dtype).detach().cpu().numpy()
-            target_f0_mean = nonzero_mean(np_pit)
-            quant_pitch = f0_quantilize(np_pit, self.config.vits.pitch_quant_dim)
+            # Iterate over batch and apply functions individually
+            target_f0_mean = []
+            quant_pitch = []
+
+            for pit_sample in np_pit:
+                # These functions expect a 1D array
+                target_f0_mean.append(nonzero_mean(pit_sample))
+                quant_pitch.append(
+                    discretize_f0_log(
+                        f0=pit_sample,
+                        n_voiced_bins=self.config.vits.get('pitch_quant_dim', 8),
+                        hold_length=10
+                    )
+                )
+
+            # Convert to numpy/tensor
+            target_f0_mean = torch.from_numpy(np.array(target_f0_mean)).float().to(self.device)  # shape: (B,)
+            quant_pitch = torch.from_numpy(np.stack(quant_pitch)).long().to(self.device)  # shape: (B, T)
+
         else:
             target_f0_mean = None
             quant_pitch = None
