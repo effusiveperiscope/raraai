@@ -10,6 +10,7 @@ from .utils import f0_to_coarse
 from .modules_grl import SpeakerClassifier
 from ..rvc.my_nsf import MyGeneratorNSF
 from ..vits_decoder.generator import Generator
+from ..rvc.f0_predictor import F0PredictorSmall
 
 
 class TextEncoder(nn.Module):
@@ -180,8 +181,15 @@ class SynthesizerTrn(nn.Module):
             gin_channels=hp.vits.spk_dim
         )
         self.dec = MyGeneratorNSF(hp=hp)
+        if hp.vits.get('use_pitch_predictor', False):
+            self.pitch_predictor = F0PredictorSmall(
+                speech_dim=hp.vits.inter_channels,
+                pitch_quant_dim=hp.vits.get('pitch_quant_dim', 10),
+                hidden_dim=hp.vits.hidden_channels
+            )
 
-    def forward(self, ppg, vec, pit, spec, spk, ppg_l, spec_l):
+    def forward(self, ppg, vec, pit, spec, spk, ppg_l, spec_l,
+        quant_pitch=None, target_f0_mean=None):
         ppg = ppg + torch.randn_like(ppg) * 1  # Perturbation
         vec = vec + torch.randn_like(vec) * 2  # Perturbation
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
@@ -198,7 +206,18 @@ class SynthesizerTrn(nn.Module):
         z_r, logdet_r = self.flow(z_p, spec_mask, g=spk, reverse=True)
         # speaker
         spk_preds = self.speaker_classifier(x)
-        return audio, ids_slice, spec_mask, (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds
+
+        if quant_pitch is not None:
+            assert hasattr(self, 'pitch_predictor')
+            assert target_f0_mean is not None
+            f0_pred = self.pitch_predictor(quant_pitch, target_f0_mean, 
+                commons.sequence_mask(ppg_l, quant_pitch.size(1)))
+        else:
+            f0_pred = None
+
+        return audio, ids_slice, spec_mask, \
+            (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r),\
+                spk_preds, f0_pred
 
     def posterior_test(self, spec, spec_l, pit, spk):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
@@ -295,6 +314,30 @@ class SynthesizerTrnOrig(nn.Module):
         o = self.dec(spk, z * ppg_mask, f0=pit)
         return o
 
+import pdb
+import sys
+import traceback
+from PyQt5.QtCore import pyqtRemoveInputHook
+def custom_excepthook(exc_type, exc_value, exc_traceback):
+    """
+    Custom exception hook that prints the exception information
+    and then drops into a pdb debugger session.
+    """
+    pyqtRemoveInputHook()
+    # First, print the exception information as Python normally would.
+    # We use traceback.print_exception to ensure consistent formatting.
+    print("An unhandled exception occurred:")
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    print("\nDropping into debugger...")
+
+    # Then, drop into the pdb debugger.
+    # The post_mortem function starts the debugger at the point of the exception.
+    pdb.post_mortem(exc_traceback)
+
+# Set the custom exception hook
+sys.excepthook = custom_excepthook
+
+
 if __name__ == "__main__":
     from omegaconf import OmegaConf
     ppg = torch.randn(1, 356, 1280)
@@ -304,6 +347,8 @@ if __name__ == "__main__":
     spk = torch.randn(1, 256)
     ppg_l = torch.tensor([356])
     spec_l = torch.tensor([356])
+    quant_pitch = torch.round(torch.randn(1, 356)).clamp(-4, 4).abs().long()
+    target_f0_mean = torch.randn(1)
 
     hp = OmegaConf.load("config/svc5_base.yaml")
 
@@ -314,5 +359,6 @@ if __name__ == "__main__":
     )
     audio, ids_slice, spec_mask, (
         z_f, z_r, z_p, m_p, logs_p, z_q, 
-        m_q, logs_q, logdet_f, logdet_r), spk_preds = \
-        model(ppg, vec, pit, spec, spk, ppg_l, spec_l)
+        m_q, logs_q, logdet_f, logdet_r), spk_preds, f0_pred = \
+        model(ppg, vec, pit, spec, spk, ppg_l, spec_l, quant_pitch, target_f0_mean)
+    print(f0_pred.shape)

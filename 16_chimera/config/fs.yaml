@@ -1,4 +1,4 @@
-exp_name: pinkie_spk
+exp_name: fluttershy_higher_lr
 data:
   filter_length: 1536
   hop_length: 480
@@ -9,6 +9,7 @@ data:
   sampling_rate: 48000
   segment_size: 8000
   win_length: 1536
+  pitch_quant_dim: 10
 dist_config:
   dist_backend: nccl
   dist_url: tcp://localhost:54321
@@ -49,7 +50,7 @@ train:
   c_mel: 1.0
   c_stft: 9
   eps: 1e-9
-  lr: 5e-5
+  lr: 1e-4
   lr_decay: 0.999875
   grad_clip_thresh: 10000.
   model: sovits
@@ -57,9 +58,9 @@ train:
   pretrain: ./vits_pretrain/sovits5.0_bigvgan_mix_v2.pth
   seed: 1234
 
-  train_filelist: ./data/pinkie_spk/train.txt
-  val_filelist: ./data/pinkie_spk/val.txt
-  spk_index: ./data/pinkie_spk/sid_avgs.pt
+  train_filelist: ./data/fs/train.txt
+  val_filelist: ./data/fs/val.txt
+  spk_index: ./data/fs/sid_avgs.pt
   test_filelist: ./data/test/train.txt
   test_noise_scale: 0.34
   test_interval: 10
@@ -77,3 +78,4 @@ vits:
   ppg_dim: 1280
   spk_dim: 256
   vec_dim: 256
+  use_pitch_predictor: true

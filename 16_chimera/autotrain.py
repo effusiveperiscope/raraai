@@ -23,7 +23,7 @@ sources = [
     ('Rainbow_Sing', PPP_SING_FILELIST),
     ('Applejack', PPP_FILELIST),
     ('Fluttershy', PPP_FILELIST),
-    # ('Pinkie', PPP_FILELIST), # Done
+    ('Pinkie', PPP_FILELIST),
     ('Rarity', PPP_FILELIST),
     ('Twilight', PPP_FILELIST),
     ('Rainbow', PPP_FILELIST),
@@ -32,27 +32,34 @@ sources = [
 for char, src_filelist in sources:
     out_filelist = os.path.join('filelists', f'{char}.txt')
 
+    sing_flag = '_Sing' in char
     # 1. Collect filelist using gather2.py
+    print(f'1 Gathering {char} filelist...')
     process_criteria(
         [
             Criterion(char=char, filelist=src_filelist,
-            excl_terms=['_Very Noisy_', 'CAUTION']),
+            excl_terms=['_Very Noisy_', 'CAUTION'],
+            or_terms=['S1', 'S2', 'S3'] if not sing_flag else []),
         ], out_file=out_filelist
     )
 
     # 2. Preprocess filelist using preprocess.py
+    print(f'2 Preprocessing {char} filelist...')
     data_dir = f'data/{char}'
     process_filelist(filelist_path=out_filelist, 
         output_dir=data_dir)
 
     # 3. Setup config
+    print(f'3 Setting up config...')
     hp = OmegaConf.load(BASE_CONFIG)
     hp.exp_name = f'{char}'
     hp.train_filelist = os.path.join(data_dir, 'train.txt')
     hp.val_filelist = os.path.join(data_dir, 'val.txt')
     hp.spk_index = os.path.join(data_dir, 'sid_avgs.pt')
+    hp.vits.use_pitch_predictor = not sing_flag # Only pitch predict for speaking voices
 
     # Train
+    print(f'4 Training {char}...')
     net_g = SynthesizerTrn(
         spec_channels=hp.data.filter_length // 2 + 1,
         segment_size=hp.data.segment_size // hp.data.hop_length,
@@ -96,7 +103,7 @@ for char, src_filelist in sources:
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',
-        max_steps=hp.train.get('max_steps', 160000),
+        max_steps=hp.train.get('max_steps', 140000),
         callbacks=callbacks,
         check_val_every_n_epoch=hp.train.get('val_interval', 1),
     )

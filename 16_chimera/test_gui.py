@@ -15,7 +15,10 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/test05_stage3'
+# CHECKPOINTS_ROOT = 'checkpoints/test05_stage4'
+# CONFIG = 'config/svc5_base.yaml'
+CHECKPOINTS_ROOT = 'checkpoints/fluttershy'
+CONFIG = 'config/fs.yaml'
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
@@ -132,7 +135,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication([])
-    config = OmegaConf.load('config/svc5_base.yaml')
+    config = OmegaConf.load(CONFIG)
     window = MainWindow(config)
     window.show()
     app.exec_()

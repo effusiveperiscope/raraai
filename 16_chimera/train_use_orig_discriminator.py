@@ -8,11 +8,11 @@ import random
 import ultimate_xc
 
 from modeling.vits.models import SynthesizerTrn
+from modeling.vits_decoder.discriminator import Discriminator
 from modeling.vits.losses import kl_loss
 from modeling.vits import commons
 from vits_extend.stft import TacotronSTFT
 from vits_extend.stft_loss import MultiResolutionSTFTLoss
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from svc_helper.pitch.utils import nonzero_mean, f0_quantilize
 from rvc_losses import generator_loss, discriminator_loss, feature_loss
 from dataset import dataset
@@ -22,7 +22,7 @@ from utils import dump_batched_audio, dump_batched_spectrogram
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
-        net_d: MultiPeriodDiscriminatorV2, 
+        net_d: Discriminator, 
         config : OmegaConf):
         super().__init__()
         self.net_g = net_g
@@ -206,10 +206,20 @@ class TrainingModule(pl.LightningModule):
 
         # Generator Loss
         if self.use_adv:
-            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
-            score_loss, _ = generator_loss(y_d_hat_g)
-            # # Feature Loss
-            feat_loss = feature_loss(fmap_r, fmap_g)
+            disc_fake = self.net_d(fake_audio)
+            score_loss = 0.0
+            for (_, score_fake) in disc_fake:
+                score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+            score_loss = score_loss / len(disc_fake)
+
+            # Feature Loss
+            disc_real = self.net_d(audio)
+            feat_loss = 0.0
+            for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+                for fake, real in zip(feat_fake, feat_real):
+                    feat_loss += torch.mean(torch.abs(fake - real))
+            feat_loss = feat_loss / len(disc_fake)
+            feat_loss = feat_loss * 2
         else:
             score_loss = torch.tensor(0.0).to(self.device)
             feat_loss = torch.tensor(0.0).to(self.device)
@@ -237,9 +247,15 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
+        disc_fake = self.net_d(fake_audio.detach())
+        disc_real = self.net_d(audio)
+
+        loss_d = 0.0
         if self.use_adv:
-            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
-            loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+            for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+                loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+                loss_d += torch.mean(torch.pow(score_fake, 2))
+            loss_d = loss_d / len(disc_fake)
         else:
             loss_d = torch.tensor(0.0).to(self.device)
 
@@ -305,7 +321,7 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    net_d = Discriminator(hp)
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))

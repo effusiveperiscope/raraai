@@ -7,6 +7,7 @@ class Criterion:
     filelist : str
     excl_terms : list[str] = field(default_factory=list)
     req_terms : list[str] = field(default_factory=list)
+    or_terms : list[str] = field(default_factory=list)
     max_lines_override : int = None
 
 def process_criteria(
@@ -47,6 +48,9 @@ def process_criteria(
                 continue
             if len(c.req_terms) and not all(
                 req_term in line for req_term in c.req_terms):
+                continue
+            if len(c.or_terms) and not any(
+                or_term in line for or_term in c.or_terms):
                 continue
 
             out_lines.append(f'{line_file}|{i}')
