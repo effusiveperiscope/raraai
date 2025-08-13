@@ -20,6 +20,11 @@ from dataset import dataset
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
 from utils import dump_batched_audio, dump_batched_spectrogram
 
+import warnings
+import numpy as np
+warnings.filterwarnings('error', category=RuntimeWarning)
+
+
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 

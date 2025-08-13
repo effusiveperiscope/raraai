@@ -9,32 +9,59 @@ import random
 import ultimate_xc
 
 from modeling.vits.models import SynthesizerTrn
+from modeling.vits_decoder.discriminator import Discriminator
 from modeling.vits.losses import kl_loss
 from modeling.vits import commons
 from vits_extend.stft import TacotronSTFT
 from vits_extend.stft_loss import MultiResolutionSTFTLoss
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
-from rvc_losses import generator_loss, discriminator_loss, feature_loss
 from dataset import dataset
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
 from utils import dump_batched_audio, dump_batched_spectrogram
+import sys
+sys.path.append('..')
+from rvq.vevo_repcodec import VevoRepCodec
+
+import warnings
+import numpy as np
+warnings.filterwarnings('error', category=RuntimeWarning)
 
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
-        net_d: MultiPeriodDiscriminatorV2, 
+        net_d: Discriminator, 
+        codec : VevoRepCodec,
         config : OmegaConf):
         super().__init__()
         self.net_g = net_g
         self.net_d = net_d
+        self.codec = codec
         self.config = config
         self.automatic_optimization = False
 
         self.stage = 1
         self.use_adv = True # use adversarial losses
+        self.cur_c_kl = 1.0
 
         self.spk_index = torch.load(self.config.train.spk_index)
+
+    def test05_warmup(self):
+        if self.global_step < self.config.train.get('test05_warmup', 0):
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.net_g.enc_p.parameters():
+                param.requires_grad = True
+            for param in self.net_g.enc_q.parameters():
+                param.requires_grad = True
+            self.cur_c_kl = 0.4
+        else:
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+            for param in self.net_g.parameters():
+                param.requires_grad = True
+            self.cur_c_kl = self.config.train.c_kl
 
     def setup(self, stage=None):
         hp = self.config
@@ -63,13 +90,15 @@ class TrainingModule(pl.LightningModule):
                 # because we created this dataloader ourselves
                 # we have to manually move the data to the device
                 ppg = batch['whisper'].to(self.dtype).to(self.device) 
-                vec = batch['hubert'].to(self.dtype).to(self.device)
+                _, ppg_q, _, _, _ = self.codec(ppg)
+                ppg_q = rearrange(ppg_q, "b c t -> b t c")
                 pit = batch['f0'].to(self.dtype).to(self.device)
                 pit = pit * (2 ** (self.config.train.get('test_transpose', 0) / 12))
                 spk = self.spk_index['0'].to(self.dtype).to(self.device).unsqueeze(0)
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
-                out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len, noise_scale = 
+                sid = batch['sid'].to(self.device)
+                out_audio = self.net_g.infer(ppg_q, pit, spk, ppg_len, sid=sid, noise_scale = 
                     self.config.train.get('test_noise_scale', 0.34))
                 out_audio_post = self.net_g.posterior_test(spec, ppg_len, pit, spk)
             for i, audio in enumerate(out_audio):
@@ -111,40 +140,7 @@ class TrainingModule(pl.LightningModule):
             # (we only rely on reconstruction/kl losses at this point)
 
     def on_train_batch_start(self, batch, batch_idx):
-        for param in self.net_d.parameters():
-            param.requires_grad = True
-        for param in self.net_g.parameters():
-            param.requires_grad = True
-
-        # for param in self.net_d.parameters():
-        #     param.requires_grad = True
-        # for param in self.net_g.parameters():
-        #     param.requires_grad = False
-
-        # for param in self.net_g.enc_q.parameters():
-        #     param.requires_grad = True
-        # for param in self.net_g.dec.parameters():
-        #     param.requires_grad = True
-        # for param in self.net_g.dec.adapter.parameters():
-        #     param.requires_grad = False
-
-    def make_scheduler(self, optim):
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer=optim, 
-            T_max=self.config.train.get('cosine_anneal_steps', 500000),
-            eta_min=1e-6
-        )
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer=optim, 
-            start_factor=0.01,
-            end_factor=1.0,
-            total_iters=self.config.train.get('warmup_steps', 10000)
-        )
-        return torch.optim.lr_scheduler.SequentialLR(
-            optimizer=optim,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[self.config.train.get('warmup_steps', 10000)]
-        )
+        self.test05_warmup()
 
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(
@@ -153,23 +149,35 @@ class TrainingModule(pl.LightningModule):
         disc_optim = torch.optim.AdamW(
             self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
-        gen_scheduler = self.make_scheduler(gen_optim)
-        disc_scheduler = self.make_scheduler(disc_optim)
+        gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=gen_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 500000),
+            eta_min=1e-6
+        )
+        disc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=disc_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 500000),
+            eta_min=1e-6
+        )
         return [gen_optim, disc_optim], [gen_scheduler, disc_scheduler]
 
     def step(self, batch, batch_idx, is_train=True):
         ppg = batch['whisper']
         ppg_len = batch['whisper_length']
-        vec = batch['hubert']
         pit = batch['f0'].to(ppg.dtype)
         spec = batch['spec']
         spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
         spec_len = batch['spec_length']
         spk = batch['spk']
         wave = batch['wave']
+        sid = batch['sid']
 
         optim_g, optim_d = self.optimizers()
         sched_g, sched_d = self.lr_schedulers()
+
+        with torch.no_grad():
+            _, ppg_q, _, _, _ = self.codec(ppg)
+            ppg_q = rearrange(ppg_q, "b c t -> b t c")
 
         # pitch items
         if self.config.vits.get('use_pitch_predictor', False):
@@ -192,6 +200,7 @@ class TrainingModule(pl.LightningModule):
             # Convert to numpy/tensor
             target_f0_mean = torch.from_numpy(np.array(target_f0_mean)).float().to(self.device)  # shape: (B,)
             quant_pitch = torch.from_numpy(np.stack(quant_pitch)).long().to(self.device)  # shape: (B, T)
+
         else:
             target_f0_mean = None
             quant_pitch = None
@@ -201,17 +210,13 @@ class TrainingModule(pl.LightningModule):
         hp = self.config
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
-            logs_q, logdet_f, logdet_r), spk_preds, f0_pred = self.net_g(
-                ppg, vec, pit, spec, spk, ppg_len, spec_len,
+            logs_q, logdet_f, logdet_r), f0_pred = self.net_g(
+                ppg_q, pit, spec, spk, ppg_len, spec_len, sid=sid,
                 quant_pitch=quant_pitch,
                 target_f0_mean=target_f0_mean)
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
-        # Spk Loss
-        spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
-                            .to(self.device).fill_(1.0))
-        
         # Sometimes these have slightly different lengths. Should still be aligned
         min_dim = min(fake_audio.shape[2], audio.shape[2])
         fake_audio = fake_audio[:, :, :min_dim]
@@ -233,17 +238,27 @@ class TrainingModule(pl.LightningModule):
 
         # Generator Loss
         if self.use_adv:
-            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
-            score_loss, _ = generator_loss(y_d_hat_g)
-            # # Feature Loss
-            feat_loss = feature_loss(fmap_r, fmap_g)
+            disc_fake = self.net_d(fake_audio)
+            score_loss = 0.0
+            for (_, score_fake) in disc_fake:
+                score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+            score_loss = score_loss / len(disc_fake)
+
+            # Feature Loss
+            disc_real = self.net_d(audio)
+            feat_loss = 0.0
+            for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+                for fake, real in zip(feat_fake, feat_real):
+                    feat_loss += torch.mean(torch.abs(fake - real))
+            feat_loss = feat_loss / len(disc_fake)
+            feat_loss = feat_loss * 2
         else:
             score_loss = torch.tensor(0.0).to(self.device)
             feat_loss = torch.tensor(0.0).to(self.device)
 
         # Kl Loss
-        loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
-        loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
+        loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * self.cur_c_kl
+        loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * self.cur_c_kl
 
         if self.config.vits.get('use_pitch_predictor', False):
             loss_f0 = F.l1_loss(f0_pred, pit)
@@ -252,7 +267,7 @@ class TrainingModule(pl.LightningModule):
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + \
-            loss_kl_r * 0.5 + spk_loss * 2 + loss_f0
+            loss_kl_r * 0.5 + loss_f0 * hp.train.c_f0
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -264,9 +279,15 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
+        disc_fake = self.net_d(fake_audio.detach())
+        disc_real = self.net_d(audio)
+
+        loss_d = 0.0
         if self.use_adv:
-            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
-            loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+            for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+                loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+                loss_d += torch.mean(torch.pow(score_fake, 2))
+            loss_d = loss_d / len(disc_fake)
         else:
             loss_d = torch.tensor(0.0).to(self.device)
 
@@ -281,7 +302,7 @@ class TrainingModule(pl.LightningModule):
         return {'loss_g': loss_g, 'loss_d': loss_d, 'g_norm': g_norm, 'd_norm': d_norm,
                 'score_loss': score_loss, 'feat_loss': feat_loss, 'mel_loss': mel_loss,
                 'stft_loss': stft_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r,
-                'spk_loss': spk_loss}
+                'loss_f0': loss_f0}
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True)
@@ -313,15 +334,14 @@ class TrainingModule(pl.LightningModule):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config/svc5_base.yaml')
+    parser.add_argument('--config', type=str, default='configs/base.yaml')
 
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
-    parser.add_argument('--rvc_disc_ckpt', type=str, default=None) # RVC D_ checkpoint
+    parser.add_argument('--codec_ckpt', type=str, default=None)
 
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
-    parser.add_argument('--version', type=int, default=None, help='tensorboard log version')
 
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
@@ -332,20 +352,34 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    net_d = Discriminator(hp)
+    codec = VevoRepCodec(
+        input_channels=hp.codec.whisper_dim,
+        output_channels=hp.codec.whisper_dim,
+        encode_channels=hp.codec.whisper_dim,
+        decode_channels=hp.codec.whisper_dim,
+        code_dim=hp.codec.whisper_dim,
+        codebook_num=1,
+        codebook_size=hp.codec.codebook_size
+    )
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
         state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
         load_state_dict_mismatch(net_g, state_dict)
+
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
+        load_state_dict_mismatch(net_d, state_dict)
+
         assert args.rvc_gen_ckpt is not None
         print("Loading RVC generator checkpoint: {}".format(args.rvc_gen_ckpt))
         state_dict = torch.load(args.rvc_gen_ckpt, map_location='cpu')['model']
         load_submodule_prefix(net_g.dec, 'dec.', state_dict)
-        assert args.rvc_disc_ckpt is not None
-        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
-        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
-        load_state_dict_mismatch(net_d, state_dict)
+
+        print("Loading codec checkpoint: {}".format(args.codec_ckpt))
+        state_dict = torch.load(args.codec_ckpt, map_location='cpu')['state_dict']
+        load_submodule_prefix(codec, 'model.', state_dict)
+        
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
     elif args.transfer_from is not None:
@@ -358,19 +392,20 @@ if __name__ == '__main__':
         print('!!! No checkpoint file found - starting from scratch !!!')
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
-    training_module = TrainingModule(net_g=net_g, net_d=net_d, config=config)
+    training_module = TrainingModule(
+        net_g=net_g, net_d=net_d, codec=codec, config=config)
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
-        version=args.version
+        version=0
     )
     print("Loading data...")
     train_dataset = dataset(config.train.train_filelist, is_train=True)
     val_dataset = dataset(config.train.val_filelist, is_train=False)
     print("Creating dataloaders...")
     train_dataloader = train_dataset.loader(
-        batch_size=config.train.batch_size, shuffle=True)
+        batch_size=config.train.batch_size, shuffle=True, num_workers=2, persistent_workers=True)
     val_dataloader = val_dataset.loader(
-        batch_size=config.train.batch_size)
+        batch_size=config.train.batch_size, shuffle=False, num_workers=2, persistent_workers=True)
     print("Done")
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(

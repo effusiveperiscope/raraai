@@ -1,4 +1,15 @@
-exp_name: test05_from_scratch
+# test01 - base
+# test02 - add speaker conditioning to prior
+# test03 - from original instead of from test01
+# test04 - use speaker ids instead of embeddings
+# test05 - transfer from test04, 
+# use linear hybrid pitch conditioning for both F0 predictor and prior, 
+# warmup for new prior, reduce f0 lr, increase kl lr for warmup
+# test06 - go back to test04 for prior
+exp_name: test06
+codec:
+  whisper_dim: 512
+  codebook_size: 32
 data:
   filter_length: 1536
   hop_length: 480
@@ -42,6 +53,7 @@ train:
   weight_decay: 1e-4
   cosine_anneal_steps: 500000
   warmup_steps: 10000
+  # test05_warmup: 10000
   betas:
   - 0.8
   - 0.99
@@ -49,6 +61,7 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
+  c_f0: 0.01
   epochs: 602
   eps: 1e-9
   lr: 1e-4
@@ -60,15 +73,14 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/super_diverse/train.txt
-  val_filelist: ./data/super_diverse/val.txt
-  spk_index: ./data/super_diverse/sid_avgs.pt
-  test_filelist: ./data/test/train.txt
+  train_filelist: ./data/full/train.txt
+  val_filelist: ./data/full/val.txt
+  spk_index: ./data/full/sid_avgs.pt
+  test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
   test_interval: 1
   test_transpose: 0
   val_interval: 1
-  save_interval: 10
   keep_ckpts: 2
 
   stage2_epoch: 0 # start training using gen/disc losses
@@ -79,6 +91,7 @@ vits:
   inter_channels: 192
   ppg_dim: 1280
   spk_dim: 256
+  max_spk_count: 256
   vec_dim: 256
   use_pitch_predictor: true
   pitch_quant_dim: 10
