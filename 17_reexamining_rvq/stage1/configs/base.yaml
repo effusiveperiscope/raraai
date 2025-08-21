@@ -1,7 +1,7 @@
-exp_name: base_whisper512_code32
+exp_name: base_whisper512_code48
 
 whisper_dim: 512
-codebook_size: 32
+codebook_size: 48
 
 train_filelist: data/preprocessed/train.txt
 val_filelist: data/preprocessed/val.txt

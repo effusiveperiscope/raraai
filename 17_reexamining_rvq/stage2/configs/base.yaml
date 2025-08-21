@@ -1,15 +1,21 @@
 # test01 - base
 # test02 - add speaker conditioning to prior
-# test03 - from original instead of from test01
+# test03 - from base instead of from test01
 # test04 - use speaker ids instead of embeddings
 # test05 - transfer from test04, 
 # use linear hybrid pitch conditioning for both F0 predictor and prior, 
 # warmup for new prior, reduce f0 lr, increase kl lr for warmup
-# test06 - go back to test04 for prior
-exp_name: test06
+# test06 - from base instead of from test04
+# test06_ac - use acoustic subset and only tune decoder
+# test06_ac_01 - use acoustic subset, full finetuning
+# test07 - use 48 codebook instead of 32. reduce batch size to 7 because we keep hitting out of memory
+# test07_ac - use acoustic subset, full finetuning
+
+exp_name: test07_ac
+tensorboard_version: 1
 codec:
   whisper_dim: 512
-  codebook_size: 32
+  codebook_size: 48
 data:
   filter_length: 1536
   hop_length: 480
@@ -48,7 +54,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 8
+  batch_size: 7
 
   weight_decay: 1e-4
   cosine_anneal_steps: 500000
@@ -69,12 +75,11 @@ train:
   grad_clip_thresh: 10000.
   model: sovits
   port: 8001
-  pretrain: ./vits_pretrain/sovits5.0_bigvgan_mix_v2.pth
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/full/train.txt
-  val_filelist: ./data/full/val.txt
+  train_filelist: ./data/full/train_expresso.txt
+  val_filelist: ./data/full/val_expresso.txt
   spk_index: ./data/full/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34

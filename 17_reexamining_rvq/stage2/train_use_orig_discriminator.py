@@ -45,23 +45,12 @@ class TrainingModule(pl.LightningModule):
 
         self.spk_index = torch.load(self.config.train.spk_index)
 
-    def test05_warmup(self):
-        if self.global_step < self.config.train.get('test05_warmup', 0):
-            for param in self.net_d.parameters():
-                param.requires_grad = False
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-            for param in self.net_g.enc_p.parameters():
-                param.requires_grad = True
-            for param in self.net_g.enc_q.parameters():
-                param.requires_grad = True
-            self.cur_c_kl = 0.4
-        else:
-            for param in self.net_d.parameters():
-                param.requires_grad = True
-            for param in self.net_g.parameters():
-                param.requires_grad = True
-            self.cur_c_kl = self.config.train.c_kl
+    def test06_ac(self):
+        for param in self.net_d.parameters():
+            param.requires_grad = True
+        for param in self.net_g.parameters():
+            param.requires_grad = True
+        self.cur_c_kl = self.config.train.c_kl
 
     def setup(self, stage=None):
         hp = self.config
@@ -140,7 +129,7 @@ class TrainingModule(pl.LightningModule):
             # (we only rely on reconstruction/kl losses at this point)
 
     def on_train_batch_start(self, batch, batch_idx):
-        self.test05_warmup()
+        self.test06_ac()
 
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(
@@ -376,27 +365,30 @@ if __name__ == '__main__':
         state_dict = torch.load(args.rvc_gen_ckpt, map_location='cpu')['model']
         load_submodule_prefix(net_g.dec, 'dec.', state_dict)
 
-        print("Loading codec checkpoint: {}".format(args.codec_ckpt))
-        state_dict = torch.load(args.codec_ckpt, map_location='cpu')['state_dict']
-        load_submodule_prefix(codec, 'model.', state_dict)
-        
+        assert args.codec_ckpt is not None
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
         state = torch.load(args.transfer_from, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
+        load_submodule_prefix(codec, 'codec.', state) # oops lol
         load_submodule_prefix(net_d, 'net_d.', state)
     else:
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
+    if args.codec_ckpt is not None:
+        print("Loading codec checkpoint: {}".format(args.codec_ckpt))
+        state_dict = torch.load(args.codec_ckpt, map_location='cpu')['state_dict']
+        load_submodule_prefix(codec, 'model.', state_dict)
+
     training_module = TrainingModule(
         net_g=net_g, net_d=net_d, codec=codec, config=config)
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
-        version=0
+        version=config.get('tensorboard_version', 0)
     )
     print("Loading data...")
     train_dataset = dataset(config.train.train_filelist, is_train=True)

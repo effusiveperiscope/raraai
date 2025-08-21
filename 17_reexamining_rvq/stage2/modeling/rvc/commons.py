@@ -4,6 +4,46 @@ import torch.nn.functional as F
 import math
 from einops import rearrange
 
+class ActivationStatsTracker(nn.Module):
+    def __init__(self, num_features, momentum=0.99, print_every=100):
+        """
+        Args:
+            num_features: Number of features/channels to track (last dimension for non-CNN, channel dim for CNN).
+            momentum: EMA factor for running stats.
+            print_every: Number of forward passes between prints.
+        """
+        super().__init__()
+        self.momentum = momentum
+        self.print_every = print_every
+        self.register_buffer('running_mean', torch.zeros(num_features))
+        self.register_buffer('running_var', torch.ones(num_features))
+        self.counter = 0
+
+    def forward(self, x):
+        # Decide which dimension to reduce over
+        if x.dim() == 2:  # [batch, features]
+            dims = [0]
+        elif x.dim() == 4:  # [batch, channels, H, W]
+            dims = [0, 2, 3]
+        else:
+            dims = list(range(x.dim() - 1))  # reduce over everything except last dim
+
+        batch_mean = x.mean(dim=dims)
+        batch_var = x.var(dim=dims, unbiased=False)
+
+        # Update running statistics (EMA)
+        self.running_mean = self.momentum * self.running_mean + (1 - self.momentum) * batch_mean
+        self.running_var = self.momentum * self.running_var + (1 - self.momentum) * batch_var
+
+        self.counter += 1
+        if self.counter % self.print_every == 0:
+            print(f"[ActivationStatsTracker] Step {self.counter}:")
+            print(f"  Mean: {self.running_mean.detach().cpu().numpy()}")
+            print(f"  Std:  {(self.running_var.sqrt()).detach().cpu().numpy()}")
+
+        return x
+
+
 class PitchConditioner(nn.Module):
     """Conditioning module that treats 0 as a special embedding, intended for
     use with f0 contours (i.e. where 0 = unvoiced)"""
@@ -18,9 +58,9 @@ class PitchConditioner(nn.Module):
             nn.Linear(inter_channels, inter_channels),
         )
 
-    def forward(self, pitch, convert_mel=True):
+    def forward(self, pitch, convert_mel=True, use_dtype=torch.float32):
         if pitch.dtype == torch.long: # Handle quantized condition
-            pitch = pitch.float()
+            pitch = pitch.to(use_dtype)
 
         if convert_mel:
             mel_pitch = 1127 * torch.log1p(pitch / 700)

@@ -48,7 +48,8 @@ class F0PredictorSmall(nn.Module): # No special conditioning
 
     def forward(self, quant_pitch, target_f0_mean, speech_mask):
         speech_mask = speech_mask.unsqueeze(-1)
-        x = self.pitch_cond(quant_pitch, convert_mel=False) * speech_mask
+        x = self.pitch_cond(quant_pitch,
+            convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask
         x = x + self.mean_proj(target_f0_mean.unsqueeze(-1)).unsqueeze(1) * speech_mask
         x = self.convs(x)
         x = F.layer_norm(x, x.shape[1:])

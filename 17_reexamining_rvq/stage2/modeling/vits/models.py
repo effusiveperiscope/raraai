@@ -28,7 +28,7 @@ class TextEncoder(nn.Module):
         self.out_channels = out_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
 
-        self.pit = nn.Embedding(256, hidden_channels)
+        self.pit = PitchConditioner(hidden_channels)
 
         self.spk_emb = nn.Embedding(max_spk_count, hidden_channels)
         self.spk_adapter = FiLMGenerator(
@@ -53,12 +53,15 @@ class TextEncoder(nn.Module):
             x.dtype
         ).to(x.device)
         x = self.pre(x) * x_mask
-        x = x + self.pit(f0).transpose(1, 2)
+
+        pit_cond = self.pit(f0, use_dtype=x.dtype).transpose(1, 2)
+
+        x = x + pit_cond
 
         spk = self.spk_emb(sid)
         gamma, beta = self.spk_adapter(spk.unsqueeze(1))
         x = rearrange(x, "b c t -> b t c")
-        x = x * gamma + beta
+        x = x + x * gamma + beta
         x = rearrange(x, "b t c -> b c t")
 
         x = self.enc(x * x_mask, x_mask)
@@ -198,11 +201,11 @@ class SynthesizerTrn(nn.Module):
                 hidden_dim=hp.vits.hidden_channels
             )
 
-    def forward(self, ppg, pit, spec, spk, ppg_l, spec_l, sid,
+    def forward(self, ppg_q, pit, spec, spk, ppg_l, spec_l, sid,
         quant_pitch=None, target_f0_mean=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg, ppg_l, f0=f0_to_coarse(pit), sid=sid)
+            ppg_q, ppg_l, f0=f0_to_coarse(pit), sid=sid)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
 
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
@@ -233,11 +236,12 @@ class SynthesizerTrn(nn.Module):
         audio = self.dec(spk, z_slice, pit_slice)
         return audio
 
-    def infer(self, ppg, pit, spk, ppg_l, sid, noise_scale=0.3):
-        ppg = ppg + torch.randn_like(ppg) * 0.0001  # Perturbation
+    def infer(self, ppg_q, pit, spk, ppg_l, sid, noise_scale=0.3):
+        ppg_q = ppg_q + torch.randn_like(ppg_q) * 0.0001  # Perturbation
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
+
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg, ppg_l, f0=f0_to_coarse(pit), sid=sid, noise_scale=noise_scale)
+            ppg_q, ppg_l, f0=f0_to_coarse(pit), sid=sid, noise_scale=noise_scale)
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
         o = self.dec(spk, z * ppg_mask, f0=pit)
         return o

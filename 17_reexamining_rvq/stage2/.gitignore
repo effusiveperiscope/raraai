@@ -1,3 +1,6 @@
 logs
 data
 pretrain/*.pth
+archived_logs
+outputs
+recordings
