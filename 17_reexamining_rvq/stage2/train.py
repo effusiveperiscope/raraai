@@ -84,7 +84,7 @@ class TrainingModule(pl.LightningModule):
                 ppg_q = rearrange(ppg_q, "b c t -> b t c")
                 pit = batch['f0'].to(self.dtype).to(self.device)
                 pit = pit * (2 ** (self.config.train.get('test_transpose', 0) / 12))
-                spk = self.spk_index['0'].to(self.dtype).to(self.device).unsqueeze(0)
+                spk = self.spk_index[0].to(self.dtype).to(self.device).unsqueeze(0)
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
                 sid = batch['sid'].to(self.device)
