@@ -1,4 +1,0 @@
-D:\DataAugmentation\TestMe3\test_2_01.wav
-D:\DataAugmentation\TestMe3\test_2_02.wav
-D:\DataAugmentation\TestMe3\test_2_03.wav
-D:\DataAugmentation\TestMe3\test_2_04.wav

@@ -4,3 +4,4 @@ pretrain/*.pth
 archived_logs
 outputs
 recordings
+filelists
