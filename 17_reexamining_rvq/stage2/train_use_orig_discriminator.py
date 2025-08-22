@@ -9,7 +9,8 @@ import random
 import ultimate_xc
 
 from modeling.vits.models import SynthesizerTrn
-from modeling.vits_decoder.discriminator import Discriminator
+from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from rvc_losses import generator_loss, feature_loss, discriminator_loss
 from modeling.vits.losses import kl_loss
 from modeling.vits import commons
 from vits_extend.stft import TacotronSTFT
@@ -29,7 +30,7 @@ warnings.filterwarnings('error', category=RuntimeWarning)
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
-        net_d: Discriminator, 
+        net_d: MultiPeriodDiscriminatorV2, 
         codec : VevoRepCodec,
         config : OmegaConf):
         super().__init__()
@@ -227,20 +228,11 @@ class TrainingModule(pl.LightningModule):
 
         # Generator Loss
         if self.use_adv:
-            disc_fake = self.net_d(fake_audio)
-            score_loss = 0.0
-            for (_, score_fake) in disc_fake:
-                score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
-            score_loss = score_loss / len(disc_fake)
-
-            # Feature Loss
-            disc_real = self.net_d(audio)
-            feat_loss = 0.0
-            for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
-                for fake, real in zip(feat_fake, feat_real):
-                    feat_loss += torch.mean(torch.abs(fake - real))
-            feat_loss = feat_loss / len(disc_fake)
-            feat_loss = feat_loss * 2
+            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
+            # score_loss
+            score_loss, _ = generator_loss(y_d_hat_r)
+            # feat_loss
+            feat_loss = feature_loss(fmap_r, fmap_g)
         else:
             score_loss = torch.tensor(0.0).to(self.device)
             feat_loss = torch.tensor(0.0).to(self.device)
@@ -268,15 +260,10 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
-        disc_fake = self.net_d(fake_audio.detach())
-        disc_real = self.net_d(audio)
-
         loss_d = 0.0
         if self.use_adv:
-            for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
-                loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
-                loss_d += torch.mean(torch.pow(score_fake, 2))
-            loss_d = loss_d / len(disc_fake)
+            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
+            loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
         else:
             loss_d = torch.tensor(0.0).to(self.device)
 
@@ -327,6 +314,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
+    parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
     parser.add_argument('--codec_ckpt', type=str, default=None)
 
     parser.add_argument('--resume_from', type=str, default=None)
@@ -341,7 +329,7 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = Discriminator(hp)
+    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
     codec = VevoRepCodec(
         input_channels=hp.codec.whisper_dim,
         output_channels=hp.codec.whisper_dim,
@@ -356,9 +344,6 @@ if __name__ == '__main__':
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
         state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
         load_state_dict_mismatch(net_g, state_dict)
-
-        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
-        load_state_dict_mismatch(net_d, state_dict)
 
         assert args.rvc_gen_ckpt is not None
         print("Loading RVC generator checkpoint: {}".format(args.rvc_gen_ckpt))
@@ -383,6 +368,11 @@ if __name__ == '__main__':
         print("Loading codec checkpoint: {}".format(args.codec_ckpt))
         state_dict = torch.load(args.codec_ckpt, map_location='cpu')['state_dict']
         load_submodule_prefix(codec, 'model.', state_dict)
+
+    if args.rvc_disc_ckpt is not None:
+        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
+        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
+        load_state_dict_mismatch(net_d, state_dict)
 
     training_module = TrainingModule(
         net_g=net_g, net_d=net_d, codec=codec, config=config)

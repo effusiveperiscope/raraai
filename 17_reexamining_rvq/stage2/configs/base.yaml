@@ -10,8 +10,9 @@
 # test06_ac_01 - use acoustic subset, full finetuning
 # test07 - use 48 codebook instead of 32. reduce batch size to 7 because we keep hitting out of memory
 # test07_ac - use acoustic subset, full finetuning
+# test08_ac - switch to RVC discriminator
 
-exp_name: test07_ac
+exp_name: test08_ac
 tensorboard_version: 1
 codec:
   whisper_dim: 512
