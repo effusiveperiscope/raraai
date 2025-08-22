@@ -57,6 +57,7 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
                 savepaths['spec'],
                 savepaths['spk'],
                 savepaths['wave'],
+                str(sid)
             ])
             new_lines.append(newline)
             if sid not in sid_avgs:
