@@ -20,7 +20,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/test09_ac'
+CHECKPOINTS_ROOT = 'checkpoints/test09_ac_01'
 CONFIG = 'configs/base.yaml'
 
 class MainWindow(QMainWindow):

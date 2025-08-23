@@ -43,6 +43,8 @@ class F0PredictorSmall(nn.Module): # No special conditioning
             nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             ])
         self.final_proj = nn.Linear(hidden_dim, 1)
 
