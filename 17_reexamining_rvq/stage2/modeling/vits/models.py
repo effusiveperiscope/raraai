@@ -201,6 +201,11 @@ class SynthesizerTrn(nn.Module):
                 hidden_dim=hp.vits.hidden_channels
             )
 
+    def pitch_predict(self, quant_pitch, target_f0_mean, ppg_l):
+        assert hasattr(self, 'pitch_predictor')
+        return self.pitch_predictor(quant_pitch, target_f0_mean, 
+                commons.sequence_mask(ppg_l, quant_pitch.size(1))).squeeze(-1)
+
     def forward(self, ppg_q, pit, spec, spk, ppg_l, spec_l, sid,
         quant_pitch=None, target_f0_mean=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
@@ -219,8 +224,7 @@ class SynthesizerTrn(nn.Module):
         if quant_pitch is not None:
             assert hasattr(self, 'pitch_predictor')
             assert target_f0_mean is not None
-            f0_pred = self.pitch_predictor(quant_pitch, target_f0_mean, 
-                commons.sequence_mask(ppg_l, quant_pitch.size(1))).squeeze(-1)
+            f0_pred = self.pitch_predict(quant_pitch, target_f0_mean, ppg_l)
         else:
             f0_pred = None
 
