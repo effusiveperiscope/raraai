@@ -84,7 +84,10 @@ class TrainingModule(pl.LightningModule):
                 ppg_q = rearrange(ppg_q, "b c t -> b t c")
                 pit = batch['f0'].to(self.dtype).to(self.device)
                 pit = pit * (2 ** (self.config.train.get('test_transpose', 0) / 12))
-                spk = self.spk_index[0].to(self.dtype).to(self.device).unsqueeze(0)
+                key = self.config.train.get('test_sid', 0)
+                if not key in self.spk_index:
+                    key = str(key)
+                spk = self.spk_index[key].to(self.dtype).to(self.device).unsqueeze(0)
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
                 sid = batch['sid'].to(self.device)
@@ -115,6 +118,13 @@ class TrainingModule(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self.update_stage()
+
+        for param in self.net_d.parameters():
+            param.requires_grad = True
+        for param in self.net_g.parameters():
+            param.requires_grad = True
+        for param in self.net_g.dec.parameters():
+            param.requires_grad = not self.config.train.get('freeze_dec', False)
 
     def on_train_epoch_end(self):
         self.test()

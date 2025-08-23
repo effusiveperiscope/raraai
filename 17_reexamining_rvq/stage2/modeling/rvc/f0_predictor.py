@@ -57,6 +57,19 @@ class F0PredictorSmall(nn.Module): # No special conditioning
         x = self.final_proj(x) * speech_mask
         return x
 
+class F0Discriminator(nn.Module):
+    def __init__(self):
+        self.convs = SiLUResBlock([
+            nn.Conv1d(1, 64, 7, padding=3),
+            nn.Conv1d(64, 128, 3, padding=1),
+            nn.Convv1d(128, 128, 3, padding=1),
+            nn.Conv1d(128, 64, 3, padding=1),
+            nn.Conv1d(64, 1, 3, padding=1),
+        ])
+
+    def forward(self, pit):
+        return self.convs(pit)
+
 class F0PredictorLarge(nn.Module):
     def __init__(self, 
         speech_dim: int,

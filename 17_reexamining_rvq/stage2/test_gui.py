@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 from features import MyFeatures
 from commons import load_submodule_prefix
 from dataset import process_row
+from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
 import sys
 sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
@@ -19,7 +20,7 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/test06'
+CHECKPOINTS_ROOT = 'checkpoints/test09_ac'
 CONFIG = 'configs/base.yaml'
 
 class MainWindow(QMainWindow):
@@ -39,6 +40,7 @@ class MainWindow(QMainWindow):
         gui.addParam(DoubleParam(label="Noise Aug Scale", id='noise_aug', min=0, max=3, default=0.0))
         self.spk_index = torch.load(self.config.train.spk_index)
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=len(self.spk_index) - 1, default=0))
+        gui.addParam(BoolParam(label="Use pitch prediction", id='use_pitch', default=False))
         # TODO - pitch smooth
         gui.addInference(Inference(
             info=InferenceInfo(sr=48000, extension='flac'),
@@ -123,8 +125,23 @@ class MainWindow(QMainWindow):
             feats = process_row(feats)
             lens = torch.tensor([feats['whisper'].shape[0]]).to('cuda')
 
-            # Tranpsose
-            pit = feats['f0'] * (2 ** (transpose / 12))
+            use_pitch = data['use_pitch']
+            if use_pitch:
+                target_f0_mean = nonzero_mean(feats['f0'].cpu().numpy())
+                quant_pitch = torch.from_numpy(discretize_f0_log(
+                    f0=feats['f0'].cpu().numpy(),
+                    n_voiced_bins=self.config.vits.pitch_quant_dim,
+                    hold_length=10))
+                # Predict using transposed mean
+                pit = self.net_g.pitch_predict(
+                    quant_pitch.to(self.dtype).to(self.device).unsqueeze(0),
+                    torch.Tensor([target_f0_mean * (2 ** (transpose / 12))]).to(
+                        self.dtype).to(self.device),
+                    lens
+                ).squeeze()
+            else:
+                # Tranpose
+                pit = feats['f0'] * (2 ** (transpose / 12))
 
             # Truncate
             noise_aug = data['noise_aug']
@@ -135,11 +152,15 @@ class MainWindow(QMainWindow):
 
             pit = pit[:ppg_q_aug.shape[1]]
 
+            sid_key = data['sid']
+            if not sid_key in self.spk_index:
+                sid_key = str(sid_key)
+
             with torch.no_grad():
                 o = self.net_g.infer(
                     ppg_q=ppg_q_aug,
                     pit=pit.to(self.dtype).to(self.device).unsqueeze(0),
-                    spk=self.spk_index[str(data['sid'])].to(self.dtype).to(self.device).unsqueeze(0),
+                    spk=self.spk_index[sid_key].to(self.dtype).to(self.device).unsqueeze(0),
                     ppg_l=lens,
                     sid=torch.Tensor([data['sid']]).to(self.device).long(),
                     noise_scale=data['noise'])
