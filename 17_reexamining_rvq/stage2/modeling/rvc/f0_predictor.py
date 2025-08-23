@@ -59,16 +59,33 @@ class F0PredictorSmall(nn.Module): # No special conditioning
 
 class F0Discriminator(nn.Module):
     def __init__(self):
-        self.convs = SiLUResBlock([
+        super().__init__()
+        self.convs = nn.ModuleList([
             nn.Conv1d(1, 64, 7, padding=3),
             nn.Conv1d(64, 128, 3, padding=1),
-            nn.Convv1d(128, 128, 3, padding=1),
+            nn.Conv1d(128, 128, 3, padding=1),
             nn.Conv1d(128, 64, 3, padding=1),
             nn.Conv1d(64, 1, 3, padding=1),
         ])
+        self.res_layers = nn.ModuleList([
+            nn.Linear(1, 64),
+            nn.Linear(64, 128),
+            nn.Linear(128, 128),
+            nn.Linear(128, 64),
+            nn.Linear(64, 1),
+        ])
 
     def forward(self, pit):
-        return self.convs(pit)
+        for conv, res in zip(self.convs, self.res_layers):
+            xs = pit
+            pit = F.silu(pit)
+            pit = rearrange(pit, "b t c -> b c t")
+            pit = conv(pit)
+            pit = rearrange(pit, "b c t -> b t c")
+            pit = F.layer_norm(pit, pit.shape[1:])
+            pit = res(xs) + pit
+        return pit
+
 
 class F0PredictorLarge(nn.Module):
     def __init__(self, 

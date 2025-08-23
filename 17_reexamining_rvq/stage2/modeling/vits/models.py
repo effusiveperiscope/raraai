@@ -8,7 +8,7 @@ from . import commons
 from . import modules
 from .utils import f0_to_coarse
 from ..rvc.my_nsf import MyGeneratorNSF, SpeakerAdapter
-from ..rvc.f0_predictor import F0PredictorSmall
+from ..rvc.f0_predictor import F0PredictorSmall, F0Discriminator
 from ..rvc.commons import FiLMGenerator, PitchConditioner
 from einops import rearrange
 

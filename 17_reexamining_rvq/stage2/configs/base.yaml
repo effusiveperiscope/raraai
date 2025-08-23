@@ -12,7 +12,8 @@
 # test07_ac - use expresso only, full finetuning
 # test08_ac - switch to RVC discriminator
 # test09_ac - remove vctk from dataset and do finetuning on full acoustic subset
-exp_name: test09_ac
+# test09_ac_01 - use LSGAN for pitch predictor
+exp_name: test09_ac_01
 tensorboard_version: 1
 codec:
   whisper_dim: 512
@@ -58,7 +59,7 @@ train:
   batch_size: 7
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 500000
+  cosine_anneal_steps: 100000
   warmup_steps: 10000
   # test05_warmup: 10000
   betas:

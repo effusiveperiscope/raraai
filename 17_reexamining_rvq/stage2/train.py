@@ -10,6 +10,7 @@ import ultimate_xc
 
 from modeling.vits.models import SynthesizerTrn
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from modeling.rvc.f0_predictor import F0Discriminator
 from rvc_losses import generator_loss, feature_loss, discriminator_loss
 from modeling.vits.losses import kl_loss
 from modeling.vits import commons
@@ -19,6 +20,7 @@ from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
 from dataset import dataset
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
 from utils import dump_batched_audio, dump_batched_spectrogram
+import itertools
 import sys
 sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
@@ -32,11 +34,13 @@ class TrainingModule(pl.LightningModule):
         net_g : SynthesizerTrn, 
         net_d: MultiPeriodDiscriminatorV2, 
         codec : VevoRepCodec,
+        f0_disc : F0Discriminator,
         config : OmegaConf):
         super().__init__()
         self.net_g = net_g
         self.net_d = net_d
         self.codec = codec
+        self.f0_disc = f0_disc
         self.config = config
         self.automatic_optimization = False
 
@@ -147,7 +151,8 @@ class TrainingModule(pl.LightningModule):
             self.net_g.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         disc_optim = torch.optim.AdamW(
-            self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            itertools.chain(
+                self.net_d.parameters(), self.f0_disc.parameters()), lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=gen_optim, 
@@ -239,6 +244,10 @@ class TrainingModule(pl.LightningModule):
         # Generator Loss
         if self.use_adv:
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
+
+            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1))
+            f0_gen_loss = torch.mean((1 - f0_fake_disc) ** 2)
+
             # score_loss
             score_loss, _ = generator_loss(y_d_hat_r)
             # feat_loss
@@ -258,7 +267,7 @@ class TrainingModule(pl.LightningModule):
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + \
-            loss_kl_r * 0.5 + loss_f0 * hp.train.c_f0
+            loss_kl_r * 0.5 + loss_f0 * hp.train.c_f0 + f0_gen_loss
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -270,10 +279,18 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
+        # Discriminator
         loss_d = 0.0
         if self.use_adv:
             y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
             loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+
+            f0_real_disc = self.f0_disc(pit.unsqueeze(-1))
+            f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
+            f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
+            f0_disc_loss = f0_real_loss + f0_fake_loss
+            loss_d = loss_d + f0_disc_loss
+
         else:
             loss_d = torch.tensor(0.0).to(self.device)
 
@@ -288,7 +305,7 @@ class TrainingModule(pl.LightningModule):
         return {'loss_g': loss_g, 'loss_d': loss_d, 'g_norm': g_norm, 'd_norm': d_norm,
                 'score_loss': score_loss, 'feat_loss': feat_loss, 'mel_loss': mel_loss,
                 'stft_loss': stft_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r,
-                'loss_f0': loss_f0}
+                'loss_f0': loss_f0, 'f0_gen_loss': f0_gen_loss, 'f0_disc_loss': f0_disc_loss}
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True)
@@ -384,8 +401,10 @@ if __name__ == '__main__':
         state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
         load_state_dict_mismatch(net_d, state_dict)
 
+    f0_disc = F0Discriminator()
+
     training_module = TrainingModule(
-        net_g=net_g, net_d=net_d, codec=codec, config=config)
+        net_g=net_g, net_d=net_d, codec=codec, f0_disc=f0_disc, config=config)
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=config.get('tensorboard_version', 0)
