@@ -27,8 +27,12 @@ def dataset(filelist, is_train : bool):
         ],
         actions=[
             dt.LiveMapRow(operation=process_row),
+            dt.RandomSubsample(fields=['whisper', 'f0', 'spec', 'wave'], length=
+                int(48000 / 480 * 4), # 4 seconds
+                frame_multiples=[1, 1, 1, 480],
+                dims=[0, 0, 0, 0],),
             dt.PadGroup(fields=['whisper', 'f0', 'spec'], 
-            dims = [0, 0, 0, 0], values = [0, 0, 0, 0]),
+            dims = [0, 0, 0], values = [0, 0, 0]),
             dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
         ],
         is_train=is_train
