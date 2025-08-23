@@ -13,8 +13,10 @@
 # test08_ac - switch to RVC discriminator
 # test09_ac - remove vctk from dataset and do finetuning on full acoustic subset
 # test09_ac_01 - use LSGAN for pitch predictor
-exp_name: test09_ac_01
-tensorboard_version: 1
+# test09_ac_02 - expand pitch predictor
+# test09_ac_03 - update gen less frequently and switch to f0 only train
+exp_name: test09_ac_03
+tensorboard_version: 0
 codec:
   whisper_dim: 512
   codebook_size: 48
@@ -89,6 +91,10 @@ train:
   test_transpose: 12
   test_sid: 6
   val_interval: 1
+
+  f0_gen_interval: 3
+  train_f0_only: True
+
   keep_ckpts: 2
 
   stage2_epoch: 0 # start training using gen/disc losses

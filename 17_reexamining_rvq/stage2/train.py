@@ -44,18 +44,10 @@ class TrainingModule(pl.LightningModule):
         self.config = config
         self.automatic_optimization = False
 
-        self.stage = 1
         self.use_adv = True # use adversarial losses
         self.cur_c_kl = 1.0
 
         self.spk_index = torch.load(self.config.train.spk_index)
-
-    def test06_ac(self):
-        for param in self.net_d.parameters():
-            param.requires_grad = True
-        for param in self.net_g.parameters():
-            param.requires_grad = True
-        self.cur_c_kl = self.config.train.c_kl
 
     def setup(self, stage=None):
         hp = self.config
@@ -123,28 +115,41 @@ class TrainingModule(pl.LightningModule):
     def on_train_epoch_start(self):
         self.update_stage()
 
-        for param in self.net_d.parameters():
-            param.requires_grad = True
-        for param in self.net_g.parameters():
-            param.requires_grad = True
-        for param in self.net_g.dec.parameters():
-            param.requires_grad = not self.config.train.get('freeze_dec', False)
+
+        # for param in self.net_g.dec.parameters():
+        #     param.requires_grad = not self.config.train.get('freeze_dec', False)
+        if self.config.train.get('train_f0_only', False):
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+            for param in self.net_g.parameters():
+                param.requires_grad = False
+            for param in self.f0_disc.parameters():
+                param.requires_grad = True
+            for param in self.net_g.pitch_predictor.parameters():
+                param.requires_grad = True
+        else:
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+            for param in self.net_g.parameters():
+                param.requires_grad = True
 
     def on_train_epoch_end(self):
         self.test()
         return super().on_train_epoch_end()
 
     def update_stage(self):
-        if self.current_epoch >= self.config.train.stage2_epoch:
-            self.stage = 2
-            self.use_adv = True
+        pass
+
+    def update_f0_disc(self): # Update gen every N steps
+        if self.global_step % self.config.train.get('f0_gen_interval', 1) == 0:
+            for param in self.net_g.pitch_predictor.parameters():
+                param.requires_grad = True
         else:
-            self.stage = 1
-            self.use_adv = False # don't use adversarial training for stage 1
-            # (we only rely on reconstruction/kl losses at this point)
+            for param in self.net_g.pitch_predictor.parameters():
+                param.requires_grad = False
 
     def on_train_batch_start(self, batch, batch_idx):
-        self.test06_ac()
+        self.update_f0_disc()
 
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(
