@@ -73,7 +73,7 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  c_f0: 0.005
+  c_f0: 0.5
   epochs: 602
   eps: 1e-9
   lr: 1e-4
@@ -95,7 +95,7 @@ train:
   val_interval: 1
 
   f0_gen_interval: 3
-  c_f0_adv: 0.02
+  c_f0_adv: 0.5
   train_f0_only: True
   reset_f0_weights: True
 
