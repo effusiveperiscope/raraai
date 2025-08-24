@@ -56,8 +56,11 @@ class TrainingModule(pl.LightningModule):
         f0_pred = self.net_g(quant_pitch, target_f0_mean, mask).squeeze(-1)
         f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1))
         f0_gen_loss = torch.mean((1 - f0_fake_disc) ** 2)
-        f0_recon_loss = F.l1_loss(f0_pred, torch.log(f0))
-        gen_loss = f0_gen_loss + f0_recon_loss * self.config.train.get('c_recon', 0.05)
+        f0_recon_loss = F.l1_loss(f0_pred, torch.log(f0 + 1))
+        gen_loss = f0_gen_loss + f0_recon_loss * self.config.train.get('c_recon', 1.0)
+
+        if gen_loss.isnan().any() or gen_loss.isinf().any():
+            import pdb; pdb.set_trace()
 
         if gen_loss.requires_grad:
             optim_g.zero_grad()

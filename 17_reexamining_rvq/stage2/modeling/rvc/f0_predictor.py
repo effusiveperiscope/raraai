@@ -27,6 +27,9 @@ class SiLUResBlock(nn.Module):
         return x
 
 class F0PredictorSmall(nn.Module): # No special conditioning
+    """
+    Simple F0 predictor. Training objective should be log f0 + 1
+    """
     def __init__(self, 
         speech_dim: int,
         pitch_quant_dim: int,
@@ -50,15 +53,15 @@ class F0PredictorSmall(nn.Module): # No special conditioning
 
     def forward(self, quant_pitch, target_f0_mean, speech_mask):
         speech_mask = speech_mask.unsqueeze(-1)
-        uv_mask = quant_pitch == 0
+        v_mask = (quant_pitch != 0).unsqueeze(-1).float()
         x = self.pitch_cond(quant_pitch,
-            convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask
+            convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask * v_mask
         x = x + self.mean_proj(target_f0_mean.unsqueeze(-1)).unsqueeze(1) * speech_mask
-        x = self.convs(x)
+        x = self.convs(x) * speech_mask * v_mask
         x = F.layer_norm(x, x.shape[1:])
         x = F.silu(x)
-        x = self.final_proj(x) * speech_mask * (~uv_mask).unsqueeze(-1)
-        return x
+        x = self.final_proj(x) * speech_mask  * v_mask
+        return x # we predict log pitch plus 1
 
 class F0Discriminator(nn.Module):
     def __init__(self):
