@@ -11,7 +11,7 @@ train:
   val_filelist: ./data/full/val.txt
   keep_ckpts: 2
   weight_decay: 1e-4
-  c_recon: 0.05
+  c_recon: 1.0
   num_workers: 4
 vits:
   hidden_channels: 192
