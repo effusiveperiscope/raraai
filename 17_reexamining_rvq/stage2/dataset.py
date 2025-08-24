@@ -14,6 +14,25 @@ def process_row(row):
     row['whisper'] = interp2(row['whisper'])
     return row
 
+def f0_dataset(filelist, is_train : bool):
+    return dt.Dataset(
+        filelist=filelist,
+        field_specs=[
+            dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 1280]), provide_length=True, keep_in_memory=False),
+            dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
+            dt.FieldSpec(name='spec', datatype=torch.Tensor, dim=torch.Size([-1, 100]), provide_length=True, keep_in_memory=False, do_load=False),
+            dt.FieldSpec(name='spk', datatype=torch.Tensor, dim=torch.Size([256]), keep_in_memory=False, do_load=False),
+            dt.FieldSpec(name='wave', datatype=torch.Tensor, dim=torch.Size([-1]), provide_length=True, keep_in_memory=False, do_load=False),
+            dt.FieldSpec(name='sid', datatype=int, do_load=False),
+        ],
+        actions=[
+            dt.LiveMapRow(operation=process_row),
+            dt.PadGroup(fields=['whisper'], 
+            dims = [0], values = [0]),
+        ],
+        is_train=is_train
+    )
+
 def dataset(filelist, is_train : bool):
     return dt.Dataset(
         filelist=filelist,

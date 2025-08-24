@@ -1,0 +1,187 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import pytorch_lightning as pl
+import torch.nn.functional as F
+from einops import rearrange
+from omegaconf import OmegaConf
+import ultimate_xc
+
+from modeling.vits.models import F0PredictorSmall
+from modeling.rvc.f0_predictor import F0Discriminator
+from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
+from modeling.vits import commons
+from dataset import dataset
+
+# Train base F0 predictor model
+class TrainingModule(pl.LightningModule):
+    def __init__(self,
+        net_g: F0PredictorSmall,
+        net_d: F0Discriminator,
+        config: OmegaConf
+    ):
+        super().__init__()
+        self.net_g = net_g
+        self.net_d = net_d
+        self.config = config
+        self.automatic_optimization = False
+
+    def step(self, batch, batch_idx, is_train=True):
+        f0 = batch['f0'].to(self.dtype)
+        np_pit = f0.detach().cpu().numpy()
+        ppg_len = batch['whisper_length']
+        # Iterate over batch and apply functions individually
+        target_f0_mean = []
+        quant_pitch = []
+
+        optim_g, optim_d = self.optimizers()
+
+        for pit_sample in np_pit:
+            # These functions expect a 1D array
+            target_f0_mean.append(nonzero_mean(pit_sample))
+            quant_pitch.append(
+                discretize_f0_log(
+                    f0=pit_sample,
+                    n_voiced_bins=self.config.vits.get('pitch_quant_dim', 8),
+                    hold_length=10
+                )
+            )
+
+        # Convert to numpy/tensor
+        target_f0_mean = torch.from_numpy(np.array(target_f0_mean)).float().to(self.device)  # shape: (B,)
+        quant_pitch = torch.from_numpy(np.stack(quant_pitch)).long().to(self.device)  # shape: (B, T)
+
+        mask = commons.sequence_mask(ppg_len, quant_pitch.size(1))
+
+        f0_pred = self.net_g(quant_pitch, target_f0_mean, mask).squeeze(-1)
+        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1))
+        f0_gen_loss = torch.mean((1 - f0_fake_disc) ** 2)
+        f0_recon_loss = F.l1_loss(f0_pred, torch.log(f0))
+        gen_loss = f0_gen_loss + f0_recon_loss * self.config.train.get('c_recon', 0.05)
+
+        if gen_loss.requires_grad:
+            optim_g.zero_grad()
+            self.manual_backward(gen_loss)
+            g_norm = torch.nn.utils.clip_grad_norm_(
+                self.net_g.parameters(), self.config.train.grad_clip_thresh)
+            optim_g.step()
+        else:
+            g_norm = None
+
+        
+        f0_real_disc = self.net_d(f0.unsqueeze(-1))
+        f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
+        f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
+        disc_loss = f0_real_loss + f0_fake_loss
+
+        if disc_loss.requires_grad:
+            optim_d.zero_grad()
+            self.manual_backward(disc_loss)
+            d_norm = torch.nn.utils.clip_grad_norm_(
+                self.net_g.parameters(), self.config.train.grad_clip_thresh)
+            optim_d.step()
+        else:
+            d_norm = None
+
+        return {
+            'loss': gen_loss + disc_loss,
+            'gen_loss': gen_loss,
+            'disc_loss': disc_loss,
+            'recon_loss': f0_recon_loss,
+            'g_norm': g_norm,
+            'd_norm': d_norm
+        }
+
+    def training_step(self, batch, batch_idx):
+        ret = self.step(batch, batch_idx, is_train=True)
+        if ret is None:
+            return None
+        
+        prog_bar_set = {'gen_loss', 'disc_loss'}
+        for k,v in ret.items():
+            if v is None:
+                continue
+            self.log(k, v, prog_bar=k in prog_bar_set, logger=True)
+        return ret
+
+    def validation_step(self, batch, batch_idx):
+        ret = self.step(batch, batch_idx, is_train=False)
+        if ret is None:
+            return None
+        
+        for k,v in ret.items():
+            if v is None:
+                continue
+            self.log('val_' + k, v, logger=True)
+
+        return ret['loss']
+
+    def configure_optimizers(self):
+        gen_optim = torch.optim.AdamW(
+            self.net_g.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            weight_decay=self.config.train.weight_decay)
+        disc_optim = torch.optim.AdamW(
+            self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            weight_decay=self.config.train.weight_decay)
+        return [gen_optim, disc_optim], []
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/f0_base.yaml')
+    parser.add_argument('--resume_from', type=str, default=None)
+    args = parser.parse_args()
+    config = OmegaConf.load(args.config)
+    hp = config
+
+    net_g = F0PredictorSmall(
+        speech_dim=hp.vits.inter_channels,
+        pitch_quant_dim=hp.vits.get('pitch_quant_dim', 8),
+        hidden_dim=hp.vits.hidden_channels
+    )
+    net_d = F0Discriminator()
+    training_module = TrainingModule(net_g, net_d, config)
+
+    logger = pl.loggers.TensorBoardLogger(
+        config.train.get('log_dir', 'logs/f0/'), name=config.exp_name,
+        version=config.get('tensorboard_version', 0)
+    )
+
+    print("Loading data...")
+    train_dataset = dataset(config.train.train_filelist, is_train=True)
+    val_dataset = dataset(config.train.val_filelist, is_train=False)
+    print("Creating dataloaders...")
+    num_workers = config.train.get('num_workers', 4)
+    train_dataloader = train_dataset.loader(
+        batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers, persistent_workers=True)
+    val_dataloader = val_dataset.loader(
+        batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, persistent_workers=True)
+    print("Done")
+
+    val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        monitor='val_loss',
+        dirpath=f'checkpoints/f0/{config.exp_name}',
+        filename='best-checkpoint',
+        save_top_k=config.train.keep_ckpts,
+        mode='min',
+        save_last=True
+    )
+    callbacks = [val_checkpoint_callback]
+    if config.train.get('save_interval') is not None:
+        interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            every_n_epochs=config.train.save_interval,
+            dirpath=f'checkpoints/f0/{config.exp_name}',
+            filename='interval-checkpoint-{epoch:04d}',
+            save_top_k=-1
+        )
+        callbacks.append(interval_checkpoint_callback)
+
+    trainer = pl.Trainer(
+        logger=logger,
+        accelerator='gpu',
+        precision='bf16-mixed',
+        max_steps=config.train.get('max_steps', 160000),
+        callbacks=callbacks,
+        check_val_every_n_epoch=config.train.get('val_interval', 1),
+    )
+    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

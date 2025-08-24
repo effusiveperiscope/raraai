@@ -50,13 +50,14 @@ class F0PredictorSmall(nn.Module): # No special conditioning
 
     def forward(self, quant_pitch, target_f0_mean, speech_mask):
         speech_mask = speech_mask.unsqueeze(-1)
+        uv_mask = quant_pitch == 0
         x = self.pitch_cond(quant_pitch,
             convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask
         x = x + self.mean_proj(target_f0_mean.unsqueeze(-1)).unsqueeze(1) * speech_mask
         x = self.convs(x)
         x = F.layer_norm(x, x.shape[1:])
-        x = F.relu(x)
-        x = self.final_proj(x) * speech_mask
+        x = F.silu(x)
+        x = self.final_proj(x) * speech_mask * (~uv_mask).unsqueeze(-1)
         return x
 
 class F0Discriminator(nn.Module):
@@ -65,17 +66,24 @@ class F0Discriminator(nn.Module):
         self.convs = nn.ModuleList([
             nn.Conv1d(1, 64, 7, padding=3),
             nn.Conv1d(64, 128, 3, padding=1),
-            nn.Conv1d(128, 128, 3, padding=1),
+            nn.Conv1d(128, 256, 3, padding=1),
+            nn.Conv1d(256, 256, 3, padding=1),
+            nn.Conv1d(256, 256, 3, padding=1),
+            nn.Conv1d(256, 128, 3, padding=1),
             nn.Conv1d(128, 64, 3, padding=1),
             nn.Conv1d(64, 1, 3, padding=1),
         ])
         self.res_layers = nn.ModuleList([
             nn.Linear(1, 64),
             nn.Linear(64, 128),
-            nn.Linear(128, 128),
+            nn.Linear(128, 256),
+            nn.Linear(256, 256),
+            nn.Linear(256, 256),
+            nn.Linear(256, 128),
             nn.Linear(128, 64),
             nn.Linear(64, 1),
         ])
+        self.final_proj = nn.Linear(1, 1)
 
     def forward(self, pit):
         for conv, res in zip(self.convs, self.res_layers):
@@ -86,6 +94,7 @@ class F0Discriminator(nn.Module):
             pit = rearrange(pit, "b c t -> b t c")
             pit = F.layer_norm(pit, pit.shape[1:])
             pit = res(xs) + pit
+        pit = self.final_proj(pit)
         return pit
 
 

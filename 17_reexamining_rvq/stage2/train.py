@@ -49,6 +49,15 @@ class TrainingModule(pl.LightningModule):
 
         self.spk_index = torch.load(self.config.train.spk_index)
 
+    def reset_f0_weights(self):
+        def reset_weights(layer):
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
+
+        self.net_g.pitch_predictor.apply(reset_weights)
+        self.f0_disc.apply(reset_weights)
+        print("Reset f0 weights")
+
     def setup(self, stage=None):
         hp = self.config
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
@@ -266,13 +275,13 @@ class TrainingModule(pl.LightningModule):
         loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * self.cur_c_kl
 
         if self.config.vits.get('use_pitch_predictor', False):
-            loss_f0 = F.l1_loss(f0_pred, pit)
+            loss_f0 = F.l1_loss(f0_pred, torch.log(pit))
         else: 
             loss_f0 = torch.tensor(0.0).to(self.device)
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + \
-            loss_kl_r * 0.5 + loss_f0 * hp.train.c_f0 + f0_gen_loss
+            loss_kl_r * 0.5 + loss_f0 * hp.train.c_f0 + f0_gen_loss * hp.train.c_f0_adv
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -294,7 +303,7 @@ class TrainingModule(pl.LightningModule):
             f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
             f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
             f0_disc_loss = f0_real_loss + f0_fake_loss
-            loss_d = loss_d + f0_disc_loss
+            loss_d = loss_d + f0_disc_loss * hp.train.c_f0_adv
 
         else:
             loss_d = torch.tensor(0.0).to(self.device)

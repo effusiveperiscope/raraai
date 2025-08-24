@@ -1,6 +1,8 @@
 # rarity - base
 # rarity_01 - freeze decoder
-exp_name: rarity_01
+# rarity_02 - new base
+# rarity_02_f0_test - reset f0 weights and try pitch prediction again
+exp_name: rarity_02_f0_test
 tensorboard_version: 0
 codec:
   whisper_dim: 512
@@ -57,7 +59,7 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  c_f0: 0.01
+  c_f0: 0.005
   epochs: 302
   eps: 1e-9
   lr: 1e-4
@@ -76,6 +78,12 @@ train:
   test_interval: 5
   test_transpose: 12
   val_interval: 5
+
+  f0_gen_interval: 3
+  c_f0_adv: 0.02
+  train_f0_only: False
+  reset_f0_weights: False
+
   save_interval: 50
   keep_ckpts: 2
 

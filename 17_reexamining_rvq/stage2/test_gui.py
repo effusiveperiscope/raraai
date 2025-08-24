@@ -154,12 +154,13 @@ class MainWindow(QMainWindow):
                     n_voiced_bins=self.config.vits.pitch_quant_dim,
                     hold_length=10))
                 # Predict using transposed mean
-                pit = self.net_g.pitch_predict(
+                log_pit = self.net_g.pitch_predict(
                     quant_pitch.to(self.dtype).to(self.device).unsqueeze(0),
                     torch.Tensor([target_f0_mean * (2 ** (transpose / 12))]).to(
                         self.dtype).to(self.device),
                     lens
                 ).squeeze()
+                pit = torch.exp(log_pit)
             else:
                 # Tranpose
                 pit = feats['f0'] * (2 ** (transpose / 12))

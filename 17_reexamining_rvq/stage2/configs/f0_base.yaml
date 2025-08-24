@@ -1,0 +1,19 @@
+exp_name: f0_base_02
+tensorboard_version: 0
+train:
+  batch_size: 32
+  grad_clip_thresh: 10000.
+  lr: 5e-5
+  betas:
+  - 0.8
+  - 0.99
+  train_filelist: ./data/full/train.txt
+  val_filelist: ./data/full/val.txt
+  keep_ckpts: 2
+  weight_decay: 1e-4
+  c_recon: 0.05
+  num_workers: 4
+vits:
+  hidden_channels: 192
+  inter_channels: 192
+  pitch_quant_dim: 10
