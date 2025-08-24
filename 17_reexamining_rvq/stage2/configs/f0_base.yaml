@@ -1,4 +1,5 @@
-exp_name: f0_base_02
+# 03 - try no generator training - can discriminator even learn?
+exp_name: f0_base_03
 tensorboard_version: 0
 train:
   batch_size: 32
@@ -11,8 +12,9 @@ train:
   val_filelist: ./data/full/val.txt
   keep_ckpts: 2
   weight_decay: 1e-4
-  c_recon: 1.0
+  c_recon: 0.5
   num_workers: 4
+  lr_coef_gen: 1.0
 vits:
   hidden_channels: 192
   inter_channels: 192

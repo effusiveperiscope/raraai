@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
+from commons import load_submodule_prefix
 import ultimate_xc
 
 from modeling.vits.models import F0PredictorSmall
@@ -72,7 +73,7 @@ class TrainingModule(pl.LightningModule):
             g_norm = None
 
         
-        f0_real_disc = self.net_d(f0.unsqueeze(-1))
+        f0_real_disc = self.net_d(torch.log(f0 + 1).unsqueeze(-1))
         f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
         f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
         disc_loss = f0_real_loss + f0_fake_loss
@@ -121,7 +122,9 @@ class TrainingModule(pl.LightningModule):
 
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(
-            self.net_g.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            self.net_g.parameters(), 
+                lr=self.config.train.lr * self.config.train.get('lr_coef_gen', 1),
+                betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         disc_optim = torch.optim.AdamW(
             self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
@@ -133,6 +136,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/f0_base.yaml')
     parser.add_argument('--resume_from', type=str, default=None)
+    parser.add_argument('--transfer_from', type=str, default=None)
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
     hp = config
@@ -145,6 +149,12 @@ if __name__ == '__main__':
     net_d = F0Discriminator()
     training_module = TrainingModule(net_g, net_d, config)
 
+    if args.transfer_from is not None:
+        print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
+        state = torch.load(args.transfer_from, map_location='cpu', weights_only=False)['state_dict']
+        load_submodule_prefix(net_g, 'net_g.', state)
+        load_submodule_prefix(net_d, 'net_d.', state)
+
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs/f0/'), name=config.exp_name,
         version=config.get('tensorboard_version', 0)
@@ -156,9 +166,11 @@ if __name__ == '__main__':
     print("Creating dataloaders...")
     num_workers = config.train.get('num_workers', 4)
     train_dataloader = train_dataset.loader(
-        batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers, persistent_workers=True)
+        batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers, 
+        persistent_workers=num_workers > 0)
     val_dataloader = val_dataset.loader(
-        batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, persistent_workers=True)
+        batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, 
+        persistent_workers=num_workers > 0)
     print("Done")
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(

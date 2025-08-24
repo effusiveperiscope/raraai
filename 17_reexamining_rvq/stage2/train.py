@@ -183,7 +183,7 @@ class TrainingModule(pl.LightningModule):
     def step(self, batch, batch_idx, is_train=True):
         ppg = batch['whisper']
         ppg_len = batch['whisper_length']
-        pit = batch['f0'].to(ppg.dtype)
+        f0 = batch['f0'].to(ppg.dtype)
         spec = batch['spec']
         spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
         spec_len = batch['spec_length']
@@ -230,7 +230,7 @@ class TrainingModule(pl.LightningModule):
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r), f0_pred = self.net_g(
-                ppg_q, pit, spec, spk, ppg_len, spec_len, sid=sid,
+                ppg_q, f0, spec, spk, ppg_len, spec_len, sid=sid,
                 quant_pitch=quant_pitch,
                 target_f0_mean=target_f0_mean)
 
@@ -275,7 +275,7 @@ class TrainingModule(pl.LightningModule):
         loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * self.cur_c_kl
 
         if self.config.vits.get('use_pitch_predictor', False):
-            loss_f0 = F.l1_loss(f0_pred, torch.log(pit + 1))
+            loss_f0 = F.l1_loss(f0_pred, torch.log(f0 + 1))
         else: 
             loss_f0 = torch.tensor(0.0).to(self.device)
 
@@ -299,7 +299,7 @@ class TrainingModule(pl.LightningModule):
             y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
             loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
-            f0_real_disc = self.f0_disc(pit.unsqueeze(-1))
+            f0_real_disc = self.f0_disc(torch.log(f0 + 1).unsqueeze(-1))
             f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
             f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
             f0_disc_loss = f0_real_loss + f0_fake_loss

@@ -18,9 +18,12 @@ sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
 import torch
 import soundfile as sf
+import matplotlib
+matplotlib.use('agg')
+import matplotlib.pyplot as plt
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/rarity_02'
+CHECKPOINTS_ROOT = 'checkpoints/rarity_02_f0_test'
 CONFIG = 'configs/char.yaml'
 
 class MainWindow(QMainWindow):
@@ -153,15 +156,26 @@ class MainWindow(QMainWindow):
                     f0=feats['f0'].cpu().numpy(),
                     n_voiced_bins=self.config.vits.pitch_quant_dim,
                     hold_length=10))
-                v_mask = (quant_pitch != 0).unsqueeze(-1).float()
+                v_mask = (quant_pitch != 0).float().to(self.device)
+                # import pdb; pdb.set_trace()
                 # Predict using transposed mean
-                log_pit_p_1 = self.net_g.pitch_predict(
-                    quant_pitch.to(self.dtype).to(self.device).unsqueeze(0),
-                    torch.Tensor([target_f0_mean * (2 ** (transpose / 12))]).to(
-                        self.dtype).to(self.device),
-                    lens
-                ).squeeze()
+                with torch.no_grad():
+                    log_pit_p_1 = self.net_g.pitch_predict(
+                        quant_pitch.to(self.dtype).to(self.device).unsqueeze(0),
+                        torch.Tensor([target_f0_mean * (2 ** (transpose / 12))]).to(
+                            self.dtype).to(self.device),
+                        lens
+                    ).squeeze()
                 pit = (torch.exp(log_pit_p_1) - 1) * v_mask
+
+                pit_orig = feats['f0'] * (2 ** (transpose / 12))
+                plt.plot(pit.cpu().numpy(), label='pred')
+                plt.plot(pit_orig.cpu().numpy(), label='orig')
+                plt.legend()
+                plt.savefig(f'{file}.png', dpi=300)
+                print(os.getcwd())
+                print(f'Plot saved to {file}.png')
+
             else:
                 # Tranpose
                 pit = feats['f0'] * (2 ** (transpose / 12))
@@ -169,7 +183,8 @@ class MainWindow(QMainWindow):
             # Truncate
             noise_aug = data['noise_aug']
             ppg = feats['whisper']
-            _, ppg_q, _, _, _ = self.codec(ppg.to(self.dtype).to(self.device).unsqueeze(0))
+            with torch.no_grad():
+                _, ppg_q, _, _, _ = self.codec(ppg.to(self.dtype).to(self.device).unsqueeze(0))
             ppg_q = rearrange(ppg_q, 'b c t -> b t c')
             ppg_q_aug = ppg_q + (torch.randn_like(ppg_q) * noise_aug)
 
