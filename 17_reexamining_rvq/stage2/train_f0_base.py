@@ -78,6 +78,9 @@ class TrainingModule(pl.LightningModule):
         f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
         disc_loss = f0_real_loss + f0_fake_loss
 
+        # pit = f0[0].detach().cpu().numpy()
+        # pit_pred = (torch.exp(f0_pred[0].detach())-1).cpu().numpy()
+
         if disc_loss.requires_grad:
             optim_d.zero_grad()
             self.manual_backward(disc_loss)

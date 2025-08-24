@@ -1,7 +1,8 @@
 # 03 - try no generator training - can discriminator even learn?
 # 04 - fixed scales
-# 05 - lower coef gen
-exp_name: f0_base_06
+# 05 - lower coef gen and reset
+# 07 - add vuv mask, spectral norm all conv weights
+exp_name: f0_base_07
 tensorboard_version: 0
 train:
   batch_size: 32
@@ -15,7 +16,7 @@ train:
   keep_ckpts: 2
   weight_decay: 1e-4
   c_recon: 0.5
-  num_workers: 0
+  num_workers: 4
   lr_coef_gen: 0.5
 vits:
   hidden_channels: 192

@@ -63,41 +63,49 @@ class F0PredictorSmall(nn.Module): # No special conditioning
         x = self.final_proj(x) * speech_mask  * v_mask
         return x # we predict log pitch plus 1
 
+from torch.nn.utils.parametrizations import spectral_norm
 class F0Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
         self.convs = nn.ModuleList([
-            nn.Conv1d(1, 64, 7, padding=3),
-            nn.Conv1d(64, 128, 3, padding=1),
-            nn.Conv1d(128, 256, 3, padding=1),
-            nn.Conv1d(256, 256, 3, padding=1),
-            nn.Conv1d(256, 256, 3, padding=1),
-            nn.Conv1d(256, 128, 3, padding=1),
-            nn.Conv1d(128, 64, 3, padding=1),
-            nn.Conv1d(64, 1, 3, padding=1),
+            spectral_norm(nn.Conv1d(1, 64, 7, padding=3)),
+            spectral_norm(nn.Conv1d(64, 128, 3, padding=1)),
+            spectral_norm(nn.Conv1d(128, 256, 3, padding=1)),
+            spectral_norm(nn.Conv1d(256, 256, 3, padding=1)),
+            spectral_norm(nn.Conv1d(256, 128, 3, padding=1)),
+            spectral_norm(nn.Conv1d(128, 64, 3, padding=1)),
+            spectral_norm(nn.Conv1d(64, 1, 3, padding=1)),
         ])
         self.res_layers = nn.ModuleList([
             nn.Conv1d(1, 64, 1),
             nn.Conv1d(64, 128, 1),
             nn.Conv1d(128, 256, 1),
             nn.Conv1d(256, 256, 1),
-            nn.Conv1d(256, 256, 1),
             nn.Conv1d(256, 128, 1),
             nn.Conv1d(128, 64, 1),
-            nn.Conv1d(64, 1, 1),
+            nn.Identity()
         ])
-        self.norms = nn.ModuleList([nn.GroupNorm(1, c.out_channels) for c in self.convs])
+        self.norms = nn.ModuleList()
+        for c in self.convs:
+            if c.out_channels > 1:
+                self.norms.append(nn.GroupNorm(1, c.out_channels))
+            else:
+                self.norms.append(nn.Identity())  # no norm for last conv (degenerate case)
+
         self.final_proj = nn.Linear(1, 1)
 
     def forward(self, pit):
-        for conv, res, norms in zip(self.convs, self.res_layers, self.norms):
+        pit = rearrange(pit, "b t c -> b c t")
+        vuv = (pit != 0).float()
+        for i, x in enumerate(zip(self.convs, self.res_layers, self.norms)):
+            conv, res, norms = x
             xs = pit
-            pit = rearrange(pit, "b t c -> b c t")
-            pit = conv(pit)
-            pit = res(rearrange(xs, "b t c -> b c t")) + pit
+            pit = conv(pit) * vuv
+            if i < len(self.convs) - 1:
+                pit = res(xs) + pit
             pit = F.silu(pit)
             pit = norms(pit)
-            pit = rearrange(pit, "b c t -> b t c")
+        pit = rearrange(pit, "b c t -> b t c")
         pit = self.final_proj(pit)
         return pit
 
