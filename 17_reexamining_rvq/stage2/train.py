@@ -275,7 +275,7 @@ class TrainingModule(pl.LightningModule):
         loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * self.cur_c_kl
 
         if self.config.vits.get('use_pitch_predictor', False):
-            loss_f0 = F.l1_loss(f0_pred, torch.log(pit))
+            loss_f0 = F.l1_loss(f0_pred, torch.log(pit + 1))
         else: 
             loss_f0 = torch.tensor(0.0).to(self.device)
 
@@ -357,6 +357,7 @@ if __name__ == '__main__':
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
     parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
     parser.add_argument('--codec_ckpt', type=str, default=None)
+    parser.add_argument('--f0_base_ckpt', type=str, default=None)
 
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
@@ -380,6 +381,7 @@ if __name__ == '__main__':
         codebook_num=1,
         codebook_size=hp.codec.codebook_size
     )
+    f0_disc = F0Discriminator()
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
@@ -400,6 +402,7 @@ if __name__ == '__main__':
         load_submodule_prefix(net_g, 'net_g.', state)
         load_submodule_prefix(codec, 'codec.', state) # oops lol
         load_submodule_prefix(net_d, 'net_d.', state)
+        load_submodule_prefix(f0_disc, 'f0_disc.', state)
     else:
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
@@ -415,7 +418,11 @@ if __name__ == '__main__':
         state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
         load_state_dict_mismatch(net_d, state_dict)
 
-    f0_disc = F0Discriminator()
+    if args.f0_base_ckpt is not None:
+        print("Loading F0 Base checkpoint: {}".format(args.f0_base_ckpt))
+        state_dict = torch.load(args.f0_base_ckpt, map_location='cpu', weights_only=False)['state_dict']
+        load_submodule_prefix(net_g.pitch_predictor, 'net_g.', state_dict)
+        load_submodule_prefix(f0_disc, 'net_d.', state_dict)
 
     training_module = TrainingModule(
         net_g=net_g, net_d=net_d, codec=codec, f0_disc=f0_disc, config=config)
