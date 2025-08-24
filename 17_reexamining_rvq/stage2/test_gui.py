@@ -20,8 +20,8 @@ import torch
 import soundfile as sf
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/test09_ac_01'
-CONFIG = 'configs/base.yaml'
+CHECKPOINTS_ROOT = 'checkpoints/rarity_02'
+CONFIG = 'configs/char.yaml'
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         gui.addCheckpoint(Checkpoint(
             get_checkpoints=self.getCheckpoints, load_checkpoint=self.loadCheckpoint))
         gui.addFileInput(AudioFileInput())
+        gui.addFileInput(AudioFileInput(id='spk_files', label="Speaker Embedding Source"))
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
@@ -59,7 +60,16 @@ class MainWindow(QMainWindow):
         # self.hubert_feat_norm_mean = torch.tensor(stat["mean"])
         # self.hubert_feat_norm_std = torch.tensor(stat["std"])
 
+        self.emb_file = None
+        self.emb = None
         self.config = config
+
+    def spkEmbMemoized(self, file : str):
+        if file == self.emb_file:
+            return self.emb
+        self.emb_file = file
+        self.emb = self.my_feats.extract_speaker_features(file)
+        return self.emb
 
     def getCheckpoints(self):
         return os.listdir(CHECKPOINTS_ROOT)
@@ -119,6 +129,17 @@ class MainWindow(QMainWindow):
 
         logger.info(f'Infering {len(files)} files')
 
+        if len(data['audio_files']['spk_files']) > 0:
+            if len(data['audio_files']['spk_files']) > 1:
+                logger.warning('Only using first speaker embedding file')
+            logger.info(f'Used speaker embedding from {data["audio_files"]["spk_files"][0]}')
+            spk_files = data['audio_files']['spk_files']
+            spk_feats = self.spkEmbMemoized(spk_files[0])
+            spk_feats = spk_feats.to(self.dtype).to(self.device).unsqueeze(0)
+        else:
+            spk_feats = None
+            self.emb_file = None
+
         out = []
         for file in files:
             feats = self.my_feats.extract_features(file)
@@ -152,15 +173,17 @@ class MainWindow(QMainWindow):
 
             pit = pit[:ppg_q_aug.shape[1]]
 
-            sid_key = data['sid']
-            if not sid_key in self.spk_index:
-                sid_key = str(sid_key)
+            if spk_feats is None: # Fall back to index if none is provided
+                sid_key = data['sid']
+                if not sid_key in self.spk_index:
+                    sid_key = str(sid_key)
+                spk_feats = self.spk_index[sid_key].to(self.dtype).to(self.device).unsqueeze(0)
 
             with torch.no_grad():
                 o = self.net_g.infer(
                     ppg_q=ppg_q_aug,
                     pit=pit.to(self.dtype).to(self.device).unsqueeze(0),
-                    spk=self.spk_index[sid_key].to(self.dtype).to(self.device).unsqueeze(0),
+                    spk=spk_feats,
                     ppg_l=lens,
                     sid=torch.Tensor([data['sid']]).to(self.device).long(),
                     noise_scale=data['noise'])

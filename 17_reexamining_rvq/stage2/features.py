@@ -48,6 +48,9 @@ class MyFeatures:
             encoder_features = encoder_features[:, :feature_len, :]
         return encoder_features
 
+    def extract_speaker_features(self, file : str):
+        return self.svc5_spk_model.extract_feature(file)
+
     def extract_features(self, file : str):
         data, _ = librosa.load(file, sr=self.expected_sample_rate)
         if self.do_normalize:
@@ -56,7 +59,7 @@ class MyFeatures:
         if 'whisper' in self.feats_to_extract:
             feat['whisper'] = self.extract_whisper_features(data).squeeze(0)
         if 'spk' in self.feats_to_extract:
-            feat['spk'] = self.svc5_spk_model.extract_feature(file) # spk
+            feat['spk'] = self.extract_speaker_features(file) # spk
         if 'f0' in self.feats_to_extract:
             feat['f0'] = torch.from_numpy(self.rmvpe_model.extract_pitch(torch.from_numpy(data))) # f0
         if 'spec' in self.feats_to_extract:
