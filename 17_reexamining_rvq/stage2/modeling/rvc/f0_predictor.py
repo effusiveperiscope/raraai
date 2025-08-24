@@ -86,17 +86,18 @@ class F0Discriminator(nn.Module):
             nn.Conv1d(128, 64, 1),
             nn.Conv1d(64, 1, 1),
         ])
+        self.norms = nn.ModuleList([nn.GroupNorm(1, c.out_channels) for c in self.convs])
         self.final_proj = nn.Linear(1, 1)
 
     def forward(self, pit):
-        for conv, res in zip(self.convs, self.res_layers):
+        for conv, res, norms in zip(self.convs, self.res_layers, self.norms):
             xs = pit
             pit = rearrange(pit, "b t c -> b c t")
             pit = conv(pit)
             pit = res(rearrange(xs, "b t c -> b c t")) + pit
             pit = F.silu(pit)
+            pit = norms(pit)
             pit = rearrange(pit, "b c t -> b t c")
-            pit = F.layer_norm(pit, pit.shape[-1:])
         pit = self.final_proj(pit)
         return pit
 

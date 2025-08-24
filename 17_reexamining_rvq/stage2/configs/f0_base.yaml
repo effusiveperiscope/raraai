@@ -1,5 +1,7 @@
 # 03 - try no generator training - can discriminator even learn?
-exp_name: f0_base_03
+# 04 - fixed scales
+# 05 - lower coef gen
+exp_name: f0_base_06
 tensorboard_version: 0
 train:
   batch_size: 32
@@ -13,8 +15,8 @@ train:
   keep_ckpts: 2
   weight_decay: 1e-4
   c_recon: 0.5
-  num_workers: 4
-  lr_coef_gen: 1.0
+  num_workers: 0
+  lr_coef_gen: 0.5
 vits:
   hidden_channels: 192
   inter_channels: 192

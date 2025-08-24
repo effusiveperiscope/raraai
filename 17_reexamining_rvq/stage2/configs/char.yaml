@@ -88,6 +88,7 @@ train:
   keep_ckpts: 2
 
   stage2_epoch: 0 # start training using gen/disc losses
+  num_workers: 2
 vits:
   filter_channels: 640
   gin_channels: 256
