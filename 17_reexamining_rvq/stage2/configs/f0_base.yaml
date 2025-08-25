@@ -6,12 +6,13 @@
 # 09 - get rid of residuals for now
 # 11 - add: stft loss, positional encoding, noise vector, snake activ, reset
 # 12 - lower lr?
-exp_name: f0_base_12
+# 13 - fixed gradient flow bug
+exp_name: f0_base_13
 tensorboard_version: 5
 train:
   batch_size: 32
   grad_clip_thresh: 10000.
-  lr: 1e-5
+  lr: 5e-5
   betas:
   - 0.8
   - 0.99

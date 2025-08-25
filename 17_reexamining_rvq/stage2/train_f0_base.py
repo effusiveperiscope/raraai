@@ -94,9 +94,10 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
+        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1).detach())[vuv_mask]
         f0_real_disc = self.net_d(target.unsqueeze(-1))[vuv_mask]
         f0_real_loss = torch.mean((disc_label - f0_real_disc) ** 2)
-        f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
+        f0_fake_loss = torch.mean(f0_fake_disc ** 2)
         disc_loss = f0_real_loss + f0_fake_loss
 
         if disc_loss.requires_grad:

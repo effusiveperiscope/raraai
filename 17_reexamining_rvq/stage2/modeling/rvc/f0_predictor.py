@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import math
 from einops import rearrange
+
 from .commons import PitchConditioner
 
 class ResBlock(nn.Module):
@@ -188,3 +189,70 @@ class F0PredictorLarge(nn.Module):
         x = F.relu(x)
 
         return x
+
+class PeriodDiscriminator(nn.Module):
+    def __init__(self, period):
+        super().__init__()
+        self.period = period
+        # Use a similar conv stack as your original discriminator,
+        # but maybe slightly smaller/simpler.
+        self.convs = nn.ModuleList([
+            spectral_norm(nn.Conv1d(self.period, 128, 15, padding=7)),
+            spectral_norm(nn.Conv1d(128, 256, 7, padding=3)),
+            spectral_norm(nn.Conv1d(256, 128, 7, padding=3)),
+            spectral_norm(nn.Conv1d(128, 1, 7, padding=3)),
+        ])
+
+    def forward(self, x):
+        b, t, c = x.shape
+        # Pad to be divisible by period
+        if t % self.period != 0:
+            pad_len = self.period - (t % self.period)
+            x = F.pad(x, (0, 0, 0, pad_len), "reflect")
+            t = t + pad_len
+        
+        # Reshape to view the signal with the specified period
+        x = x.view(b, t // self.period, self.period, c)
+        x = x.permute(0, 3, 2, 1).contiguous() # B, C, Period, T'
+        x = x.view(b, c * self.period, t // self.period)
+        
+        # Now pass through the conv stack
+        for conv in self.convs:
+            x = conv(x)
+            x = F.leaky_relu(x, 0.1)
+        return x
+
+class MultiPeriodDiscriminator(nn.Module):
+    def __init__(self, periods=[2, 3, 5, 7]):
+        super().__init__()
+        self.discriminators = nn.ModuleList(
+            [PeriodDiscriminator(p) for p in periods]
+        )
+
+    def forward(self, x):
+        outputs = []
+        for d in self.discriminators:
+            outputs.append(d(x))
+        return outputs
+
+    def gen_loss(self, disc_fake_outputs, target_label=1.0):
+        loss = 0
+        for d in disc_fake_outputs:
+            loss += torch.mean((target_label - d) ** 2)
+        return loss
+
+    def disc_loss(self, disc_fake_outputs, disc_real_outputs, target_label=1.0):
+        fake_loss = 0
+        for d in disc_fake_outputs:
+            fake_loss += torch.mean(d ** 2)
+        for d in disc_real_outputs:
+            fake_loss += torch.mean((target_label - d) ** 2)
+        return fake_loss
+
+if __name__ == '__main__':
+    model = MultiPeriodDiscriminator()
+    model.eval()
+    x = torch.randn(1, 256, 1)
+    y = model(x)
+    for feat in y:
+        print(feat.shape)

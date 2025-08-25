@@ -304,9 +304,10 @@ class TrainingModule(pl.LightningModule):
             y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
             loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
+            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1).detach())
             f0_real_disc = self.f0_disc(target.unsqueeze(-1))
             f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
-            f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
+            f0_fake_loss = torch.mean(f0_fake_disc ** 2)
             f0_disc_loss = f0_real_loss + f0_fake_loss
             loss_d = loss_d + f0_disc_loss * hp.train.c_f0_adv
 
