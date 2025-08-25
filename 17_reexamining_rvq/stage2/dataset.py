@@ -51,7 +51,7 @@ def dataset(filelist, is_train : bool):
                 frame_multiples=[1, 1, 1, 480],
                 dims=[0, 0, 0, 0],),
             dt.PadGroup(fields=['whisper', 'f0', 'spec'], 
-            dims = [0, 0, 0], values = [0, 0, 0]),
+            dims = [0, 0, 0], values = [0, 0, 0], to_length=[257, 257, 257]), # fft_size // 2 + 1
             dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
         ],
         is_train=is_train

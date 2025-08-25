@@ -2,10 +2,11 @@ from omegaconf import OmegaConf
 from torch import nn
 import torch
 import torch.nn.functional as F
+import math
 from einops import rearrange
 from .commons import PitchConditioner
 
-class SiLUResBlock(nn.Module):
+class ResBlock(nn.Module):
     def __init__(self, convs : list):
         super().__init__()
         self.convs = nn.ModuleList(convs)
@@ -17,13 +18,29 @@ class SiLUResBlock(nn.Module):
 
         for i,conv in enumerate(self.convs):
             xs = x
-            x = F.silu(x)
+            x = F.leaky_relu(x)
             x = conv(x)
             x = self.norms[i](x)
             x = x + xs
 
         if channels_last:
             x = rearrange(x, "b c t -> b t c")
+        return x
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0) # shape: (1, max_len, d_model)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x shape: (B, T, d_model)
+        x = x + self.pe[:, :x.size(1), :]
         return x
 
 class F0PredictorSmall(nn.Module): # No special conditioning
@@ -36,30 +53,34 @@ class F0PredictorSmall(nn.Module): # No special conditioning
         hidden_dim: int):
         super().__init__()
 
-        self.speech_proj = nn.Sequential( # Bottleneck to avoid leaking too much info
-            nn.Linear(speech_dim, 32),
-            nn.Linear(32, hidden_dim),
-            )
+        self.pos_encoder = PositionalEncoding(hidden_dim)
         self.mean_proj = nn.Linear(1, hidden_dim)
         self.pitch_cond = PitchConditioner(hidden_dim)
-        self.convs = SiLUResBlock([
+        self.convs = ResBlock([
             nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             ])
+        self.noise_proj = nn.Linear(hidden_dim, hidden_dim)
         self.final_proj = nn.Linear(hidden_dim, 1)
 
-    def forward(self, quant_pitch, target_f0_mean, speech_mask):
+    def forward(self, quant_pitch, target_f0_mean, speech_mask, z=None):
         speech_mask = speech_mask.unsqueeze(-1)
         v_mask = (quant_pitch != 0).unsqueeze(-1).float()
         x = self.pitch_cond(quant_pitch,
             convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask * v_mask
         x = x + self.mean_proj(target_f0_mean.unsqueeze(-1)).unsqueeze(1) * speech_mask
+        x = self.pos_encoder(x)
+
+        if z is None:
+            z = torch.randn_like(x)
+        x = x + self.noise_proj(z)
+
         x = self.convs(x) * speech_mask * v_mask
         x = F.layer_norm(x, x.shape[1:])
-        x = F.silu(x)
+        x = F.leaky_relu(x)
         x = self.final_proj(x) * speech_mask  * v_mask
         return x # we predict log pitch plus 1
 
@@ -68,45 +89,44 @@ class F0Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
         self.convs = nn.ModuleList([
-            spectral_norm(nn.Conv1d(1, 64, 7, padding=3)),
-            spectral_norm(nn.Conv1d(64, 128, 3, padding=1)),
-            spectral_norm(nn.Conv1d(128, 256, 3, padding=1)),
-            spectral_norm(nn.Conv1d(256, 256, 3, padding=1)),
+            spectral_norm(nn.Conv1d(1, 128, 15, padding=7)),
+            spectral_norm(nn.Conv1d(128, 256, 7, padding=3)),
+            spectral_norm(nn.Conv1d(256, 512, 7, padding=3)),
+            spectral_norm(nn.Conv1d(512, 256, 3, padding=1)),
             spectral_norm(nn.Conv1d(256, 128, 3, padding=1)),
-            spectral_norm(nn.Conv1d(128, 64, 3, padding=1)),
-            spectral_norm(nn.Conv1d(64, 1, 3, padding=1)),
+            spectral_norm(nn.Conv1d(128, 1, 3, padding=1)),
         ])
-        self.res_layers = nn.ModuleList([
-            nn.Conv1d(1, 64, 1),
-            nn.Conv1d(64, 128, 1),
-            nn.Conv1d(128, 256, 1),
-            nn.Conv1d(256, 256, 1),
-            nn.Conv1d(256, 128, 1),
-            nn.Conv1d(128, 64, 1),
-            nn.Identity()
-        ])
-        self.norms = nn.ModuleList()
-        for c in self.convs:
-            if c.out_channels > 1:
-                self.norms.append(nn.GroupNorm(1, c.out_channels))
-            else:
-                self.norms.append(nn.Identity())  # no norm for last conv (degenerate case)
 
-        self.final_proj = nn.Linear(1, 1)
+        self.norms = nn.ModuleList()
+        self.projections = nn.ModuleList()
+
+        in_chs = [1, 128, 256, 512, 256, 128]
+        out_chs = [128, 256, 512, 256, 128, 1]
+
+        for cin, cout in zip(in_chs, out_chs):
+            # group norm except last conv
+            if cout > 1:
+                self.norms.append(nn.GroupNorm(1, cout))
+            else:
+                self.norms.append(nn.Identity())
+
+            # projection if channels mismatch
+            if cin != cout:
+                self.projections.append(nn.Conv1d(cin, cout, kernel_size=1))
+            else:
+                self.projections.append(nn.Identity())
 
     def forward(self, pit):
         pit = rearrange(pit, "b t c -> b c t")
-        vuv = (pit != 0).float()
-        for i, x in enumerate(zip(self.convs, self.res_layers, self.norms)):
-            conv, res, norms = x
-            xs = pit
-            pit = conv(pit) * vuv
-            if i < len(self.convs) - 1:
-                pit = res(xs) + pit
-            pit = F.silu(pit)
-            pit = norms(pit)
+
+        for conv, norm, proj in zip(self.convs, self.norms, self.projections):
+            residual = proj(pit)
+            out = conv(pit)
+            out = F.leaky_relu(out)
+            # out = norm(out)
+            pit = out + residual  # residual add
+
         pit = rearrange(pit, "b c t -> b t c")
-        pit = self.final_proj(pit)
         return pit
 
 
@@ -127,13 +147,13 @@ class F0PredictorLarge(nn.Module):
         self.speech_cond = nn.Conv1d(hidden_dim, 2 * hidden_dim, 1)
         self.spk_cond = nn.Conv1d(spk_emb_dim, 2 * hidden_dim, 1)
 
-        self.speech_conv = SiLUResBlock([
+        self.speech_conv = ResBlock([
             nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)])
-        self.inter_conv = SiLUResBlock([
+        self.inter_conv = ResBlock([
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)])
-        self.final_conv = SiLUResBlock([
+        self.final_conv = ResBlock([
             nn.Conv1d(hidden_dim, hidden_dim, 5, padding=2),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, 1, 1, padding=0)])

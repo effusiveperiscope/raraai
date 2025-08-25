@@ -2,12 +2,16 @@
 # 04 - fixed scales
 # 05 - lower coef gen and reset
 # 07 - add vuv mask, spectral norm all conv weights
-exp_name: f0_base_07
-tensorboard_version: 0
+# 08 - reset. all the other checkpoints are cursed
+# 09 - get rid of residuals for now
+# 11 - add: stft loss, positional encoding, noise vector, snake activ, reset
+# 12 - lower lr?
+exp_name: f0_base_12
+tensorboard_version: 5
 train:
   batch_size: 32
   grad_clip_thresh: 10000.
-  lr: 5e-5
+  lr: 1e-5
   betas:
   - 0.8
   - 0.99
@@ -15,9 +19,11 @@ train:
   val_filelist: ./data/full/val.txt
   keep_ckpts: 2
   weight_decay: 1e-4
-  c_recon: 0.5
+  c_recon: 4.0
   num_workers: 4
-  lr_coef_gen: 0.5
+  lr_coef_gen: 1.0
+  lr_coef_disc: 0.5
+  disc_label: 1.0
 vits:
   hidden_channels: 192
   inter_channels: 192

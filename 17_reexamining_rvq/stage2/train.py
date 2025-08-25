@@ -12,6 +12,7 @@ from modeling.vits.models import SynthesizerTrn
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from modeling.rvc.f0_predictor import F0Discriminator
 from rvc_losses import generator_loss, feature_loss, discriminator_loss
+from vits_extend.stft_loss import STFTLoss
 from modeling.vits.losses import kl_loss
 from modeling.vits import commons
 from vits_extend.stft import TacotronSTFT
@@ -70,6 +71,8 @@ class TrainingModule(pl.LightningModule):
                             center=False,
                             device=self.device)
         self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions))
+        self.f0_stft = STFTLoss(self.device, 
+            fft_size=512, shift_size=50, win_length=200, window="hann_window")
         self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.test_dataset = dataset(self.config.train.test_filelist, is_train=False)
         self.test_dataloader = self.test_dataset.loader()
@@ -275,7 +278,9 @@ class TrainingModule(pl.LightningModule):
         loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * self.cur_c_kl
 
         if self.config.vits.get('use_pitch_predictor', False):
-            loss_f0 = F.l1_loss(f0_pred, torch.log(f0 + 1))
+            target = torch.log(f0 + 1)
+            sc_loss, mag_loss = self.f0_stft(f0_pred.squeeze(-1), target.squeeze(-1))
+            loss_f0 = F.l1_loss(f0_pred, target)
         else: 
             loss_f0 = torch.tensor(0.0).to(self.device)
 
@@ -299,7 +304,7 @@ class TrainingModule(pl.LightningModule):
             y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
             loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
-            f0_real_disc = self.f0_disc(torch.log(f0 + 1).unsqueeze(-1))
+            f0_real_disc = self.f0_disc(target.unsqueeze(-1))
             f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
             f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
             f0_disc_loss = f0_real_loss + f0_fake_loss

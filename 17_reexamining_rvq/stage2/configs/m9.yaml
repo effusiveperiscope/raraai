@@ -1,24 +1,5 @@
-# test01 - base
-# test02 - add speaker conditioning to prior
-# test03 - from base instead of from test01
-# test04 - use speaker ids instead of embeddings
-# test05 - transfer from test04, 
-# use linear hybrid pitch conditioning for both F0 predictor and prior, 
-# warmup for new prior, reduce f0 lr, increase kl lr for warmup
-# test06 - from base instead of from test04
-# test06_ac - use acoustic subset and only tune decoder
-# test06_ac_01 - use acoustic subset, full finetuning
-# test07 - use 48 codebook instead of 32. reduce batch size to 7 because we keep hitting out of memory
-# test07_ac - use expresso only, full finetuning
-# test08_ac - switch to RVC discriminator
-# test09_ac - remove vctk from dataset and do finetuning on full acoustic subset
-# test09_ac_01 - use LSGAN for pitch predictor
-# test09_ac_02 - expand pitch predictor
-# test09_ac_03 - update gen less frequently and switch to f0 only train
-# test09_ac_04 - lr adjustments
-# test10_f0_only - start f0 testing. we reset the f0 predictor and use base from test09_ac_04
-exp_name: test10_f0_only
-tensorboard_version: 2
+exp_name: m9
+tensorboard_version: 0
 codec:
   whisper_dim: 512
   codebook_size: 48
@@ -60,11 +41,12 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 7
+  batch_size: 8
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 100000
+  cosine_anneal_steps: 500000
   warmup_steps: 10000
+  freeze_dec: true
   # test05_warmup: 10000
   betas:
   - 0.8
@@ -73,7 +55,8 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  epochs: 602
+  c_f0: 0.5
+  epochs: 302
   eps: 1e-9
   lr: 1e-4
   lr_decay: 0.999875
@@ -83,25 +66,26 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/full/train_novctk.txt
-  val_filelist: ./data/full/val_novctk.txt
+  train_filelist: ./data/full/train_m9.txt
+  val_filelist: ./data/full/val_m9.txt
   spk_index: ./data/full/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
-  test_interval: 1
+  test_interval: 5
   test_transpose: 12
-  test_sid: 6
-  val_interval: 1
+  val_interval: 5
+  test_sid: 169
 
   f0_gen_interval: 3
-  c_f0: 0.1
-  c_f0_adv: 0.1
-  train_f0_only: True
-  reset_f0_weights: True
+  c_f0_adv: 0.5
+  train_f0_only: False
+  reset_f0_weights: False
 
+  save_interval: 50
   keep_ckpts: 2
 
   stage2_epoch: 0 # start training using gen/disc losses
+  num_workers: 2
 vits:
   filter_channels: 640
   gin_channels: 256

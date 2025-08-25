@@ -1,8 +1,10 @@
+import io
 import torch
 import torch.nn.functional as F
 import random
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 
 def random_subsample_segments(x: torch.Tensor,
                               x_mask: torch.Tensor,
@@ -258,3 +260,14 @@ def plot_spectrogram(
         print(f"Figure saved to {save_path}")
     else:
         plt.show()
+
+def matplotlib_to_tensorboard(fig):
+    """Convert a matplotlib figure to a CHW tensor for TensorBoard."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB")
+    img = np.array(img)
+    img = np.transpose(img, (2, 0, 1))  # HWC → CHW
+    img = torch.tensor(img)
+    return img

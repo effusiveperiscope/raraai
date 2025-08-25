@@ -5,7 +5,9 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
-from commons import load_submodule_prefix
+from commons import load_submodule_prefix, matplotlib_to_tensorboard
+from vits_extend.stft_loss import STFTLoss
+import matplotlib.pyplot as plt
 import ultimate_xc
 
 from modeling.vits.models import F0PredictorSmall
@@ -26,6 +28,19 @@ class TrainingModule(pl.LightningModule):
         self.net_d = net_d
         self.config = config
         self.automatic_optimization = False
+
+    # def on_train_start(self):
+    #     self.reset_disc_weights()
+
+    def setup(self, stage=None):
+        self.f0_stft = STFTLoss(self.device, 
+            fft_size=512, shift_size=50, win_length=200, window="hann_window")
+
+    def reset_disc_weights(self):
+        def reset_weights(layer):
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
+        self.net_d.apply(reset_weights)
 
     def step(self, batch, batch_idx, is_train=True):
         f0 = batch['f0'].to(self.dtype)
@@ -54,14 +69,21 @@ class TrainingModule(pl.LightningModule):
 
         mask = commons.sequence_mask(ppg_len, quant_pitch.size(1))
 
+        target = torch.log(f0 + 1)
         f0_pred = self.net_g(quant_pitch, target_f0_mean, mask).squeeze(-1)
-        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1))
-        f0_gen_loss = torch.mean((1 - f0_fake_disc) ** 2)
-        f0_recon_loss = F.l1_loss(f0_pred, torch.log(f0 + 1))
-        gen_loss = f0_gen_loss + f0_recon_loss * self.config.train.get('c_recon', 1.0)
+        
+        vuv_mask = (quant_pitch != 0).unsqueeze(-1)
 
-        if gen_loss.isnan().any() or gen_loss.isinf().any():
-            import pdb; pdb.set_trace()
+        # Don't calculate discriminator loss on silent frames
+        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1))[vuv_mask]
+        disc_label = self.config.train.get('disc_label', 1.0)
+
+        f0_gen_loss = torch.mean((disc_label - f0_fake_disc) ** 2)
+        l1_loss = F.l1_loss(f0_pred, target)
+        sc_loss, mag_loss = self.f0_stft(f0_pred.squeeze(-1), target.squeeze(-1))
+        f0_recon_loss = l1_loss + sc_loss + mag_loss
+        # f0_recon_loss = 
+        gen_loss = f0_gen_loss + f0_recon_loss * self.config.train.get('c_recon', 1.0)
 
         if gen_loss.requires_grad:
             optim_g.zero_grad()
@@ -72,23 +94,25 @@ class TrainingModule(pl.LightningModule):
         else:
             g_norm = None
 
-        
-        f0_real_disc = self.net_d(torch.log(f0 + 1).unsqueeze(-1))
-        f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
+        f0_real_disc = self.net_d(target.unsqueeze(-1))[vuv_mask]
+        f0_real_loss = torch.mean((disc_label - f0_real_disc) ** 2)
         f0_fake_loss = torch.mean(f0_fake_disc.detach() ** 2)
         disc_loss = f0_real_loss + f0_fake_loss
-
-        # pit = f0[0].detach().cpu().numpy()
-        # pit_pred = (torch.exp(f0_pred[0].detach())-1).cpu().numpy()
 
         if disc_loss.requires_grad:
             optim_d.zero_grad()
             self.manual_backward(disc_loss)
             d_norm = torch.nn.utils.clip_grad_norm_(
-                self.net_g.parameters(), self.config.train.grad_clip_thresh)
+                self.net_d.parameters(), self.config.train.grad_clip_thresh)
             optim_d.step()
         else:
             d_norm = None
+
+        if is_train:
+            fig = self.plot_f0_curves(np_pit, f0_pred.detach().cpu().numpy())
+            self.logger.experiment.add_image(
+                'f0_curves', fig, global_step=self.global_step)
+            plt.close(fig)
 
         return {
             'loss': gen_loss + disc_loss,
@@ -98,6 +122,14 @@ class TrainingModule(pl.LightningModule):
             'g_norm': g_norm,
             'd_norm': d_norm
         }
+
+    def plot_f0_curves(self, real : np.ndarray, fake : np.ndarray):
+        fig = plt.figure(figsize=(6, 8))
+        ax = fig.add_subplot(111)
+        ax.plot(real[0], label='real')
+        ax.plot(fake[0], label='fake')
+        ax.legend()
+        return matplotlib_to_tensorboard(fig)
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True)
@@ -130,7 +162,9 @@ class TrainingModule(pl.LightningModule):
                 betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         disc_optim = torch.optim.AdamW(
-            self.net_d.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            self.net_d.parameters(), 
+            lr=self.config.train.lr * self.config.train.get('lr_coef_disc', 1),
+            betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         return [gen_optim, disc_optim], []
 
