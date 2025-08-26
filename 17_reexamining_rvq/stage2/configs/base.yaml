@@ -17,7 +17,8 @@
 # test09_ac_03 - update gen less frequently and switch to f0 only train
 # test09_ac_04 - lr adjustments
 # test10_f0_only - start f0 testing. we reset the f0 predictor and use base from test09_ac_04
-exp_name: test10_f0_only
+# f0_base - add f0 pretrained model into base
+exp_name: f0_base
 tensorboard_version: 2
 codec:
   whisper_dim: 512
@@ -93,6 +94,7 @@ train:
   test_sid: 6
   val_interval: 1
 
+  disc_label: 0.9
   f0_gen_interval: 3
   c_f0: 0.1
   c_f0_adv: 0.1

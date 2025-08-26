@@ -92,8 +92,6 @@ class F0Discriminator(nn.Module):
         self.convs = nn.ModuleList([
             spectral_norm(nn.Conv1d(1, 128, 15, padding=7)),
             spectral_norm(nn.Conv1d(128, 256, 7, padding=3)),
-            spectral_norm(nn.Conv1d(256, 512, 7, padding=3)),
-            spectral_norm(nn.Conv1d(512, 256, 3, padding=1)),
             spectral_norm(nn.Conv1d(256, 128, 3, padding=1)),
             spectral_norm(nn.Conv1d(128, 1, 3, padding=1)),
         ])
@@ -101,8 +99,8 @@ class F0Discriminator(nn.Module):
         self.norms = nn.ModuleList()
         self.projections = nn.ModuleList()
 
-        in_chs = [1, 128, 256, 512, 256, 128]
-        out_chs = [128, 256, 512, 256, 128, 1]
+        in_chs = [1, 128, 256, 128]
+        out_chs = [128, 256, 128, 1]
 
         for cin, cout in zip(in_chs, out_chs):
             # group norm except last conv

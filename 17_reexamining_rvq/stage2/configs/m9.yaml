@@ -76,6 +76,7 @@ train:
   val_interval: 5
   test_sid: 169
 
+  disc_label: 0.9
   f0_gen_interval: 3
   c_f0_adv: 0.5
   train_f0_only: False

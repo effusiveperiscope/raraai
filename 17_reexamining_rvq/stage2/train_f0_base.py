@@ -109,11 +109,11 @@ class TrainingModule(pl.LightningModule):
         else:
             d_norm = None
 
-        if is_train:
-            fig = self.plot_f0_curves(np_pit, f0_pred.detach().cpu().numpy())
-            self.logger.experiment.add_image(
-                'f0_curves', fig, global_step=self.global_step)
-            plt.close(fig)
+        # if is_train:
+        #     fig = self.plot_f0_curves(np_pit, f0_pred.detach().cpu().numpy())
+        #     self.logger.experiment.add_image(
+        #         'f0_curves', fig, global_step=self.global_step)
+        #     plt.close(fig)
 
         return {
             'loss': gen_loss + disc_loss,
@@ -233,7 +233,7 @@ if __name__ == '__main__':
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',
-        max_steps=config.train.get('max_steps', 160000),
+        max_steps=config.train.get('max_steps', 400000),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
     )

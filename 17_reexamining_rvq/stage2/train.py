@@ -258,12 +258,13 @@ class TrainingModule(pl.LightningModule):
         sc_loss, mag_loss = self.stft_criterion(fake_audio.squeeze(1), audio.squeeze(1))
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
+        disc_label = self.config.train.get('disc_label', 1.0)
         # Generator Loss
         if self.use_adv:
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
 
             f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1))
-            f0_gen_loss = torch.mean((1 - f0_fake_disc) ** 2)
+            f0_gen_loss = torch.mean((disc_label - f0_fake_disc) ** 2)
 
             # score_loss
             score_loss, _ = generator_loss(y_d_hat_r)
@@ -306,7 +307,7 @@ class TrainingModule(pl.LightningModule):
 
             f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1).detach())
             f0_real_disc = self.f0_disc(target.unsqueeze(-1))
-            f0_real_loss = torch.mean((1 - f0_real_disc) ** 2)
+            f0_real_loss = torch.mean((disc_label - f0_real_disc) ** 2)
             f0_fake_loss = torch.mean(f0_fake_disc ** 2)
             f0_disc_loss = f0_real_loss + f0_fake_loss
             loss_d = loss_d + f0_disc_loss * hp.train.c_f0_adv
