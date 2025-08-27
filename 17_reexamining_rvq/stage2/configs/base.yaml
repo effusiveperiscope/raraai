@@ -96,8 +96,8 @@ train:
 
   disc_label: 0.9
   f0_gen_interval: 3
-  c_f0: 0.1
-  c_f0_adv: 0.1
+  c_f0: 0.5
+  c_f0_adv: 0.5
   train_f0_only: True
   reset_f0_weights: True
 

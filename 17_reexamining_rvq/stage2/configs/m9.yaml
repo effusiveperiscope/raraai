@@ -55,7 +55,6 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  c_f0: 0.5
   epochs: 302
   eps: 1e-9
   lr: 1e-4
@@ -77,7 +76,8 @@ train:
   test_sid: 169
 
   disc_label: 0.9
-  f0_gen_interval: 3
+  f0_gen_interval: 1
+  c_f0: 0.5
   c_f0_adv: 0.5
   train_f0_only: False
   reset_f0_weights: False

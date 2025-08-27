@@ -10,7 +10,7 @@ from vits_extend.stft_loss import STFTLoss
 import matplotlib.pyplot as plt
 import ultimate_xc
 
-from modeling.vits.models import F0PredictorSmall
+from modeling.vits.models import F0Predictor2
 from modeling.rvc.f0_predictor import F0Discriminator
 from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
 from modeling.vits import commons
@@ -19,7 +19,7 @@ from dataset import dataset
 # Train base F0 predictor model
 class TrainingModule(pl.LightningModule):
     def __init__(self,
-        net_g: F0PredictorSmall,
+        net_g: F0Predictor2,
         net_d: F0Discriminator,
         config: OmegaConf
     ):
@@ -45,6 +45,7 @@ class TrainingModule(pl.LightningModule):
     def step(self, batch, batch_idx, is_train=True):
         f0 = batch['f0'].to(self.dtype)
         np_pit = f0.detach().cpu().numpy()
+        ppg = batch['whisper']
         ppg_len = batch['whisper_length']
         # Iterate over batch and apply functions individually
         target_f0_mean = []
@@ -70,7 +71,7 @@ class TrainingModule(pl.LightningModule):
         mask = commons.sequence_mask(ppg_len, quant_pitch.size(1))
 
         target = torch.log(f0 + 1)
-        f0_pred = self.net_g(quant_pitch, target_f0_mean, mask).squeeze(-1)
+        f0_pred = self.net_g(quant_pitch, target_f0_mean, ppg, mask).squeeze(-1)
         
         vuv_mask = (quant_pitch != 0).unsqueeze(-1)
 
@@ -85,13 +86,17 @@ class TrainingModule(pl.LightningModule):
         # f0_recon_loss = 
         gen_loss = f0_gen_loss + f0_recon_loss * self.config.train.get('c_recon', 1.0)
 
-        if gen_loss.requires_grad:
+        if gen_loss.requires_grad and not gen_loss.isnan().any() and not gen_loss.isinf().any():
             optim_g.zero_grad()
             self.manual_backward(gen_loss)
             g_norm = torch.nn.utils.clip_grad_norm_(
                 self.net_g.parameters(), self.config.train.grad_clip_thresh)
             optim_g.step()
         else:
+            if gen_loss.isnan().any():
+                print("gen_loss is nan")
+            else:
+                print("gen_loss is inf")
             g_norm = None
 
         f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1).detach())[vuv_mask]
@@ -100,20 +105,26 @@ class TrainingModule(pl.LightningModule):
         f0_fake_loss = torch.mean(f0_fake_disc ** 2)
         disc_loss = f0_real_loss + f0_fake_loss
 
-        if disc_loss.requires_grad:
+        if disc_loss.requires_grad and not disc_loss.isnan().any() and not disc_loss.isinf().any():
             optim_d.zero_grad()
             self.manual_backward(disc_loss)
             d_norm = torch.nn.utils.clip_grad_norm_(
                 self.net_d.parameters(), self.config.train.grad_clip_thresh)
             optim_d.step()
         else:
+            if disc_loss.isnan().any():
+                print("disc_loss is nan")
+            else: 
+                print("disc_loss is inf")
             d_norm = None
 
-        # if is_train:
-        #     fig = self.plot_f0_curves(np_pit, f0_pred.detach().cpu().numpy())
-        #     self.logger.experiment.add_image(
-        #         'f0_curves', fig, global_step=self.global_step)
-        #     plt.close(fig)
+        if is_train and self.global_step % 100 == 0:
+            fig = self.plot_f0_curves(
+                target.detach().cpu().numpy(), 
+                f0_pred.detach().cpu().numpy())
+            self.logger.experiment.add_image(
+                'f0_curves', fig, global_step=self.global_step)
+            plt.close(fig)
 
         return {
             'loss': gen_loss + disc_loss,
@@ -179,9 +190,8 @@ if __name__ == '__main__':
     config = OmegaConf.load(args.config)
     hp = config
 
-    net_g = F0PredictorSmall(
-        speech_dim=hp.vits.inter_channels,
-        pitch_quant_dim=hp.vits.get('pitch_quant_dim', 8),
+    net_g = F0Predictor2(
+        speech_dim=hp.codec.whisper_dim,
         hidden_dim=hp.vits.hidden_channels
     )
     net_d = F0Discriminator()
@@ -233,8 +243,9 @@ if __name__ == '__main__':
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',
-        max_steps=config.train.get('max_steps', 400000),
+        max_steps=config.train.get('max_steps', -1),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
+        # detect_anomaly=True
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

@@ -23,7 +23,7 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/rarity_02_f0_test'
+CHECKPOINTS_ROOT = 'checkpoints/rarity_02_f0'
 CONFIG = 'configs/char.yaml'
 
 class MainWindow(QMainWindow):

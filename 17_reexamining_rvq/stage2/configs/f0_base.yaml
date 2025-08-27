@@ -7,11 +7,15 @@
 # 11 - add: stft loss, positional encoding, noise vector, snake activ, reset
 # 12 - lower lr?
 # 13 - fixed gradient flow bug. use label smoothing
-exp_name: f0_base_13
-tensorboard_version: 0
+# 14 - increase disc lr, remove pos enc, smarter gen
+# 15 - v2
+exp_name: f0_base_15
+tensorboard_version: 2
+codec:
+  whisper_dim: 512
 train:
   batch_size: 32
-  grad_clip_thresh: 10000.
+  grad_clip_thresh: 10-.
   lr: 5e-5
   betas:
   - 0.8
@@ -23,7 +27,7 @@ train:
   c_recon: 4.0
   num_workers: 4
   lr_coef_gen: 1.0
-  lr_coef_disc: 0.3
+  lr_coef_disc: 0.6
   disc_label: 0.9
 vits:
   hidden_channels: 192

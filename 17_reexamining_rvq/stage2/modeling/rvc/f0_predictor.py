@@ -19,7 +19,7 @@ class ResBlock(nn.Module):
 
         for i,conv in enumerate(self.convs):
             xs = x
-            x = F.leaky_relu(x)
+            x = F.silu(x)
             x = conv(x)
             x = self.norms[i](x)
             x = x + xs
@@ -44,7 +44,7 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1), :]
         return x
 
-class F0PredictorSmall(nn.Module): # No special conditioning
+class F0Predictor2(nn.Module): # No special conditioning
     """
     Simple F0 predictor. Training objective should be log f0 + 1
     """
@@ -54,7 +54,7 @@ class F0PredictorSmall(nn.Module): # No special conditioning
         hidden_dim: int):
         super().__init__()
 
-        self.pos_encoder = PositionalEncoding(hidden_dim)
+        # self.pos_encoder = PositionalEncoding(hidden_dim)
         self.mean_proj = nn.Linear(1, hidden_dim)
         self.pitch_cond = PitchConditioner(hidden_dim)
         self.convs = ResBlock([
@@ -62,7 +62,8 @@ class F0PredictorSmall(nn.Module): # No special conditioning
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
             nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
-            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
+            nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
             ])
         self.noise_proj = nn.Linear(hidden_dim, hidden_dim)
         self.final_proj = nn.Linear(hidden_dim, 1)
@@ -73,7 +74,6 @@ class F0PredictorSmall(nn.Module): # No special conditioning
         x = self.pitch_cond(quant_pitch,
             convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask * v_mask
         x = x + self.mean_proj(target_f0_mean.unsqueeze(-1)).unsqueeze(1) * speech_mask
-        x = self.pos_encoder(x)
 
         if z is None:
             z = torch.randn_like(x)
@@ -128,63 +128,49 @@ class F0Discriminator(nn.Module):
         pit = rearrange(pit, "b c t -> b t c")
         return pit
 
-
-class F0PredictorLarge(nn.Module):
-    def __init__(self, 
-        speech_dim: int,
-        pitch_quant_dim: int,
-        spk_emb_dim: int,
-        hidden_dim: int):
+class F0Predictor2(nn.Module):
+    def __init__(self, hidden_dim=192, speech_dim=512):
         super().__init__()
-
-        self.speech_proj = nn.Sequential( # Bottleneck to avoid leaking too much info
-            nn.Linear(speech_dim, 32),
-            nn.Linear(32, hidden_dim),
-            )
         self.mean_proj = nn.Linear(1, hidden_dim)
-        self.pitch_emb = nn.Embedding(pitch_quant_dim + 1, hidden_dim) # +1 for unvoiced
-        self.speech_cond = nn.Conv1d(hidden_dim, 2 * hidden_dim, 1)
-        self.spk_cond = nn.Conv1d(spk_emb_dim, 2 * hidden_dim, 1)
-
-        self.speech_conv = ResBlock([
-            nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3),
-            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)])
-        self.inter_conv = ResBlock([
-            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
-            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)])
-        self.final_conv = ResBlock([
-            nn.Conv1d(hidden_dim, hidden_dim, 5, padding=2),
-            nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1),
-            nn.Conv1d(hidden_dim, 1, 1, padding=0)])
+        self.speech_proj = nn.Linear(speech_dim, hidden_dim)
+        self.pitch_cond = PitchConditioner(hidden_dim)
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(hidden_dim, 4, 1024, batch_first=True, layer_norm_eps=1e-4),
+            num_layers=3
+        )
+        self.refiner = ResBlock(
+            [
+                spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)),
+                spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)),
+                spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3)),
+            ]
+        )
+        self.noise_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.final_proj = nn.Linear(hidden_dim, 1)
+        self.pos_enc = PositionalEncoding(hidden_dim)
 
     def forward(self, 
-        quant_pitch, 
-        target_f0_mean, 
-        speech, 
-        speech_mask,
-        spk_emb):
+        quant_pitch, target_f0_mean, speech, speech_mask, z=None):
 
-        x = self.pitch_emb(quant_pitch) * speech_mask
-        x = x + self.mean_proj(target_f0_mean) * speech_mask
-
+        speech_mask = speech_mask.unsqueeze(-1)
         speech = self.speech_proj(speech) * speech_mask
+        pitch = self.pitch_cond(quant_pitch,
+            convert_mel=False, use_dtype=target_f0_mean.dtype) * speech_mask
 
-        speech = self.speech_conv(rearrange(speech, "b t c -> b c t")) 
-        speech = speech * rearrange(speech_mask, "b t -> b 1 t")
+        x = speech + pitch
+        x = x + self.mean_proj(target_f0_mean.unsqueeze(-1)).unsqueeze(1) * speech_mask
 
-        x = rearrange(x, "b t c -> b c t")
+        if z is None:
+            z = torch.randn_like(x)
+        x = x + self.noise_proj(z)
+        x = x + self.pos_enc(x) 
+        x = F.layer_norm(x, x.shape[2:])
+        x = self.encoder(x, src_key_padding_mask=~(speech_mask.squeeze())) * speech_mask
+        x = self.refiner(x) * speech_mask
+        x = F.leaky_relu(x)
 
-        m, v = self.speech_cond(speech)
-        x = (x - m) * torch.exp(-v) * rearrange(speech_mask, "b t -> b 1 t")
-
-        x = self.inter_conv(x)
-
-        m, v = self.spk_cond(spk_emb.unsqueeze(1))
-        x = (x - m) * torch.exp(-v) * rearrange(speech_mask, "b t -> b 1 t")
-
-        x = self.final_conv(x)
-        x = rearrange(x, "b c t -> b t c")
-        x = F.relu(x)
+        v_mask = (quant_pitch != 0).unsqueeze(-1).float()
+        x = self.final_proj(x) * speech_mask * v_mask
 
         return x
 

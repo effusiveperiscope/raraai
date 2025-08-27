@@ -8,7 +8,7 @@ from . import commons
 from . import modules
 from .utils import f0_to_coarse
 from ..rvc.my_nsf import MyGeneratorNSF, SpeakerAdapter
-from ..rvc.f0_predictor import F0PredictorSmall, F0Discriminator
+from ..rvc.f0_predictor import F0Predictor2, F0Predictor2, F0Discriminator
 from ..rvc.commons import FiLMGenerator, PitchConditioner
 from einops import rearrange
 
@@ -195,18 +195,17 @@ class SynthesizerTrn(nn.Module):
         )
         self.dec = MyGeneratorNSF(hp=hp)
         if hp.vits.get('use_pitch_predictor', False):
-            self.pitch_predictor = F0PredictorSmall(
-                speech_dim=hp.vits.inter_channels,
-                pitch_quant_dim=hp.vits.get('pitch_quant_dim', 10),
+            self.pitch_predictor = F0Predictor2(
+                speech_dim=hp.codec.whisper_dim,
                 hidden_dim=hp.vits.hidden_channels
             )
 
-    def pitch_predict(self, quant_pitch, target_f0_mean, ppg_l):
+    def pitch_predict(self, quant_pitch, target_f0_mean, ppg, ppg_l):
         assert hasattr(self, 'pitch_predictor')
         mask = commons.sequence_mask(ppg_l, quant_pitch.size(1))
 
         return self.pitch_predictor(quant_pitch, target_f0_mean, 
-                mask).squeeze(-1)
+                ppg, mask).squeeze(-1)
 
     def forward(self, ppg_q, pit, spec, spk, ppg_l, spec_l, sid,
         quant_pitch=None, target_f0_mean=None):
@@ -226,7 +225,8 @@ class SynthesizerTrn(nn.Module):
         if quant_pitch is not None:
             assert hasattr(self, 'pitch_predictor')
             assert target_f0_mean is not None
-            f0_pred = self.pitch_predict(quant_pitch, target_f0_mean, ppg_l)
+            f0_pred = self.pitch_predict(quant_pitch, target_f0_mean, 
+                ppg_q, ppg_l)
         else:
             f0_pred = None
 
