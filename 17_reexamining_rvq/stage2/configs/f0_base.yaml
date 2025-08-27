@@ -9,13 +9,14 @@
 # 13 - fixed gradient flow bug. use label smoothing
 # 14 - increase disc lr, remove pos enc, smarter gen
 # 15 - v2
-exp_name: f0_base_15
-tensorboard_version: 2
+# 16 - use v2 discriminator
+exp_name: f0_base_16
+tensorboard_version: 0
 codec:
   whisper_dim: 512
 train:
   batch_size: 32
-  grad_clip_thresh: 10-.
+  grad_clip_thresh: 100
   lr: 5e-5
   betas:
   - 0.8

@@ -86,7 +86,7 @@ class F0Predictor2(nn.Module): # No special conditioning
         return x # we predict log pitch plus 1
 
 from torch.nn.utils.parametrizations import spectral_norm
-class F0Discriminator(nn.Module):
+class F0Discriminator2(nn.Module):
     def __init__(self):
         super().__init__()
         self.convs = nn.ModuleList([
@@ -141,7 +141,7 @@ class F0Predictor2(nn.Module):
         self.refiner = ResBlock(
             [
                 spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)),
-                spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 3, padding=1)),
+                spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3)),
                 spectral_norm(nn.Conv1d(hidden_dim, hidden_dim, 7, padding=3)),
             ]
         )
@@ -165,13 +165,57 @@ class F0Predictor2(nn.Module):
         x = x + self.noise_proj(z)
         x = x + self.pos_enc(x) 
         x = F.layer_norm(x, x.shape[2:])
-        x = self.encoder(x, src_key_padding_mask=~(speech_mask.squeeze())) * speech_mask
+        x = self.encoder(x, src_key_padding_mask=~(speech_mask.squeeze(-1))) * speech_mask
         x = self.refiner(x) * speech_mask
-        x = F.leaky_relu(x)
+        x = F.silu(x)
 
         v_mask = (quant_pitch != 0).unsqueeze(-1).float()
         x = self.final_proj(x) * speech_mask * v_mask
 
+        return x
+
+class ConvLinear(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding):
+        super().__init__()
+        self.conv = spectral_norm(
+            nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding))
+        self.proj = nn.Linear(in_channels, out_channels)
+
+    def forward(self, x):
+        x = rearrange(x, 'b t c -> b c t')
+        x = self.conv(x)
+        x = rearrange(x, 'b c t  -> b t c')
+        x = self.proj(x)
+        return x
+
+class F0Discriminator2(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.in_proj = nn.Linear(1, hidden_size)
+        self.convs = nn.ModuleList([
+            ConvLinear(hidden_size, hidden_size, 3, 1),
+            ConvLinear(hidden_size, hidden_size, 7, 3),
+            ConvLinear(hidden_size, hidden_size, 15, 7),
+        ])
+        self.pos_enc = PositionalEncoding(hidden_size)
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                hidden_size, 4, 1024, activation="gelu", batch_first=True
+            ),
+            3,
+        )
+        self.final_proj = nn.Linear(hidden_size, 1)
+    
+    def forward(self, x, x_mask):
+        x_mask = x_mask.unsqueeze(-1)
+        x = self.in_proj(x)
+        for conv in self.convs:
+            x = x + conv(x)
+            x = F.silu(x) * x_mask
+            x = F.layer_norm(x, x.shape[2:])
+        x = x + self.pos_enc(x)
+        x = self.encoder(x, src_key_padding_mask=(~x_mask).squeeze(-1))
+        x = self.final_proj(x)
         return x
 
 class PeriodDiscriminator(nn.Module):

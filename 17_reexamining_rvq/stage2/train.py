@@ -222,6 +222,7 @@ class TrainingModule(pl.LightningModule):
             # Convert to numpy/tensor
             target_f0_mean = torch.from_numpy(np.array(target_f0_mean)).float().to(self.device)  # shape: (B,)
             quant_pitch = torch.from_numpy(np.stack(quant_pitch)).long().to(self.device)  # shape: (B, T)
+            mask = commons.sequence_mask(ppg_len, quant_pitch.size(1))
 
         else:
             target_f0_mean = None
@@ -263,7 +264,7 @@ class TrainingModule(pl.LightningModule):
         if self.use_adv:
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
 
-            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1))
+            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1), mask)
             f0_gen_loss = torch.mean((disc_label - f0_fake_disc) ** 2)
 
             # score_loss
@@ -305,8 +306,8 @@ class TrainingModule(pl.LightningModule):
             y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
             loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
-            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1).detach())
-            f0_real_disc = self.f0_disc(target.unsqueeze(-1))
+            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1).detach(), mask)
+            f0_real_disc = self.f0_disc(target.unsqueeze(-1), mask)
             f0_real_loss = torch.mean((disc_label - f0_real_disc) ** 2)
             f0_fake_loss = torch.mean(f0_fake_disc ** 2)
             f0_disc_loss = f0_real_loss + f0_fake_loss

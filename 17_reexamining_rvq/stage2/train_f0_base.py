@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import ultimate_xc
 
 from modeling.vits.models import F0Predictor2
-from modeling.rvc.f0_predictor import F0Discriminator
+from modeling.rvc.f0_predictor import F0Discriminator2
 from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
 from modeling.vits import commons
 from dataset import dataset
@@ -20,7 +20,7 @@ from dataset import dataset
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g: F0Predictor2,
-        net_d: F0Discriminator,
+        net_d: F0Discriminator2,
         config: OmegaConf
     ):
         super().__init__()
@@ -76,7 +76,7 @@ class TrainingModule(pl.LightningModule):
         vuv_mask = (quant_pitch != 0).unsqueeze(-1)
 
         # Don't calculate discriminator loss on silent frames
-        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1))[vuv_mask]
+        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1), mask)[vuv_mask]
         disc_label = self.config.train.get('disc_label', 1.0)
 
         f0_gen_loss = torch.mean((disc_label - f0_fake_disc) ** 2)
@@ -99,8 +99,8 @@ class TrainingModule(pl.LightningModule):
                 print("gen_loss is inf")
             g_norm = None
 
-        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1).detach())[vuv_mask]
-        f0_real_disc = self.net_d(target.unsqueeze(-1))[vuv_mask]
+        f0_fake_disc = self.net_d(f0_pred.unsqueeze(-1).detach(), mask)[vuv_mask]
+        f0_real_disc = self.net_d(target.unsqueeze(-1), mask)[vuv_mask]
         f0_real_loss = torch.mean((disc_label - f0_real_disc) ** 2)
         f0_fake_loss = torch.mean(f0_fake_disc ** 2)
         disc_loss = f0_real_loss + f0_fake_loss
@@ -194,7 +194,7 @@ if __name__ == '__main__':
         speech_dim=hp.codec.whisper_dim,
         hidden_dim=hp.vits.hidden_channels
     )
-    net_d = F0Discriminator()
+    net_d = F0Discriminator2(hidden_size=192)
     training_module = TrainingModule(net_g, net_d, config)
 
     if args.transfer_from is not None:
