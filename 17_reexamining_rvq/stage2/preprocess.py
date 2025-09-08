@@ -130,7 +130,7 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
         val_lines = []
         train_lines = new_lines
 
-    if not regen_filelist:
+    if not regen_filelist and not skip_exists: # can't regen sid_avgs if skipped any
         if feats_to_extract is None or 'sid' in feats_to_extract:
             print('Saving sid_avgs...')
             for sid, avg in sid_avgs.items():
