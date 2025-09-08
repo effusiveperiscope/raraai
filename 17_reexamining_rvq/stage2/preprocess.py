@@ -63,6 +63,17 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
                 savepath = os.path.join(output_dir, os.path.basename(line) + '.' + key)
                 savepaths[key] = savepath
             if all(os.path.exists(savepath) for key, savepath in savepaths.items()) and skip_exists:
+                newline = '|'.join(
+                    [savepaths['whisper'],
+                    savepaths['f0'],
+                    savepaths['f0_confidence'],
+                    savepaths['f0_subharmonic'],
+                    savepaths['f0_inharmonic'],
+                    savepaths['spec'],
+                    savepaths['spk'],
+                        savepaths['wave'], 
+                        str(sid)])
+                new_lines.append(newline)
                 continue
 
             feats = extractor.extract_features(line)
