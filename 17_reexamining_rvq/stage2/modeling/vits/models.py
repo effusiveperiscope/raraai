@@ -9,7 +9,7 @@ from . import modules
 from .utils import f0_to_coarse
 from ..rvc.my_nsf import MyGeneratorNSF, SpeakerAdapter
 from ..rvc.f0_predictor import F0Predictor2, F0Predictor2, F0Discriminator2
-from ..rvc.commons import FiLMGenerator, PitchConditioner
+from ..rvc.commons import FiLMGenerator, PitchConditioner2
 from einops import rearrange
 
 
@@ -28,7 +28,7 @@ class TextEncoder(nn.Module):
         self.out_channels = out_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
 
-        self.pit = PitchConditioner(hidden_channels)
+        self.pit = PitchConditioner2(hidden_channels)
 
         self.spk_emb = nn.Embedding(max_spk_count, hidden_channels)
         self.spk_adapter = FiLMGenerator(
@@ -47,15 +47,17 @@ class TextEncoder(nn.Module):
             p_dropout)
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, f0, sid=None, noise_scale=1.0):
+    def forward(self, x, x_lengths, f0, pitch_extras=None, sid=None, noise_scale=1.0):
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         ).to(x.device)
         x = self.pre(x) * x_mask
 
-        pit_cond = self.pit(f0, use_dtype=x.dtype).transpose(1, 2)
+        if pitch_extras is None:
+            pitch_extras = {}
 
+        pit_cond = self.pit(f0, **pitch_extras, use_dtype=x.dtype).transpose(1, 2)
         x = x + pit_cond
 
         spk = self.spk_emb(sid)
@@ -68,6 +70,9 @@ class TextEncoder(nn.Module):
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
         z = (m + torch.randn_like(m) * torch.exp(logs) * noise_scale) * x_mask
+        # from commons import plot_spectrogram
+        # import matplotlib.pyplot as plt
+        # import pdb; pdb.set_trace()
         return z, m, logs, x_mask, x
 
 
@@ -208,15 +213,20 @@ class SynthesizerTrn(nn.Module):
                 ppg, mask).squeeze(-1)
 
     def forward(self, ppg_q, pit, spec, spk, ppg_l, spec_l, sid,
-        quant_pitch=None, target_f0_mean=None):
+        quant_pitch=None, target_f0_mean=None, pitch_extras=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg_q, ppg_l, f0=f0_to_coarse(pit), sid=sid)
+            ppg_q, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
 
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
             z_q, pit, spec_l, self.segment_size)
-        audio = self.dec(spk, z_slice, pit_slice)
+        if pitch_extras is not None and len(pitch_extras):
+            for key, value in pitch_extras.items():
+                pitch_extras[key] = commons.slice_pitch_segments(
+                    value, ids_slice, self.segment_size)
+
+        audio = self.dec(spk, z_slice, pit_slice, pitch_extras=pitch_extras)
 
         # SNAC to flow
         z_f, logdet_f = self.flow(z_q, spec_mask, g=spk)
@@ -234,22 +244,28 @@ class SynthesizerTrn(nn.Module):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r),\
                 f0_pred
 
-    def posterior_test(self, spec, spec_l, pit, spk):
+    def posterior_test(self, spec, spec_l, pit, spk, pitch_extras=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
+
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
             z_q, pit, spec_l, self.segment_size)
-        audio = self.dec(spk, z_slice, pit_slice)
+        if pitch_extras is not None and len(pitch_extras):
+            for key, value in pitch_extras.items():
+                pitch_extras[key] = commons.slice_pitch_segments(
+                    value, ids_slice, self.segment_size)
+
+        audio = self.dec(spk, z_slice, pit_slice, pitch_extras=pitch_extras)
         return audio
 
-    def infer(self, ppg_q, pit, spk, ppg_l, sid, noise_scale=0.3):
+    def infer(self, ppg_q, pit, spk, ppg_l, sid, noise_scale=0.3, pitch_extras=None):
         ppg_q = ppg_q + torch.randn_like(ppg_q) * 0.0001  # Perturbation
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
-
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg_q, ppg_l, f0=f0_to_coarse(pit), sid=sid, noise_scale=noise_scale)
+            ppg_q, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid, noise_scale=noise_scale)
+
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
-        o = self.dec(spk, z * ppg_mask, f0=pit)
+        o = self.dec(spk, z * ppg_mask, f0=pit, pitch_extras=pitch_extras)
         return o
 
 import pdb

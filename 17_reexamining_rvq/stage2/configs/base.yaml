@@ -18,8 +18,12 @@
 # test09_ac_04 - lr adjustments
 # test10_f0_only - start f0 testing. we reset the f0 predictor and use base from test09_ac_04
 # f0_base - add f0 pretrained model into base
-exp_name: f0_base
-tensorboard_version: 2
+# test11 - add pitch extra conditioning
+# test11_01 - fix speaker emb bug
+# test11_02 - revised pitch decoding
+# test11_03 - fix transpose bug
+exp_name: test11_03
+tensorboard_version: 0
 codec:
   whisper_dim: 512
   codebook_size: 48
@@ -61,7 +65,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 7
+  batch_size: 8
 
   weight_decay: 1e-4
   cosine_anneal_steps: 100000
@@ -98,10 +102,13 @@ train:
   f0_gen_interval: 3
   c_f0: 0.5
   c_f0_adv: 0.5
-  train_f0_only: True
-  reset_f0_weights: True
+  train_f0_only: False
+  reset_f0_weights: False
+
+  p_pit_extra: 0.5
 
   keep_ckpts: 2
+  num_workers: 4
 
   stage2_epoch: 0 # start training using gen/disc losses
 vits:

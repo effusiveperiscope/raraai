@@ -61,7 +61,13 @@ class MyFeatures:
         if 'spk' in self.feats_to_extract:
             feat['spk'] = self.extract_speaker_features(file) # spk
         if 'f0' in self.feats_to_extract:
-            feat['f0'] = torch.from_numpy(self.rmvpe_model.extract_pitch(torch.from_numpy(data))) # f0
+            f0_extracted, extras = self.rmvpe_model.extract_pitch2(torch.from_numpy(data),
+                return_confidence=True, return_subharmonic_confidence=True, 
+                return_inharmonic_confidence=True)
+            feat['f0'] = torch.from_numpy(f0_extracted)  # f0
+            feat['f0_confidence'] = torch.from_numpy(extras['confidence'])
+            feat['f0_subharmonic'] = torch.from_numpy(extras['subharmonic_confidence'])
+            feat['f0_inharmonic'] = torch.from_numpy(extras['inharmonic_confidence'])
         if 'spec' in self.feats_to_extract:
 
             hps = self.config.data

@@ -43,6 +43,44 @@ class ActivationStatsTracker(nn.Module):
 
         return x
 
+class PitchConditioner2(nn.Module):
+    """Same as PitchConditioner but handles special RMVPE features 
+    (e.g. confidence). Operates both in conditioning and bypass mode."""
+    def __init__(self, inter_channels):
+        super().__init__()
+        self.cond = PitchConditioner(inter_channels)
+        self.confidence_proj = nn.Linear(1, inter_channels)
+        self.subharmonic_proj = nn.Linear(1, inter_channels)
+        self.inharmonic_proj = nn.Linear(1, inter_channels)
+        # bypass embedding
+        self.bypass_emb = nn.Parameter(torch.randn(inter_channels * 3))
+        self.net = nn.Sequential(
+            nn.SiLU(),
+            nn.Conv1d(inter_channels * 4, inter_channels, 5, padding=2),
+            nn.SiLU(),
+            nn.Conv1d(inter_channels, inter_channels, 3, padding=1),
+        )
+
+    def forward(self, pitch, confidence=None, 
+        subharmonic=None, inharmonic=None, 
+        convert_mel=True, use_dtype=torch.float32):
+        cond = self.cond(pitch, convert_mel, use_dtype)
+        #print('dtype of input:', pitch.dtype)
+        if confidence is not None and subharmonic is not None and inharmonic is not None:
+            #print('using conditioning mode')
+            cond = torch.cat((
+                cond,
+                self.confidence_proj(confidence.unsqueeze(-1)),
+                self.subharmonic_proj(subharmonic.unsqueeze(-1)),
+                self.inharmonic_proj(inharmonic.unsqueeze(-1))), dim=2)
+        else:
+            #print('using bypass mode')
+            cond = torch.cat(
+                (cond, self.bypass_emb.unsqueeze(0).unsqueeze(0).repeat(cond.shape[0], cond.shape[1], 1)), dim=2)
+        cond = rearrange(cond, "b t c -> b c t")
+        cond = self.net(cond)
+        cond = rearrange(cond, "b c t -> b t c")
+        return cond
 
 class PitchConditioner(nn.Module):
     """Conditioning module that treats 0 as a special embedding, intended for

@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
 from svc_helper.svc.rvc.lib.infer_pack import attentions, commons, modules
 from svc_helper.svc.rvc.lib.infer_pack.commons import get_padding, init_weights
-from .commons import DepthwiseSeparableConv1d
+from .commons import DepthwiseSeparableConv1d, PitchConditioner2
 from einops import rearrange
 
 class SpeakerAdapter(nn.Module):
@@ -279,6 +279,7 @@ class MyGeneratorNSF(torch.nn.Module):
                 self.har_convs.append(Conv1d(1, c_cur, kernel_size=1))
                 pass
 
+        self.pit = PitchConditioner2(hp.gen.upsample_input)
         self.env_gen = EnvGenerator(hp.gen.upsample_input, 192, len(self.noise_convs) * 2)
 
         self.resblocks = nn.ModuleList()
@@ -296,7 +297,9 @@ class MyGeneratorNSF(torch.nn.Module):
 
         self.lrelu_slope = modules.LRELU_SLOPE
 
-    def forward(self, spk, x, f0, perturb_scale=0.0):
+    def forward(self, spk, x, f0, pitch_extras=None, perturb_scale=0.0):
+        if pitch_extras is None:
+            pitch_extras = {}
 
         # Perturbation
         x = x + torch.randn_like(x) * perturb_scale
@@ -310,6 +313,8 @@ class MyGeneratorNSF(torch.nn.Module):
         uv = uv.float()
         uv = F.interpolate(uv.unsqueeze(1), har_source.shape[-1], mode='nearest')
 
+        pit_cond = self.pit(f0, **pitch_extras, use_dtype=x.dtype).transpose(1, 2)
+        x = x + pit_cond
         env = self.env_gen(rearrange(x, "b c t -> b t c"), f0.unsqueeze(-1))
 
         # Adapter

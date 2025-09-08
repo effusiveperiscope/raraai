@@ -7,10 +7,11 @@ from einops import rearrange
 from omegaconf import OmegaConf
 import random
 import ultimate_xc
+import math
 
 from modeling.vits.models import SynthesizerTrn
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
-from modeling.rvc.f0_predictor import F0Discriminator
+from modeling.rvc.f0_predictor import F0Discriminator2
 from rvc_losses import generator_loss, feature_loss, discriminator_loss
 from vits_extend.stft_loss import STFTLoss
 from modeling.vits.losses import kl_loss
@@ -35,7 +36,7 @@ class TrainingModule(pl.LightningModule):
         net_g : SynthesizerTrn, 
         net_d: MultiPeriodDiscriminatorV2, 
         codec : VevoRepCodec,
-        f0_disc : F0Discriminator,
+        f0_disc : F0Discriminator2,
         config : OmegaConf):
         super().__init__()
         self.net_g = net_g
@@ -90,8 +91,17 @@ class TrainingModule(pl.LightningModule):
                 ppg = batch['whisper'].to(self.dtype).to(self.device) 
                 _, ppg_q, _, _, _ = self.codec(ppg)
                 ppg_q = rearrange(ppg_q, "b c t -> b t c")
-                pit = batch['f0'].to(self.dtype).to(self.device)
-                pit = pit * (2 ** (self.config.train.get('test_transpose', 0) / 12))
+                f0 = batch['f0'].to(self.dtype).to(self.device)
+                f0 = f0 * (2 ** (self.config.train.get('test_transpose', 0) / 12))
+
+                f0_confidence = batch['f0_confidence'].to(ppg.dtype).to(self.device)
+                f0_subharmonic = batch['f0_subharmonic'].to(ppg.dtype).to(self.device)
+                f0_inharmonic = batch['f0_inharmonic'].to(ppg.dtype).to(self.device)
+                pitch_extras = {
+                    'confidence': f0_confidence,
+                    'subharmonic': f0_subharmonic,
+                    'inharmonic': f0_inharmonic
+                }
                 key = self.config.train.get('test_sid', 0)
                 if not key in self.spk_index:
                     key = str(key)
@@ -99,9 +109,10 @@ class TrainingModule(pl.LightningModule):
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
                 ppg_len = batch['whisper_length']
                 sid = batch['sid'].to(self.device)
-                out_audio = self.net_g.infer(ppg_q, pit, spk, ppg_len, sid=sid, noise_scale = 
-                    self.config.train.get('test_noise_scale', 0.34))
-                out_audio_post = self.net_g.posterior_test(spec, ppg_len, pit, spk)
+                out_audio = self.net_g.infer(ppg_q, f0, spk, ppg_len, sid=sid, noise_scale = 
+                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras)
+                out_audio_post = self.net_g.posterior_test(spec, ppg_len, f0, spk, 
+                    pitch_extras=pitch_extras)
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
                 audio = audio[:int(ppg_len[i] * self.config.data.hop_length)]
@@ -187,6 +198,14 @@ class TrainingModule(pl.LightningModule):
         ppg = batch['whisper']
         ppg_len = batch['whisper_length']
         f0 = batch['f0'].to(ppg.dtype)
+        f0_confidence = batch['f0_confidence'].to(ppg.dtype)
+        f0_subharmonic = batch['f0_subharmonic'].to(ppg.dtype)
+        f0_inharmonic = batch['f0_inharmonic'].to(ppg.dtype)
+        pitch_extras = {
+            'confidence': f0_confidence,
+            'subharmonic': f0_subharmonic,
+            'inharmonic': f0_inharmonic
+        }
         spec = batch['spec']
         spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
         spec_len = batch['spec_length']
@@ -228,18 +247,33 @@ class TrainingModule(pl.LightningModule):
             target_f0_mean = None
             quant_pitch = None
 
-        # augmentation is baked into the model for so-vits-svc 5.0, 
-        # so we don't perform any ourselves
         hp = self.config
+        if random.random() < self.config.train.get('p_pit_extra', 0.5):
+            pitch_extras = None # unconditional
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r), f0_pred = self.net_g(
                 ppg_q, f0, spec, spk, ppg_len, spec_len, sid=sid,
                 quant_pitch=quant_pitch,
-                target_f0_mean=target_f0_mean)
+                target_f0_mean=target_f0_mean,
+                pitch_extras=pitch_extras)
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
+
+        if self.global_step % 100 == 0 and is_train:
+            self.logger.experiment.add_audio(
+                tag='train_fake',
+                snd_tensor=fake_audio[0].squeeze(1).detach().cpu().float().numpy(),
+                global_step=self.global_step,
+                sample_rate=self.config.data.sampling_rate
+            )
+            self.logger.experiment.add_audio(
+                tag='train_real',
+                snd_tensor=audio[0].squeeze(1).detach().cpu().float().numpy(),
+                global_step=self.global_step,
+                sample_rate=self.config.data.sampling_rate
+            )
         # Sometimes these have slightly different lengths. Should still be aligned
         min_dim = min(fake_audio.shape[2], audio.shape[2])
         fake_audio = fake_audio[:, :, :min_dim]
@@ -389,7 +423,7 @@ if __name__ == '__main__':
         codebook_num=1,
         codebook_size=hp.codec.codebook_size
     )
-    f0_disc = F0Discriminator()
+    f0_disc = F0Discriminator2(hp.vits.hidden_channels)
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
@@ -442,7 +476,7 @@ if __name__ == '__main__':
     train_dataset = dataset(config.train.train_filelist, is_train=True)
     val_dataset = dataset(config.train.val_filelist, is_train=False)
     print("Creating dataloaders...")
-    num_workers = config.train.get('num_workers', 2)
+    num_workers = config.train.get('num_workers', 4)
     train_dataloader = train_dataset.loader(
         batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
             persistent_workers=num_workers > 0)
@@ -476,5 +510,6 @@ if __name__ == '__main__':
         max_steps=config.train.get('max_steps', 160000),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
+        log_every_n_steps=config.train.get('log_interval', 50),
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
