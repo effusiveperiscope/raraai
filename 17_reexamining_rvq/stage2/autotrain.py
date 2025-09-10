@@ -54,7 +54,13 @@ def main():
         f0_disc = F0Discriminator2(hp.vits.hidden_channels)
 
         resume_ckpt = os.path.join('checkpoints', basename, 'last.ckpt')
-        max_steps = config.train.get('max_steps', 120000)
+
+        with open(config.train.train_filelist) as f:
+            line_count = len(f.readlines())
+        len_dataset = line_count
+        steps_factor = 40
+        max_steps = 40000 + (len_dataset * steps_factor)
+        
         if not os.path.exists(resume_ckpt):
             print('Found no checkpoint, transfering from base')
             # transfer learn from base
@@ -99,7 +105,7 @@ def main():
             logger=logger,
             accelerator='gpu',
             precision='bf16-mixed',
-            max_steps=config.train.get('max_steps', max_steps),
+            max_steps=max_steps,
             callbacks=callbacks,
             val_check_interval=0, # no validation
             limit_val_batches=0,
