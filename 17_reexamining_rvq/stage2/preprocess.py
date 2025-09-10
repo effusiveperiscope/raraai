@@ -34,6 +34,7 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
     new_lines = []
     sid_avgs = {}
     sid_sums = {}
+    skip_flag = False
 
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
         if 'longform' in line:
@@ -63,6 +64,7 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
                 savepath = os.path.join(output_dir, os.path.basename(line) + '.' + key)
                 savepaths[key] = savepath
             if all(os.path.exists(savepath) for key, savepath in savepaths.items()) and skip_exists:
+                skip_flag = True
                 newline = '|'.join(
                     [savepaths['whisper'],
                     savepaths['f0'],
@@ -130,7 +132,7 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
         val_lines = []
         train_lines = new_lines
 
-    if not regen_filelist and not skip_exists: # can't regen sid_avgs if skipped any
+    if not regen_filelist and not skip_flag: # can't regen sid_avgs if skipped any
         if feats_to_extract is None or 'sid' in feats_to_extract:
             print('Saving sid_avgs...')
             for sid, avg in sid_avgs.items():

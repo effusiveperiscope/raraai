@@ -54,6 +54,7 @@ def main():
         f0_disc = F0Discriminator2(hp.vits.hidden_channels)
 
         resume_ckpt = os.path.join('checkpoints', basename, 'last.ckpt')
+        max_steps = config.train.get('max_steps', 120000)
         if not os.path.exists(resume_ckpt):
             print('Found no checkpoint, transfering from base')
             # transfer learn from base
@@ -66,9 +67,9 @@ def main():
             resume_ckpt = None
         else:
             resume_ckpt_state = torch.load(resume_ckpt, map_location='cpu', weights_only=False)
-            epoch = resume_ckpt_state['epoch']
-            if epoch > config.train.epochs:
-                print(f'Checkpoint at {resume_ckpt} exceeds max epochs {config.train.epochs}, skipping')
+            global_step = resume_ckpt_state['global_step']
+            if global_step > max_steps:
+                print(f'Checkpoint at {resume_ckpt} exceeds max steps {max_steps}, skipping')
                 continue
             print(f'Resuming from {resume_ckpt}')
 
@@ -98,7 +99,7 @@ def main():
             logger=logger,
             accelerator='gpu',
             precision='bf16-mixed',
-            max_epochs=config.train.get('epochs', 302),
+            max_steps=config.train.get('max_steps', max_steps),
             callbacks=callbacks,
             val_check_interval=0, # no validation
             limit_val_batches=0,

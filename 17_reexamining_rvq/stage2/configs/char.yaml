@@ -59,7 +59,7 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  epochs: 302
+  epochs: -1
   eps: 1e-9
   lr: 1e-4
   lr_decay: 0.999875
@@ -67,7 +67,7 @@ train:
   model: sovits
   port: 8001
   seed: 1234
-  max_steps: -1
+  max_steps: 200000
 
   train_filelist: ./data/raritys1-s3/train.txt
   val_filelist: ./data/raritys1-s3/val.txt
