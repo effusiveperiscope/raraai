@@ -60,6 +60,7 @@ def main():
         len_dataset = line_count
         steps_factor = 40
         max_steps = 40000 + (len_dataset * steps_factor)
+        config.train.test_interval = int(4200 * 2 / len_dataset)
         
         if not os.path.exists(resume_ckpt):
             print('Found no checkpoint, transfering from base')
