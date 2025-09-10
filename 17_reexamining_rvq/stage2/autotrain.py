@@ -13,88 +13,103 @@ from dataset import dataset
 import pytorch_lightning as pl
 from train import TrainingModule
 
-SOURCE_FILELISTS_DIR = r'D:\Code\MasterDataset\pony'
-BASE_MODEL = 'checkpoints/f0_base2.ckpt'
-SRC_CONFIG = 'configs/char.yaml'
 
-for filelist in os.listdir(SOURCE_FILELISTS_DIR):
-    abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
-    basename = os.path.basename(filelist).split('.')[0]
-    data_dir = os.path.join('data', basename)
+def main():
+    SOURCE_FILELISTS_DIR = r'D:\Code\MasterDataset\pony'
+    BASE_MODEL = 'checkpoints/f0_base2.ckpt'
+    SRC_CONFIG = 'configs/char.yaml'
+    for filelist in os.listdir(SOURCE_FILELISTS_DIR):
+        abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
+        basename = os.path.basename(filelist).split('.')[0]
+        data_dir = os.path.join('data', basename)
 
-    print(f'Processing {filelist}')
-    process_filelist(
-        abs_path, val_fraction=0.00,
-        output_dir=data_dir, skip_exists=True)
+        print(f'Processing {filelist}')
+        process_filelist(
+            abs_path, val_fraction=0.00,
+            output_dir=data_dir, skip_exists=True)
 
-    config = OmegaConf.load(SRC_CONFIG)
-    hp = config
+        config = OmegaConf.load(SRC_CONFIG)
+        config.exp_name = basename
+        hp = config
 
-    config.train.train_filelist = os.path.join(data_dir, 'train.txt')
-    config.train.val_filelist = os.path.join(data_dir, 'val.txt')
-    config.train.spk_index = os.path.join(data_dir, 'sid_avgs.pt')
+        config.train.train_filelist = os.path.join(data_dir, 'train.txt')
+        config.train.val_filelist = os.path.join(data_dir, 'val.txt')
+        config.train.spk_index = os.path.join(data_dir, 'sid_avgs.pt')
 
-    net_g = SynthesizerTrn(
-        spec_channels=hp.data.filter_length // 2 + 1,
-        segment_size=hp.data.segment_size // hp.data.hop_length,
-        hp=hp
-    )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
-    codec = VevoRepCodec(
-        input_channels=hp.codec.whisper_dim,
-        output_channels=hp.codec.whisper_dim,
-        encode_channels=hp.codec.whisper_dim,
-        decode_channels=hp.codec.whisper_dim,
-        code_dim=hp.codec.whisper_dim,
-        codebook_num=1,
-        codebook_size=hp.codec.codebook_size
-    )
-    f0_disc = F0Discriminator2(hp.vits.hidden_channels)
-    state = torch.load(
-        BASE_MODEL, map_location='cpu', weights_only=False)['state_dict']
-    load_submodule_prefix(net_g, 'net_g.', state)
-    load_submodule_prefix(codec, 'codec.', state) # oops lol
-    load_submodule_prefix(net_d, 'net_d.', state)
-    load_submodule_prefix(f0_disc, 'f0_disc.', state)
+        net_g = SynthesizerTrn(
+            spec_channels=hp.data.filter_length // 2 + 1,
+            segment_size=hp.data.segment_size // hp.data.hop_length,
+            hp=hp
+        )
+        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+        codec = VevoRepCodec(
+            input_channels=hp.codec.whisper_dim,
+            output_channels=hp.codec.whisper_dim,
+            encode_channels=hp.codec.whisper_dim,
+            decode_channels=hp.codec.whisper_dim,
+            code_dim=hp.codec.whisper_dim,
+            codebook_num=1,
+            codebook_size=hp.codec.codebook_size
+        )
+        f0_disc = F0Discriminator2(hp.vits.hidden_channels)
 
-    training_module = TrainingModule(
-        net_g=net_g, net_d=net_d, codec=codec, f0_disc=f0_disc, config=config)
-    logger = pl.loggers.TensorBoardLogger(
-        config.train.get('log_dir', 'logs'), name=config.exp_name,
-        version=config.get('tensorboard_version', 0)
-    )
-    print("Loading data...")
-    train_dataset = dataset(config.train.train_filelist, is_train=True)
-    val_dataset = dataset(config.train.val_filelist, is_train=False)
-    print("Creating dataloaders...")
-    num_workers = config.train.get('num_workers', 4)
-    train_dataloader = train_dataset.loader(
-        batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
-            persistent_workers=num_workers > 0)
-    print("Done")
+        resume_ckpt = os.path.join('checkpoints', basename, 'last.ckpt')
+        if not os.path.exists(resume_ckpt):
+            print('Found no checkpoint, transfering from base')
+            # transfer learn from base
+            state = torch.load(
+                BASE_MODEL, map_location='cpu', weights_only=False)['state_dict']
+            load_submodule_prefix(net_g, 'net_g.', state)
+            load_submodule_prefix(codec, 'codec.', state) # oops lol
+            load_submodule_prefix(net_d, 'net_d.', state)
+            load_submodule_prefix(f0_disc, 'f0_disc.', state)
+            resume_ckpt = None
+        else:
+            resume_ckpt_state = torch.load(resume_ckpt, map_location='cpu', weights_only=False)
+            epoch = resume_ckpt_state['epoch']
+            if epoch > config.train.epochs:
+                print(f'Checkpoint at {resume_ckpt} exceeds max epochs {config.train.epochs}, skipping')
+                continue
+            print(f'Resuming from {resume_ckpt}')
 
-    val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        monitor='val_loss',
-        dirpath=f'checkpoints/{config.exp_name}',
-        filename='best-checkpoint',
-        save_top_k=config.train.keep_ckpts,
-        mode='min',
-        save_last=True
-    )
-    callbacks = [val_checkpoint_callback]
+        training_module = TrainingModule(
+            net_g=net_g, net_d=net_d, codec=codec, f0_disc=f0_disc, config=config)
+        logger = pl.loggers.TensorBoardLogger(
+            config.train.get('log_dir', 'logs'), name=config.exp_name,
+            version=config.get('tensorboard_version', 0)
+        )
+        print("Loading data...")
+        train_dataset = dataset(config.train.train_filelist, is_train=True)
+        print("Creating dataloaders...")
+        num_workers = config.train.get('num_workers', 4)
+        train_dataloader = train_dataset.loader(
+            batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
+                persistent_workers=num_workers > 0)
+        print("Done")
 
-    trainer = pl.Trainer(
-        logger=logger,
-        accelerator='gpu',
-        precision='bf16-mixed',
-        max_steps=config.train.get('max_steps', 160000),
-        callbacks=callbacks,
-        check_val_every_n_epoch=config.train.get('val_interval', 1),
-        log_every_n_steps=config.train.get('log_interval', 50),
-    )
-    trainer.fit(training_module, train_dataloader)
+        callbacks = [
+            pl.callbacks.ModelCheckpoint( # just save last
+                dirpath=f'checkpoints/{config.exp_name}',
+                save_last=True
+            )
+        ]
 
-    del net_g
-    del net_d
-    del codec
-    del f0_disc
+        trainer = pl.Trainer(
+            logger=logger,
+            accelerator='gpu',
+            precision='bf16-mixed',
+            max_epochs=config.train.get('epochs', 302),
+            callbacks=callbacks,
+            val_check_interval=0, # no validation
+            limit_val_batches=0,
+            log_every_n_steps=config.train.get('log_interval', 50),
+        )
+        trainer.fit(training_module, train_dataloader, ckpt_path = resume_ckpt)
+
+        del net_g
+        del net_d
+        del codec
+        del f0_disc
+
+if __name__ == '__main__':
+    main()
