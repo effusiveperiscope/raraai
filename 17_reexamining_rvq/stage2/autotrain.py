@@ -89,7 +89,10 @@ def main():
         print("Loading data...")
         train_dataset = dataset(config.train.train_filelist, is_train=True)
         print("Creating dataloaders...")
-        num_workers = config.train.get('num_workers', 4)
+        if len_dataset < 100:
+            num_workers = 0 # Short datasets will incur too much overhead with num_workers > 0
+        else:
+            num_workers = config.train.get('num_workers', 4)
         train_dataloader = train_dataset.loader(
             batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
                 persistent_workers=num_workers > 0)

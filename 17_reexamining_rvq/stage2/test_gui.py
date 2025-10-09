@@ -23,7 +23,7 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/rarity_02_f0'
+CHECKPOINTS_ROOT = 'checkpoints/rarity_sing'
 CONFIG = 'configs/char.yaml'
 
 class MainWindow(QMainWindow):
@@ -147,7 +147,8 @@ class MainWindow(QMainWindow):
         for file in files:
             feats = self.my_feats.extract_features(file)
             feats = process_row(feats)
-            lens = torch.tensor([feats['whisper'].shape[0]]).to('cuda')
+            lens = torch.tensor([feats['whisper'].shape[0]]).to(self.device)
+            ppg = feats['whisper'].to(self.dtype).to(self.device)
 
             use_pitch = data['use_pitch']
             if use_pitch:
@@ -164,31 +165,47 @@ class MainWindow(QMainWindow):
                         quant_pitch.to(self.dtype).to(self.device).unsqueeze(0),
                         torch.Tensor([target_f0_mean * (2 ** (transpose / 12))]).to(
                             self.dtype).to(self.device),
+                        ppg,
                         lens
                     ).squeeze()
                 pit = (torch.exp(log_pit_p_1) - 1) * v_mask
 
                 pit_orig = feats['f0'] * (2 ** (transpose / 12))
-                plt.plot(pit.cpu().numpy(), label='pred')
-                plt.plot(pit_orig.cpu().numpy(), label='orig')
-                plt.legend()
-                plt.savefig(f'{file}.png', dpi=300)
-                print(os.getcwd())
-                print(f'Plot saved to {file}.png')
-
+                # plt.plot(pit.cpu().numpy(), label='pred')
+                # plt.plot(pit_orig.cpu().numpy(), label='orig')
+                # plt.legend()
+                # plt.savefig(f'{file}.png', dpi=300)
+                # print(os.getcwd())
+                # print(f'Plot saved to {file}.png')
             else:
-                # Tranpose
+                # Transpose
                 pit = feats['f0'] * (2 ** (transpose / 12))
 
             # Truncate
             noise_aug = data['noise_aug']
             ppg = feats['whisper']
+
             with torch.no_grad():
                 _, ppg_q, _, _, _ = self.codec(ppg.to(self.dtype).to(self.device).unsqueeze(0))
             ppg_q = rearrange(ppg_q, 'b c t -> b t c')
             ppg_q_aug = ppg_q + (torch.randn_like(ppg_q) * noise_aug)
 
             pit = pit[:ppg_q_aug.shape[1]]
+
+            f0_confidence = feats['f0_confidence'].to(ppg.dtype).to(self.device)
+            f0_subharmonic = feats['f0_subharmonic'].to(ppg.dtype).to(self.device)
+            f0_inharmonic = feats['f0_inharmonic'].to(ppg.dtype).to(self.device)
+
+            f0_confidence = f0_confidence[:ppg_q_aug.shape[1]].unsqueeze(0)
+            f0_subharmonic = f0_subharmonic[:ppg_q_aug.shape[1]].unsqueeze(0)
+            f0_inharmonic = f0_inharmonic[:ppg_q_aug.shape[1]].unsqueeze(0)
+
+            pitch_extras = {
+                'confidence': f0_confidence,
+                'subharmonic': f0_subharmonic,
+                'inharmonic': f0_inharmonic
+            }
+
 
             if spk_feats is None: # Fall back to index if none is provided
                 sid_key = data['sid']
@@ -203,7 +220,8 @@ class MainWindow(QMainWindow):
                     spk=spk_feats,
                     ppg_l=lens,
                     sid=torch.Tensor([data['sid']]).to(self.device).long(),
-                    noise_scale=data['noise'])
+                    noise_scale=data['noise'],
+                    pitch_extras=pitch_extras)
                 o_np = o.squeeze().cpu().float().numpy()
                 out.append(AudioResult(
                     label=os.path.basename(file)+data['model_labels'][0],

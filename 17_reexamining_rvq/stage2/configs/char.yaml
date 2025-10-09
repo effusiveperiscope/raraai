@@ -69,9 +69,9 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/raritys1-s3/train.txt
-  val_filelist: ./data/raritys1-s3/val.txt
-  spk_index: ./data/raritys1-s3/sid_avgs.pt
+  train_filelist: ./data/rarity_sing/train.txt
+  val_filelist: ./data/rarity_sing/val.txt
+  spk_index: ./data/rarity_sing/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
   test_interval: 50
