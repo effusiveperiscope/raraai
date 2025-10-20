@@ -23,7 +23,8 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 
 logger = getLogger(__name__)
-CHECKPOINTS_ROOT = 'checkpoints/rarity_sing'
+CHECKPOINTS_ROOT = 'checkpoints/luna'
+SPK_INDEX = 'data/luna/sid_avgs.pt'
 CONFIG = 'configs/char.yaml'
 
 class MainWindow(QMainWindow):
@@ -42,7 +43,7 @@ class MainWindow(QMainWindow):
         gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.5))
         gui.addParam(DoubleParam(label="Noise Aug Scale", id='noise_aug', min=0, max=3, default=0.0))
-        self.spk_index = torch.load(self.config.train.spk_index)
+        self.spk_index = torch.load(SPK_INDEX)
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=len(self.spk_index) - 1, default=0))
         gui.addParam(BoolParam(label="Use pitch prediction", id='use_pitch', default=False))
         # TODO - pitch smooth
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
                     f0=feats['f0'].cpu().numpy(),
                     n_voiced_bins=self.config.vits.pitch_quant_dim,
                     hold_length=10))
+                quant_pitch = quant_pitch[:lens[0]].to(self.dtype).to(self.device)
                 v_mask = (quant_pitch != 0).float().to(self.device)
                 # import pdb; pdb.set_trace()
                 # Predict using transposed mean
