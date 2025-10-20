@@ -7,12 +7,15 @@ import torch
 from tqdm import tqdm
 from features import MyFeatures
 import ultimate_xc
+import re
 
 def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.05,
                      output_dir='output', shuffle_seed=42, 
                      feats_to_extract=None,
                      regen_filelist=False,
-                     skip_exists=False):
+                     skip_exists=False,
+                     filepath_regex_pattern=None,
+                     filepath_regex_rep=None):
     with open(filelist_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
 
@@ -20,6 +23,11 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
 
     random.seed(shuffle_seed)
     random.shuffle(lines)
+
+    if filepath_regex_pattern is not None:
+        lines = [re.sub(
+            filepath_regex_pattern, filepath_regex_rep, line).replace(
+                '\\', '/') for line in lines]
 
     if not regen_filelist:
         if feats_to_extract is None:
