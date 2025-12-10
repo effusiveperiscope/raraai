@@ -1,0 +1,15 @@
+exp_name: base_whisper1024_code48
+
+whisper_dim: 1024
+codebook_size: 48
+
+train_filelist: data/full/train.txt
+val_filelist: data/full/val.txt
+log_dir: logs
+val_interval: 1 # Epoch
+
+lr: 5e-5
+c_vqloss: 1
+batch_size: 12
+
+keep_ckpts: 2

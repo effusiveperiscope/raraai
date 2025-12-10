@@ -1,0 +1,14 @@
+exp_name: test8
+model:
+  in_channels: 512
+  hidden_dim: 128
+  dropout: 0.3
+train:
+  lr: 5e-5
+  batch_size: 32
+  num_workers: 8
+  keep_ckpts: 5
+  label_noise: 0.0
+data:
+  train_filelist: data/v0.5/train_filelist.txt
+  val_filelist: data/v0.5/val_filelist.txt

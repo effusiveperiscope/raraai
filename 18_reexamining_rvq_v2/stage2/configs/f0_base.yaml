@@ -1,0 +1,36 @@
+# 03 - try no generator training - can discriminator even learn?
+# 04 - fixed scales
+# 05 - lower coef gen and reset
+# 07 - add vuv mask, spectral norm all conv weights
+# 08 - reset. all the other checkpoints are cursed
+# 09 - get rid of residuals for now
+# 11 - add: stft loss, positional encoding, noise vector, snake activ, reset
+# 12 - lower lr?
+# 13 - fixed gradient flow bug. use label smoothing
+# 14 - increase disc lr, remove pos enc, smarter gen
+# 15 - v2
+# 16 - use v2 discriminator
+exp_name: f0_base_16
+tensorboard_version: 0
+codec:
+  whisper_dim: 512
+train:
+  batch_size: 32
+  grad_clip_thresh: 100
+  lr: 5e-5
+  betas:
+  - 0.8
+  - 0.99
+  train_filelist: ./data/full/train.txt
+  val_filelist: ./data/full/val.txt
+  keep_ckpts: 2
+  weight_decay: 1e-4
+  c_recon: 4.0
+  num_workers: 4
+  lr_coef_gen: 1.0
+  lr_coef_disc: 0.6
+  disc_label: 0.9
+vits:
+  hidden_channels: 192
+  inter_channels: 192
+  pitch_quant_dim: 10

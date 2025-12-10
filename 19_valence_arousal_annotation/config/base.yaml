@@ -1,0 +1,14 @@
+exp_name: test
+model:
+  hidden_dim: 128
+  mamba_layers: 2
+  dropout: 0.3
+  num_cnn_layers: 2
+train:
+  lr: 5e-5
+  batch_size: 32
+  num_workers: 8
+  keep_ckpts: 5
+data:
+  train_filelist: data/test/train_filelist.txt
+  val_filelist: data/test/val_filelist.txt

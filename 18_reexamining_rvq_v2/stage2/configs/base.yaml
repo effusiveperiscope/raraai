@@ -1,11 +1,7 @@
-# rarity - base
-# rarity_01 - freeze decoder
-# rarity_02 - new base
-# rarity_02_f0_test - reset f0 weights and try pitch prediction again
-exp_name: rarity_02_f0
+exp_name: test_summarizer_2_ac
 tensorboard_version: 0
 codec:
-  whisper_dim: 512
+  whisper_dim: 1024
   codebook_size: 48
 data:
   filter_length: 1536
@@ -45,12 +41,11 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 8
+  batch_size: 4
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 500000
+  cosine_anneal_steps: 100000
   warmup_steps: 10000
-  freeze_dec: true
   # test05_warmup: 10000
   betas:
   - 0.8
@@ -59,7 +54,7 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  epochs: -1
+  epochs: 602
   eps: 1e-9
   lr: 1e-4
   lr_decay: 0.999875
@@ -69,27 +64,29 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/rarity_sing/train.txt
-  val_filelist: ./data/rarity_sing/val.txt
-  spk_index: ./data/rarity/sid_avgs.pt
-  test_filelist: ./data/test/val.txt
+  train_filelist: ./data/full/train_novctk_linux.txt
+  val_filelist: ./data/full/val_novctk_linux.txt
+  # spk_index: ./data/full/sid_avgs.pt
+  test_filelist: ./data/test/val_linux.txt
   test_noise_scale: 0.34
-  test_interval: 50
-  test_transpose: 12
-  val_interval: 5
+  test_interval: 1
+  test_transpose: 0
+  test_sid: 6
+  val_interval: 1
 
+  disc_label: 0.9
   f0_gen_interval: 3
   c_f0: 0.5
   c_f0_adv: 0.5
   train_f0_only: False
   reset_f0_weights: False
+
   p_pit_extra: 0.5
 
-  save_interval: null
   keep_ckpts: 2
-
-  stage2_epoch: 0 # start training using gen/disc losses
   num_workers: 4
+
+  stage2_epoch: 0
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -99,5 +96,5 @@ vits:
   spk_dim: 256
   max_spk_count: 256
   vec_dim: 256
-  use_pitch_predictor: true
+  use_pitch_predictor: false
   pitch_quant_dim: 10
