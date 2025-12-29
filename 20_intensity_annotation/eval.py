@@ -17,21 +17,25 @@ if __name__ == '__main__':
     
     # Load audio
     audio, sr = librosa.load(args.audio_file, sr=16000)
+    audio = librosa.util.normalize(audio)
+
+    use_dtype = torch.bfloat16
     
     # Process through model
     feats, feat_lens = context.extract_features_batched([audio])
-    feats = feats.half().to('cuda').unsqueeze(0)
+    feats = feats.to(use_dtype).to('cuda').unsqueeze(0)
     interp_feats = context.interp2(feats)
     feat_mask = sequence_mask(feat_lens).to(torch.long).to('cuda')
     interp_feats = interp_feats[:, :feat_lens.max(), :]
 
     config = OmegaConf.load(args.config)
-    model = IntensityModel(**config.model).to('cuda').half()
+    model = IntensityModel(**config.model).to('cuda').to(use_dtype)
     state = torch.load(args.ckpt, map_location='cpu', weights_only=False)['state_dict']
     load_submodule_prefix(model, 'model.', state)
     model.eval()
 
     with torch.no_grad():
+        import pdb; pdb.set_trace()
         intensity_pred, attn = model(interp_feats, feat_mask)
     
     attn_feats = (intensity_pred * attn).cpu().detach().numpy()

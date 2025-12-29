@@ -86,10 +86,3 @@ if __name__ == '__main__':
     
     # Print statistics
     valid_intensities = [i for _, i in results if isinstance(i, float)]
-    # if valid_intensities:
-    #     print(f"\nStatistics:")
-    #     print(f"  Mean:   {np.mean(valid_intensities):.4f}")
-    #     print(f"  Median: {np.median(valid_intensities):.4f}")
-    #     print(f"  Min:    {np.min(valid_intensities):.4f}")
-    #     print(f"  Max:    {np.max(valid_intensities):.4f}")
-    #     print(f"  Std:    {np.std(valid_intensities):.4f}")

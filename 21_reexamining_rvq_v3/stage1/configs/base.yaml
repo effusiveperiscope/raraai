@@ -1,0 +1,15 @@
+exp_name: base_whisper768_code64_nointerp
+
+whisper_dim: 768
+codebook_size: 64
+
+train_filelist: data/full/train_linux.txt
+val_filelist: data/full/val_linux.txt
+log_dir: logs
+val_interval: 1 # Epoch
+
+lr: 1e-4
+c_vqloss: 1
+batch_size: 16
+
+keep_ckpts: 2

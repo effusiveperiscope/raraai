@@ -9,6 +9,13 @@ from features import MyFeatures
 import ultimate_xc
 import re
 
+def win_longpath(path):
+    if os.name != 'nt':
+        return path
+    if path.startswith('\\\\?\\'):
+        return path
+    return '\\\\?\\' + os.path.abspath(path)
+
 def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.05,
                      output_dir='output', shuffle_seed=42, 
                      feats_to_extract=None,
@@ -59,6 +66,8 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
         else:
             sid = 0
 
+        base_line = line
+        line = win_longpath(line)
         if not os.path.exists(line):
             print(f'File not found: {line}')
             continue
@@ -70,11 +79,12 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
                 'spec', 'spk', 'wave']
             savepaths = {}
             for key in expected_keys:
-                savepath = os.path.join(output_dir, os.path.basename(line) + '.' + key)
+                savepath = os.path.join(output_dir, os.path.basename(base_line) + '.' + key)
+                savepath = win_longpath(savepath)
                 savepaths[key] = savepath
             if all(os.path.exists(savepath) for key, savepath in savepaths.items()) and skip_exists:
                 skip_flag = True
-                # print("skip_flag triggered on line ", line)
+                print("skip_flag triggered on line ", line)
                 newline = '|'.join(
                     [savepaths['whisper'],
                     savepaths['f0'],
@@ -88,7 +98,14 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
                 new_lines.append(newline)
                 continue
 
-            feats = extractor.extract_features(line)
+            try:
+                feats = extractor.extract_features(line)
+                if feats['whisper'].shape[0] < 16:
+                    print(f'File too short: {line}')
+                    continue
+            except ValueError as e:
+                print(f'Error extracting features for {line}: {e}')
+                continue
 
             for key in expected_keys:
                 if key not in feats:
@@ -96,6 +113,7 @@ def process_filelist(filelist_path, config='configs/base.yaml', val_fraction=0.0
 
             for key, value in feats.items():
                 savepath = os.path.join(output_dir, os.path.basename(line) + '.' + key)
+                savepath = win_longpath(savepath)
                 if value is not None:
                     torch.save(value, savepath)
 
@@ -204,5 +222,6 @@ if __name__ == '__main__':
         output_dir=args.output_dir,
         shuffle_seed=args.shuffle_seed,
         regen_filelist=args.regen_filelist,
-        feats_to_extract=None
+        feats_to_extract=None,
+        #skip_exists=True
     )

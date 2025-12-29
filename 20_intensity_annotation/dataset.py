@@ -59,7 +59,7 @@ class LiveDataContext:
         return row
 
 class WhisperContext:
-    def __init__(self, whisper_model = 'openai/whisper-base'):
+    def __init__(self, whisper_model = 'openai/whisper-small'):
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model)
         self.device = 'cuda'
         self.model = WhisperModel.from_pretrained(whisper_model).to(self.device)
@@ -73,6 +73,9 @@ class WhisperContext:
             return_attention_mask=True
         )
         input_features = inputs.input_features.to(self.device).half()
+        # from PyQt5.QtCore import pyqtRemoveInputHook
+        # pyqtRemoveInputHook()
+        # import pdb; pdb.set_trace()
         with torch.no_grad():
             encoder_outputs = self.model.encoder(input_features)
             encoder_features = encoder_outputs.last_hidden_state

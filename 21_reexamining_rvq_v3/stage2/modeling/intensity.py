@@ -41,7 +41,7 @@ class IntensityModel(nn.Module):
         ])
         self.feature_bottleneck = nn.Linear(hidden_dim, bottleneck_dim)
         self.intensity_proj = nn.Linear(bottleneck_dim, output_channels)
-        self.attention_proj = nn.Linear(hidden_dim, 1) # probably not actually necessary?
+        self.attention_proj = nn.Linear(hidden_dim, 1)
 
     def forward(self, x, x_mask, return_feat=False):
         x = self.in_proj(x) * (x_mask.unsqueeze(-1))
@@ -63,9 +63,3 @@ class IntensityModel(nn.Module):
             return intensity, attn_weights
         else:
             return intensity, attn_weights, feat
-
-if __name__ == "__main__":
-    model = IntensityModel(4)
-    x = torch.randn(2, 32, 4)
-    y = model(x)
-    print(y.shape)

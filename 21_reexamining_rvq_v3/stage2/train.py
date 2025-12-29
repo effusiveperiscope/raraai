@@ -1,3 +1,10 @@
+import warnings
+import librosa
+import logging
+warnings.filterwarnings('error', category=RuntimeWarning)
+warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
+logging.getLogger('numba').setLevel(logging.WARNING)
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,11 +18,11 @@ import math
 
 from modeling.vits.models import SynthesizerTrn
 from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
-from modeling.rvc.f0_predictor import F0Discriminator2
 from rvc_losses import generator_loss, feature_loss, discriminator_loss
 from vits_extend.stft_loss import STFTLoss
 from modeling.vits.losses import kl_loss
 from modeling.vits import commons
+from modeling.intensity import IntensityModel
 from vits_extend.stft import TacotronSTFT
 from vits_extend.stft_loss import MultiResolutionSTFTLoss
 from svc_helper.pitch.utils import nonzero_mean, discretize_f0_log
@@ -29,36 +36,28 @@ from rvq.vevo_repcodec import VevoRepCodec
 
 import warnings
 import numpy as np
+import librosa
+import logging
 warnings.filterwarnings('error', category=RuntimeWarning)
+logging.getLogger('numba').setLevel(logging.WARNING)
 
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
         net_d: MultiPeriodDiscriminatorV2, 
+        net_i: IntensityModel,
         codec : VevoRepCodec,
-        f0_disc : F0Discriminator2,
         config : OmegaConf):
         super().__init__()
         self.net_g = net_g
         self.net_d = net_d
+        self.net_i = net_i
         self.codec = codec
-        self.f0_disc = f0_disc
         self.config = config
         self.automatic_optimization = False
 
         self.use_adv = True # use adversarial losses
-        self.cur_c_kl = 1.0
-
         self.spk_index = torch.load(self.config.train.spk_index)
-
-    def reset_f0_weights(self):
-        def reset_weights(layer):
-            if hasattr(layer, 'reset_parameters'):
-                layer.reset_parameters()
-
-        self.net_g.pitch_predictor.apply(reset_weights)
-        self.f0_disc.apply(reset_weights)
-        print("Reset f0 weights")
 
     def setup(self, stage=None):
         hp = self.config
@@ -88,33 +87,48 @@ class TrainingModule(pl.LightningModule):
             with torch.no_grad():
                 # because we created this dataloader ourselves
                 # we have to manually move the data to the device
-                ppg = batch['whisper'].to(self.dtype).to(self.device) 
+                ppg = batch['whisper'].to(self.dtype).to(self.device)
+                ppg_interp = F.interpolate(rearrange(ppg, 'b t d -> b d t'), scale_factor=2)
+                ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
+                ppg_len = batch['whisper_length'] * 2
+
                 _, ppg_q, _, _, _ = self.codec(ppg)
+                ppg_q = F.interpolate(ppg_q, scale_factor=2)
                 ppg_q = rearrange(ppg_q, "b c t -> b t c")
+
                 f0 = batch['f0'].to(self.dtype).to(self.device)
+                ppg_interp = ppg_interp[:,:f0.shape[1],:]
+                ppg_q = ppg_q[:,:f0.shape[1],:]
                 f0 = f0 * (2 ** (self.config.train.get('test_transpose', 0) / 12))
 
-                import pdb; pdb.set_trace()
-
-                f0_confidence = batch['f0_confidence'].to(ppg.dtype).to(self.device)
-                f0_subharmonic = batch['f0_subharmonic'].to(ppg.dtype).to(self.device)
-                f0_inharmonic = batch['f0_inharmonic'].to(ppg.dtype).to(self.device)
+                f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype).to(self.device)
+                f0_subharmonic = batch['f0_subharmonic'].to(ppg_interp.dtype).to(self.device)
+                f0_inharmonic = batch['f0_inharmonic'].to(ppg_interp.dtype).to(self.device)
                 pitch_extras = {
                     'confidence': f0_confidence,
                     'subharmonic': f0_subharmonic,
                     'inharmonic': f0_inharmonic
                 }
+
                 key = self.config.train.get('test_sid', 0)
                 if not key in self.spk_index:
                     key = str(key)
                 spk = self.spk_index[key].to(self.dtype).to(self.device).unsqueeze(0)
+
                 spec = batch['spec'].to(self.dtype).to(self.device).transpose(1,2)
-                ppg_len = batch['whisper_length']
                 sid = batch['sid'].to(self.device)
+
+                ppg_mask = commons.sequence_mask(ppg_len, max_length=f0.shape[1]).to(self.device)
+                intensity_feat, attn = self.net_i(ppg_interp, ppg_mask)
+                intensity = (intensity_feat * attn).sum(dim=1).unsqueeze(1)
+
                 out_audio = self.net_g.infer(ppg_q, f0, spk, ppg_len, sid=sid, noise_scale = 
-                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras)
-                out_audio_post = self.net_g.posterior_test(spec, ppg_len, f0, spk, 
+                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras,
+                    intensity=intensity)
+                out_audio_post = self.net_g.posterior_test(spec, 
+                    batch['spec_length'].to(self.device), f0, spk, 
                     pitch_extras=pitch_extras)
+
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
                 audio = audio[:int(ppg_len[i] * self.config.data.hop_length)]
@@ -139,24 +153,10 @@ class TrainingModule(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self.update_stage()
-
-
-        # for param in self.net_g.dec.parameters():
-        #     param.requires_grad = not self.config.train.get('freeze_dec', False)
-        if self.config.train.get('train_f0_only', False):
-            for param in self.net_d.parameters():
-                param.requires_grad = False
-            for param in self.net_g.parameters():
-                param.requires_grad = False
-            for param in self.f0_disc.parameters():
-                param.requires_grad = True
-            for param in self.net_g.pitch_predictor.parameters():
-                param.requires_grad = True
-        else:
-            for param in self.net_d.parameters():
-                param.requires_grad = True
-            for param in self.net_g.parameters():
-                param.requires_grad = True
+        for param in self.net_d.parameters():
+            param.requires_grad = True
+        for param in self.net_g.parameters():
+            param.requires_grad = True
 
     def on_train_epoch_end(self):
         self.test()
@@ -165,24 +165,15 @@ class TrainingModule(pl.LightningModule):
     def update_stage(self):
         pass
 
-    def update_f0_disc(self): # Update gen every N steps
-        if self.global_step % self.config.train.get('f0_gen_interval', 1) == 0:
-            for param in self.net_g.pitch_predictor.parameters():
-                param.requires_grad = True
-        else:
-            for param in self.net_g.pitch_predictor.parameters():
-                param.requires_grad = False
-
-    def on_train_batch_start(self, batch, batch_idx):
-        self.update_f0_disc()
-
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(
             self.net_g.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         disc_optim = torch.optim.AdamW(
             itertools.chain(
-                self.net_d.parameters(), self.f0_disc.parameters()), lr=self.config.train.lr, betas=self.config.train.betas,
+                self.net_d.parameters()), lr=
+                    self.config.train.lr * self.config.train.get('disc_lr_mul', 1.0),
+                    betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=gen_optim, 
@@ -198,11 +189,22 @@ class TrainingModule(pl.LightningModule):
 
     def step(self, batch, batch_idx, is_train=True):
         ppg = batch['whisper']
-        ppg_len = batch['whisper_length']
-        f0 = batch['f0'].to(ppg.dtype)
-        f0_confidence = batch['f0_confidence'].to(ppg.dtype)
-        f0_subharmonic = batch['f0_subharmonic'].to(ppg.dtype)
-        f0_inharmonic = batch['f0_inharmonic'].to(ppg.dtype)
+        ppg_interp = F.interpolate(rearrange(ppg, 'b t d -> b d t'), scale_factor=2)
+        ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
+        ppg_len = batch['whisper_length'] * 2
+
+        with torch.no_grad():
+            _, ppg_q, _, _, _ = self.codec(ppg)
+            ppg_q = F.interpolate(ppg_q, scale_factor=2) # upsample quantized latent
+            ppg_q = rearrange(ppg_q, "b c t -> b t c")
+
+        f0 = batch['f0'].to(ppg_interp.dtype)
+        ppg_q = ppg_q[:,:f0.shape[1],:]
+        ppg_interp = ppg_interp[:,:f0.shape[1],:]
+        f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype)
+        f0_subharmonic = batch['f0_subharmonic'].to(ppg_interp.dtype)
+        f0_inharmonic = batch['f0_inharmonic'].to(ppg_interp.dtype)
+
         pitch_extras = {
             'confidence': f0_confidence,
             'subharmonic': f0_subharmonic,
@@ -218,46 +220,20 @@ class TrainingModule(pl.LightningModule):
         optim_g, optim_d = self.optimizers()
         sched_g, sched_d = self.lr_schedulers()
 
+        # intensity feature
         with torch.no_grad():
-            _, ppg_q, _, _, _ = self.codec(ppg)
-            ppg_q = rearrange(ppg_q, "b c t -> b t c")
-
-        # pitch items
-        if self.config.vits.get('use_pitch_predictor', False):
-            np_pit = batch['f0'].to(ppg.dtype).detach().cpu().numpy()
-            # Iterate over batch and apply functions individually
-            target_f0_mean = []
-            quant_pitch = []
-
-            for pit_sample in np_pit:
-                # These functions expect a 1D array
-                target_f0_mean.append(nonzero_mean(pit_sample))
-                quant_pitch.append(
-                    discretize_f0_log(
-                        f0=pit_sample,
-                        n_voiced_bins=self.config.vits.get('pitch_quant_dim', 8),
-                        hold_length=10
-                    )
-                )
-
-            # Convert to numpy/tensor
-            target_f0_mean = torch.from_numpy(np.array(target_f0_mean)).float().to(self.device)  # shape: (B,)
-            quant_pitch = torch.from_numpy(np.stack(quant_pitch)).long().to(self.device)  # shape: (B, T)
-            mask = commons.sequence_mask(ppg_len, quant_pitch.size(1))
-
-        else:
-            target_f0_mean = None
-            quant_pitch = None
+            ppg_mask = commons.sequence_mask(ppg_len, max_length=f0.shape[1])
+            intensity_feat, attn = self.net_i(ppg_interp, ppg_mask)
+            intensity = (intensity_feat * attn).sum(dim=1).unsqueeze(1)
 
         hp = self.config
         if random.random() < self.config.train.get('p_pit_extra', 0.5):
             pitch_extras = None # unconditional
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
-            logs_q, logdet_f, logdet_r), f0_pred = self.net_g(
+            logs_q, logdet_f, logdet_r) = self.net_g(
                 ppg_q, f0, spec, spk, ppg_len, spec_len, sid=sid,
-                quant_pitch=quant_pitch,
-                target_f0_mean=target_f0_mean,
+                intensity=intensity,
                 pitch_extras=pitch_extras)
 
         audio = slice_segments_general(
@@ -300,9 +276,6 @@ class TrainingModule(pl.LightningModule):
         if self.use_adv:
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
 
-            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1), mask)
-            f0_gen_loss = torch.mean((disc_label - f0_fake_disc) ** 2)
-
             # score_loss
             score_loss, _ = generator_loss(y_d_hat_r)
             # feat_loss
@@ -312,19 +285,12 @@ class TrainingModule(pl.LightningModule):
             feat_loss = torch.tensor(0.0).to(self.device)
 
         # Kl Loss
-        loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * self.cur_c_kl
-        loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * self.cur_c_kl
-
-        if self.config.vits.get('use_pitch_predictor', False):
-            target = torch.log(f0 + 1)
-            sc_loss, mag_loss = self.f0_stft(f0_pred.squeeze(-1), target.squeeze(-1))
-            loss_f0 = F.l1_loss(f0_pred, target)
-        else: 
-            loss_f0 = torch.tensor(0.0).to(self.device)
+        loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
+        loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + \
-            loss_kl_r * 0.5 + loss_f0 * hp.train.c_f0 + f0_gen_loss * hp.train.c_f0_adv
+            loss_kl_r * 0.5
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -342,12 +308,7 @@ class TrainingModule(pl.LightningModule):
             y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
             loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
 
-            f0_fake_disc = self.f0_disc(f0_pred.unsqueeze(-1).detach(), mask)
-            f0_real_disc = self.f0_disc(target.unsqueeze(-1), mask)
-            f0_real_loss = torch.mean((disc_label - f0_real_disc) ** 2)
-            f0_fake_loss = torch.mean(f0_fake_disc ** 2)
-            f0_disc_loss = f0_real_loss + f0_fake_loss
-            loss_d = loss_d + f0_disc_loss * hp.train.c_f0_adv
+            loss_d = loss_d
 
         else:
             loss_d = torch.tensor(0.0).to(self.device)
@@ -363,7 +324,7 @@ class TrainingModule(pl.LightningModule):
         return {'loss_g': loss_g, 'loss_d': loss_d, 'g_norm': g_norm, 'd_norm': d_norm,
                 'score_loss': score_loss, 'feat_loss': feat_loss, 'mel_loss': mel_loss,
                 'stft_loss': stft_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r,
-                'loss_f0': loss_f0, 'f0_gen_loss': f0_gen_loss, 'f0_disc_loss': f0_disc_loss}
+                }
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True)
@@ -393,6 +354,9 @@ class TrainingModule(pl.LightningModule):
         return val_loss
 
 if __name__ == '__main__':
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True) # This is needed on Linux
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
@@ -401,7 +365,7 @@ if __name__ == '__main__':
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
     parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
     parser.add_argument('--codec_ckpt', type=str, default=None)
-    parser.add_argument('--f0_base_ckpt', type=str, default=None)
+    parser.add_argument('--int_ckpt', type=str, default=None)
 
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
@@ -416,6 +380,7 @@ if __name__ == '__main__':
         hp=hp
     )
     net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    net_i = IntensityModel(in_channels=hp.codec.whisper_dim)
     codec = VevoRepCodec(
         input_channels=hp.codec.whisper_dim,
         output_channels=hp.codec.whisper_dim,
@@ -425,7 +390,6 @@ if __name__ == '__main__':
         codebook_num=1,
         codebook_size=hp.codec.codebook_size
     )
-    f0_disc = F0Discriminator2(hp.vits.hidden_channels)
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
@@ -445,8 +409,8 @@ if __name__ == '__main__':
         state = torch.load(args.transfer_from, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
         load_submodule_prefix(codec, 'codec.', state) # oops lol
+        load_submodule_prefix(net_i, 'net_i.', state) # oops LOL
         load_submodule_prefix(net_d, 'net_d.', state)
-        load_submodule_prefix(f0_disc, 'f0_disc.', state)
     else:
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
@@ -457,19 +421,18 @@ if __name__ == '__main__':
         state_dict = torch.load(args.codec_ckpt, map_location='cpu')['state_dict']
         load_submodule_prefix(codec, 'model.', state_dict)
 
+    if args.int_ckpt is not None:
+        print("Loading intensity checkpoint: {}".format(args.int_ckpt))
+        state_dict = torch.load(args.int_ckpt, map_location='cpu')['state_dict']
+        load_submodule_prefix(net_i, 'model.', state_dict)
+
     if args.rvc_disc_ckpt is not None:
         print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
         state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
         load_state_dict_mismatch(net_d, state_dict)
 
-    if args.f0_base_ckpt is not None:
-        print("Loading F0 Base checkpoint: {}".format(args.f0_base_ckpt))
-        state_dict = torch.load(args.f0_base_ckpt, map_location='cpu', weights_only=False)['state_dict']
-        load_submodule_prefix(net_g.pitch_predictor, 'net_g.', state_dict)
-        load_submodule_prefix(f0_disc, 'net_d.', state_dict)
-
     training_module = TrainingModule(
-        net_g=net_g, net_d=net_d, codec=codec, f0_disc=f0_disc, config=config)
+        net_g=net_g, net_d=net_d, net_i=net_i, codec=codec, config=config)
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=config.get('tensorboard_version', 0)
@@ -512,6 +475,7 @@ if __name__ == '__main__':
         max_steps=config.train.get('max_steps', 160000),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
+        #val_check_interval=2,
         log_every_n_steps=config.train.get('log_interval', 50),
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
