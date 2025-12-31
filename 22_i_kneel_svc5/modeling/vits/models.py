@@ -3,22 +3,21 @@ import torch
 
 from torch import nn
 from torch.nn import functional as F
-from . import attentions
-from . import commons
-from . import modules
-from .utils import f0_to_coarse
-from ..rvc.my_nsf import MyGeneratorNSF, SpeakerAdapter
-from ..rvc.commons import FiLMGenerator, PitchConditioner2
-from einops import rearrange
+from modeling.vits import attentions
+from modeling.vits import commons
+from modeling.vits import modules
+from modeling.vits.utils import f0_to_coarse
+from modeling.vits_decoder.generator import Generator
+from modeling.vits.modules_grl import SpeakerClassifier
 
 
 class TextEncoder(nn.Module):
     def __init__(self,
                  in_channels,
+                 vec_channels,
                  out_channels,
                  hidden_channels,
                  filter_channels,
-                 max_spk_count,
                  n_heads,
                  n_layers,
                  kernel_size,
@@ -26,17 +25,8 @@ class TextEncoder(nn.Module):
         super().__init__()
         self.out_channels = out_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
-
-        self.pit = PitchConditioner2(hidden_channels)
-
-        self.spk_emb = nn.Embedding(max_spk_count, hidden_channels)
-        self.spk_adapter = FiLMGenerator(
-            condition_dim=hidden_channels,
-            target_dim=hidden_channels
-        )
-
-        self.intensity_proj = nn.Linear(1, hidden_channels)
-
+        self.hub = nn.Conv1d(vec_channels, hidden_channels, kernel_size=5, padding=2)
+        self.pit = nn.Embedding(256, hidden_channels)
         self.enc = attentions.Encoder(
             hidden_channels,
             filter_channels,
@@ -46,36 +36,19 @@ class TextEncoder(nn.Module):
             p_dropout)
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, f0, pitch_extras=None, sid=None,
-        intensity=None,
-        noise_scale=1.0):
+    def forward(self, x, x_lengths, v, f0):
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         ).to(x.device)
         x = self.pre(x) * x_mask
-
-        if pitch_extras is None:
-            pitch_extras = {}
-
-        pit_cond = self.pit(f0, **pitch_extras, use_dtype=x.dtype).transpose(1, 2)
-        x = x + pit_cond
-
-        spk = self.spk_emb(sid)
-        gamma, beta = self.spk_adapter(spk.unsqueeze(1))
-        x = rearrange(x, "b c t -> b t c")
-        x = x + x * gamma + beta
-
-        x = x + self.intensity_proj(intensity)
-        x = rearrange(x, "b t c -> b c t")
-
+        v = torch.transpose(v, 1, -1)  # [b, h, t]
+        v = self.hub(v) * x_mask
+        x = x + v + self.pit(f0).transpose(1, 2)
         x = self.enc(x * x_mask, x_mask)
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
-        z = (m + torch.randn_like(m) * torch.exp(logs) * noise_scale) * x_mask
-        # from commons import plot_spectrogram
-        # import matplotlib.pyplot as plt
-        # import pdb; pdb.set_trace()
+        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
         return z, m, logs, x_mask, x
 
 
@@ -89,7 +62,6 @@ class ResidualCouplingBlock(nn.Module):
         n_layers,
         n_flows=4,
         gin_channels=0,
-        p_dropout=0,
     ):
         super().__init__()
         self.flows = nn.ModuleList()
@@ -103,15 +75,9 @@ class ResidualCouplingBlock(nn.Module):
                     n_layers,
                     gin_channels=gin_channels,
                     mean_only=True,
-                    p_dropout=p_dropout,
                 )
             )
             self.flows.append(modules.Flip())
-
-    def freeze_layers(self, n):
-        for i in range(n):
-            for param in self.flows[i * 2].parameters():
-                param.requires_grad = False
 
     def forward(self, x, x_mask, g=None, reverse=False):
         if not reverse:
@@ -158,7 +124,7 @@ class PosteriorEncoder(nn.Module):
     def forward(self, x, x_lengths, g=None):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
-        ).to(x.device)
+        )
         x = self.pre(x) * x_mask
         x = self.enc(x, x_mask, g=g)
         stats = self.proj(x) * x_mask
@@ -181,15 +147,19 @@ class SynthesizerTrn(nn.Module):
         self.segment_size = segment_size
         self.emb_g = nn.Linear(hp.vits.spk_dim, hp.vits.gin_channels)
         self.enc_p = TextEncoder(
-            hp.codec.whisper_dim,
+            hp.vits.ppg_dim,
+            hp.vits.vec_dim,
             hp.vits.inter_channels,
             hp.vits.hidden_channels,
             hp.vits.filter_channels,
-            hp.vits.max_spk_count,
             2,
             6,
             3,
             0.1,
+        )
+        self.speaker_classifier = SpeakerClassifier(
+            hp.vits.hidden_channels,
+            hp.vits.spk_dim,
         )
         self.enc_q = PosteriorEncoder(
             spec_channels,
@@ -206,25 +176,16 @@ class SynthesizerTrn(nn.Module):
             5,
             1,
             4,
-            gin_channels=hp.vits.spk_dim,
-            p_dropout=0.2
+            gin_channels=hp.vits.spk_dim
         )
-        self.dec = MyGeneratorNSF(hp=hp)
+        self.dec = Generator(hp=hp)
 
-    def freeze_layers(self,
-        enc_p_n=0,
-        enc_q_n=0,
-        flow_n=0,
-        dec_n=0): # for finetuning
-        self.enc_p.enc.freeze_layers(enc_p_n)
-        self.enc_q.enc.freeze_layers(enc_q_n)
-        self.flow.freeze_layers(flow_n)
-        self.dec.freeze_layers(dec_n)
-
-    def forward(self, ppg_q, pit, spec, spk, ppg_l, spec_l, sid, intensity, pitch_extras=None):
+    def forward(self, ppg, vec, pit, spec, spk, ppg_l, spec_l, pitch_extras=None):
+        ppg = ppg + torch.randn_like(ppg) * 1  # Perturbation
+        vec = vec + torch.randn_like(vec) * 2  # Perturbation
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg_q, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid, intensity=intensity)
+            ppg, ppg_l, vec, f0=f0_to_coarse(pit))
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
 
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
@@ -233,85 +194,67 @@ class SynthesizerTrn(nn.Module):
             for key, value in pitch_extras.items():
                 pitch_extras[key] = commons.slice_pitch_segments(
                     value, ids_slice, self.segment_size)
-
         audio = self.dec(spk, z_slice, pit_slice, pitch_extras=pitch_extras)
 
         # SNAC to flow
         z_f, logdet_f = self.flow(z_q, spec_mask, g=spk)
         z_r, logdet_r = self.flow(z_p, spec_mask, g=spk, reverse=True)
-        return audio, ids_slice, spec_mask, \
-            (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r)
+        # speaker
+        spk_preds = self.speaker_classifier(x)
+        return audio, ids_slice, spec_mask, (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds
 
-    def posterior_test(self, spec, spec_l, pit, spk, pitch_extras=None):
-        g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
-        z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
-
-        z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
-            z_q, pit, spec_l, self.segment_size)
-        if pitch_extras is not None and len(pitch_extras):
-            for key, value in pitch_extras.items():
-                pitch_extras[key] = commons.slice_pitch_segments(
-                    value, ids_slice, self.segment_size)
-
-        audio = self.dec(spk, z_slice, pit_slice, pitch_extras=pitch_extras)
-        return audio
-
-    def infer(self, ppg_q, pit, spk, ppg_l, sid, intensity, noise_scale=0.3, pitch_extras=None):
-        ppg_q = ppg_q + torch.randn_like(ppg_q) * 0.0001  # Perturbation
-        g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
+    def infer(self, ppg, vec, pit, spk, ppg_l, pitch_extras=None):
+        ppg = ppg + torch.randn_like(ppg) * 0.0001  # Perturbation
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg_q, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid, intensity=intensity,
-                noise_scale=noise_scale)
-
+            ppg, ppg_l, vec, f0=f0_to_coarse(pit))
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
         o = self.dec(spk, z * ppg_mask, f0=pit, pitch_extras=pitch_extras)
         return o
 
-import pdb
-import sys
-import traceback
-from PyQt5.QtCore import pyqtRemoveInputHook
-def custom_excepthook(exc_type, exc_value, exc_traceback):
-    """
-    Custom exception hook that prints the exception information
-    and then drops into a pdb debugger session.
-    """
-    pyqtRemoveInputHook()
-    # First, print the exception information as Python normally would.
-    # We use traceback.print_exception to ensure consistent formatting.
-    print("An unhandled exception occurred:")
-    traceback.print_exception(exc_type, exc_value, exc_traceback)
-    print("\nDropping into debugger...")
 
-    # Then, drop into the pdb debugger.
-    # The post_mortem function starts the debugger at the point of the exception.
-    pdb.post_mortem(exc_traceback)
+class SynthesizerInfer(nn.Module):
+    def __init__(
+        self,
+        spec_channels,
+        segment_size,
+        hp
+    ):
+        super().__init__()
+        self.segment_size = segment_size
+        self.enc_p = TextEncoder(
+            hp.vits.ppg_dim,
+            hp.vits.vec_dim,
+            hp.vits.inter_channels,
+            hp.vits.hidden_channels,
+            hp.vits.filter_channels,
+            2,
+            6,
+            3,
+            0.1,
+        )
+        self.flow = ResidualCouplingBlock(
+            hp.vits.inter_channels,
+            hp.vits.hidden_channels,
+            5,
+            1,
+            4,
+            gin_channels=hp.vits.spk_dim
+        )
+        self.dec = Generator(hp=hp)
 
-# Set the custom exception hook
-sys.excepthook = custom_excepthook
+    def remove_weight_norm(self):
+        self.flow.remove_weight_norm()
+        self.dec.remove_weight_norm()
 
+    def pitch2source(self, f0):
+        return self.dec.pitch2source(f0)
 
-if __name__ == "__main__":
-    from omegaconf import OmegaConf
-    ppg = torch.randn(1, 356, 1280)
-    vec = torch.randn(1, 356, 256)
-    pit = torch.randn(1, 356)
-    spec = torch.randn(1, 769, 356) # Apparently the model expects the channel to be first for spec
-    spk = torch.randn(1, 256)
-    ppg_l = torch.tensor([356])
-    spec_l = torch.tensor([356])
-    quant_pitch = torch.round(torch.randn(1, 356)).clamp(-4, 4).abs().long()
-    target_f0_mean = torch.randn(1)
+    def source2wav(self, source):
+        return self.dec.source2wav(source)
 
-    hp = OmegaConf.load("config/svc5_base.yaml")
-
-    model = SynthesizerTrn(
-        spec_channels=hp.data.filter_length // 2 + 1,
-        segment_size=hp.data.segment_size // hp.data.hop_length,
-        hp=hp
-    )
-    audio, ids_slice, spec_mask, (
-        z_f, z_r, z_p, m_p, logs_p, z_q, 
-        m_q, logs_q, logdet_f, logdet_r), f0_pred = \
-        model(ppg, vec, pit, spec, spk, ppg_l, spec_l, quant_pitch, target_f0_mean)
-    print(f0_pred.shape)
+    def inference(self, ppg, vec, pit, spk, ppg_l, source):
+        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
+            ppg, ppg_l, vec, f0=f0_to_coarse(pit))
+        z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
+        o = self.dec.inference(spk, z * ppg_mask, source)
+        return o

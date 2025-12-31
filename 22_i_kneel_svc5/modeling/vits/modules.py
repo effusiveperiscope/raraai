@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from . import commons
+from modeling.vits import commons
 
 
 LRELU_SLOPE = 0.1
@@ -174,13 +174,6 @@ class WN(torch.nn.Module):
             res_skip_layer = torch.nn.Conv1d(hidden_channels, res_skip_channels, 1)
             res_skip_layer = torch.nn.utils.weight_norm(res_skip_layer, name="weight")
             self.res_skip_layers.append(res_skip_layer)
-
-    def freeze_layers(self, n):
-        for i in range(n):
-            for param in self.in_layers[i].parameters():
-                param.requires_grad = False
-            for param in self.res_skip_layers[i].parameters():
-                param.requires_grad = False
 
     def forward(self, x, x_mask, g=None, **kwargs):
         output = torch.zeros_like(x)

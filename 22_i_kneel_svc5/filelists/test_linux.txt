@@ -1,0 +1,4 @@
+/mnt/data/DataAugmentation/TestMe3/test_2_02.wav
+/mnt/data/DataAugmentation/TestMe3/test_2_04.wav
+/mnt/data/DataAugmentation/TestMe3/test_2_03.wav
+/mnt/data/DataAugmentation/TestMe3/test_2_01.wav

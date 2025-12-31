@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 class MyFeatures:
     def __init__(self, 
         device='cuda',
-        config='configs/base.yaml',
+        config='configs/base_linux.yaml',
         feats_to_extract : set[str] = {'whisper', 'spk', 'f0', 'spec', 'wave'},
         do_normalize=True):
         config = OmegaConf.load(config)

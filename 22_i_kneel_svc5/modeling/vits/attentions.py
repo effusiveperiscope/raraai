@@ -5,8 +5,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from . import commons
-from .modules import LayerNorm
+from modeling.vits import commons
+from modeling.vits.modules import LayerNorm
 
 
 class Encoder(nn.Module):
@@ -56,13 +56,6 @@ class Encoder(nn.Module):
                 )
             )
             self.norm_layers_2.append(LayerNorm(hidden_channels))
-
-    def freeze_layers(self, n): # freeze the first n layers
-        for i in range(n):
-            for param in self.attn_layers[i].parameters():
-                param.requires_grad = False
-            for param in self.ffn_layers[i].parameters():
-                param.requires_grad = False
 
     def forward(self, x, x_mask):
         attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)

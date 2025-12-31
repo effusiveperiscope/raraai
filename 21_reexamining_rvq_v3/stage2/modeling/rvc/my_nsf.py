@@ -297,6 +297,15 @@ class MyGeneratorNSF(torch.nn.Module):
 
         self.lrelu_slope = modules.LRELU_SLOPE
 
+    def freeze_layers(self, n):
+        for i in range(n):
+            for param in self.ups[i].parameters():
+                param.requires_grad = False
+            for param in self.noise_convs[i].parameters():
+                param.requires_grad = False
+            for param in self.har_convs[i].parameters():
+                param.requires_grad = False
+
     def forward(self, spk, x, f0, pitch_extras=None, perturb_scale=0.0):
         if pitch_extras is None:
             pitch_extras = {}
@@ -306,7 +315,6 @@ class MyGeneratorNSF(torch.nn.Module):
 
         # We don't actually need the noise from here
         har_source, _ = self.m_source(f0, self.upp) 
-
         har_source = rearrange(har_source, "b t 1 -> b 1 t") # This should be 0 at unvoiced parts anyways
 
         uv = f0 <= 0
@@ -333,7 +341,7 @@ class MyGeneratorNSF(torch.nn.Module):
                 x = F.leaky_relu(x, self.lrelu_slope)
                 x = ups(x)
 
-                # Resample noise source at every upsample
+                # Resample env at every upsample
                 noi_source = torch.randn_like(har_source)
 
                 noise_env = env[:, :, 2*i] # [B, T]

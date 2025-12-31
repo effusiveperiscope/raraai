@@ -29,7 +29,7 @@ import io
 
 logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
-CONFIG = 'configs/titan_linux.yaml' # ~! remember to update this
+CONFIG = 'configs/char_anchor.yaml' # ~! remember to update this
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
