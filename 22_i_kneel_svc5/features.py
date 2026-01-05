@@ -9,6 +9,7 @@ import librosa
 import io
 import soundfile as sf
 from omegaconf import OmegaConf
+from transformers import WhisperFeatureExtractor, WhisperModel
 
 class MyFeatures:
     def __init__(self):
@@ -18,12 +19,12 @@ class MyFeatures:
         self.hps = OmegaConf.load("./configs/base.yaml").data
 
         self.load_whisper()
-        self.load_hubert()
+        self.load_whisper_base()
         self.load_rmvpe()
         self.svc5_spk_model = SVC5SpeakerEncoder(device=device)
 
     def load_whisper(self):
-        print("loading whisper...")
+        print("loading whisper large...")
         checkpoint = torch.load("pretrain/whisper-large-v2.pt", 
             map_location="cpu", weights_only=False)
         dims = ModelDimensions(**checkpoint["dims"])
@@ -34,6 +35,29 @@ class MyFeatures:
         model.to(self.dtype)
         model.to(self.device)
         self.whisper_model = model
+
+    def load_whisper_base(self):
+        print("loading whisper base...")
+        whisper_model = 'openai/whisper-base'
+        self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model)
+        self.device = 'cuda'
+        self.model = WhisperModel.from_pretrained(whisper_model).to(self.device).half()
+        del self.model.decoder
+        self.model.eval()
+
+    def extract_whisper_base(self, wav_16k):
+        inputs = self.feature_extractor(
+            wav_16k, sampling_rate=16000, return_tensors="pt",
+            return_attention_mask=True
+        )
+        input_features = inputs.input_features.to(self.device).half()
+        with torch.no_grad():
+            encoder_outputs = self.model.encoder(input_features)
+            encoder_features = encoder_outputs.last_hidden_state
+            feature_len = inputs.attention_mask.sum(-1).item() / 2 # divide by 2 to get feature length
+            feature_len = int(feature_len)
+            encoder_features = encoder_features[:, :feature_len, :]
+        return encoder_features.squeeze(0)
 
     def extract_whisper(self, wav_16k):
         assert hasattr(self, "whisper_model")
@@ -93,7 +117,7 @@ class MyFeatures:
     def extract_features(self, wav, sr):
         wav_16k = librosa.resample(wav, orig_sr=sr, target_sr=16000)
         ppg = self.extract_whisper(wav_16k)
-        vec = self.extract_hubert(wav_16k)
+        vec = self.extract_whisper_base(wav_16k)
 
         f0, extras = self.extract_pitch(wav_16k)
         f0_inharm = torch.from_numpy(extras['inharmonic_confidence'])
@@ -117,7 +141,7 @@ class MyFeatures:
 
         return {
             'whisper': ppg,
-            'hubert': vec,
+            'whisper_base': vec,
             'f0': f0,
             'f0_inharm': f0_inharm,
             'f0_subharm': f0_subharm,

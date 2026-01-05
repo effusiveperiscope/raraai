@@ -36,7 +36,7 @@ class TextEncoder(nn.Module):
             p_dropout)
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, v, f0):
+    def forward(self, x, x_lengths, v, f0, noise_scale=1.0):
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
@@ -48,7 +48,7 @@ class TextEncoder(nn.Module):
         x = self.enc(x * x_mask, x_mask)
         stats = self.proj(x) * x_mask
         m, logs = torch.split(stats, self.out_channels, dim=1)
-        z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
+        z = (m + torch.randn_like(m) * torch.exp(logs) * noise_scale) * x_mask
         return z, m, logs, x_mask, x
 
 
@@ -203,10 +203,11 @@ class SynthesizerTrn(nn.Module):
         spk_preds = self.speaker_classifier(x)
         return audio, ids_slice, spec_mask, (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds
 
-    def infer(self, ppg, vec, pit, spk, ppg_l, pitch_extras=None):
+    def infer(self, ppg, vec, pit, spk, ppg_l, pitch_extras=None,
+            noise_scale=1.0):
         ppg = ppg + torch.randn_like(ppg) * 0.0001  # Perturbation
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg, ppg_l, vec, f0=f0_to_coarse(pit))
+            ppg, ppg_l, vec, f0=f0_to_coarse(pit), noise_scale=noise_scale)
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
         o = self.dec(spk, z * ppg_mask, f0=pit, pitch_extras=pitch_extras)
         return o

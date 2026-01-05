@@ -2,3 +2,4 @@ checkpoints
 data
 pretrain/*.pt*
 logs
+filelists

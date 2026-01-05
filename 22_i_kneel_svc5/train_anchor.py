@@ -3,13 +3,13 @@ import random
 from einops import rearrange
 from omegaconf import OmegaConf
 import pytorch_lightning as pl
+from pytorch_lightning.utilities.combined_loader import CombinedLoader
 import torch
 from modeling.vits import commons
 from modeling.vits.losses import kl_loss
 from modeling.vits.models import SynthesizerTrn
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from modeling.vits_decoder.discriminator import Discriminator
 from dataset import dataset
-from rvc_losses import feature_loss, discriminator_loss, generator_loss
 
 from vits_extend.stft_loss import STFTLoss
 from vits_extend.stft import TacotronSTFT
@@ -22,7 +22,7 @@ import ultimate_xc
 class TrainModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn,
-        net_d : MultiPeriodDiscriminatorV2,
+        net_d : Discriminator,
         config : OmegaConf):
         super().__init__()
         self.automatic_optimization = False
@@ -113,7 +113,7 @@ class TrainModule(pl.LightningModule):
                 spk = self.spk_index[key].to(self.dtype).to(self.device).unsqueeze(0)
 
                 out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len, pitch_extras=pitch_extras,
-                    noise_scale=0.35)
+                                    noise_scale=0.35)
 
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
@@ -127,6 +127,87 @@ class TrainModule(pl.LightningModule):
             self.logger.experiment.flush()
 
     def step(self, batch, batch_idx, is_train=True):
+
+        optim_g, optim_d = self.optimizers()
+        sched_g, sched_d = self.lr_schedulers()
+
+        hp = self.config
+        if random.random() < self.config.train.get('p_pit_extra', 0.5):
+            pitch_extras = None # unconditional
+
+
+        if 'anchor' in batch:
+            anchor = batch['anchor']
+            train = batch['train']
+            batch = anchor
+
+            # Anchor processing
+            for k, x in batch.items():
+                if k in {'whisper', 'hubert', 'f0',
+                    'f0_inharm', 'f0_subharm', 'f0_confidence', 'spec', 'spk'}:
+                    batch[k] = x.to(self.dtype).to(self.device)
+            ppg = batch['whisper']
+            ppg_len = batch['whisper_length']
+            vec = batch['hubert']
+            pit = batch['f0']
+            pitch_extras = {
+                'confidence': batch['f0_confidence'],
+                'subharmonic': batch['f0_subharm'],
+                'inharmonic': batch['f0_inharm']
+            }
+            spec = batch['spec']
+            spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
+            spec_len = batch['spec_length']
+            spk = batch['spk']
+            audio = batch['wave']
+
+            # generator
+            fake_audio, ids_slice, z_mask, \
+                (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds = self.net_g(
+                    ppg, vec, pit, spec, spk, ppg_len, spec_len, pitch_extras=pitch_extras)
+            audio = commons.slice_segments(
+                audio.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
+
+            # Kl Loss
+            loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
+            loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
+
+            # Spk Loss
+            spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
+                .to(self.device).fill_(1.0))
+
+            # Anchor gen loss
+            anchor_kl = loss_kl_f + loss_kl_r * 0.5
+            loss_g = (anchor_kl + spk_loss * 2) * hp.train.get('c_anchor', 0.5)
+            if loss_g.requires_grad:
+                optim_g.zero_grad()
+                self.manual_backward(loss_g)
+                optim_g.step()
+                sched_g.step()
+
+            # discriminator
+            disc_fake = self.net_d(fake_audio.detach())
+            disc_real = self.net_d(audio)
+
+            loss_d = 0.0
+            for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+                loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+                loss_d += torch.mean(torch.pow(score_fake, 2))
+            loss_d = (loss_d / len(disc_fake)) * hp.train.get('c_anchor', 0.5)
+            anchor_loss_d = loss_d
+            
+            # Anchor disc loss
+            if loss_d.requires_grad:
+                optim_d.zero_grad()
+                self.manual_backward(loss_d)
+                optim_d.step()
+                sched_d.step()
+
+            batch = train
+        else:
+            anchor_loss_d = None
+            anchor_kl = None
+
         for k, x in batch.items():
             if k in {'whisper', 'hubert', 'f0',
                 'f0_inharm', 'f0_subharm', 'f0_confidence', 'spec', 'spk'}:
@@ -145,13 +226,6 @@ class TrainModule(pl.LightningModule):
         spec_len = batch['spec_length']
         spk = batch['spk']
         audio = batch['wave']
-
-        optim_g, optim_d = self.optimizers()
-        sched_g, sched_d = self.lr_schedulers()
-
-        hp = self.config
-        if random.random() < self.config.train.get('p_pit_extra', 0.5):
-            pitch_extras = None # unconditional
 
         # generator
         fake_audio, ids_slice, z_mask, \
@@ -173,11 +247,20 @@ class TrainModule(pl.LightningModule):
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
         # Generator Loss
-        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
-        # score_loss
-        score_loss, _ = generator_loss(y_d_hat_r)
-        # feat_loss
-        feat_loss = feature_loss(fmap_r, fmap_g)
+        disc_fake = self.net_d(fake_audio)
+        score_loss = 0.0
+        for (_, score_fake) in disc_fake:
+            score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+        score_loss = score_loss / len(disc_fake)
+
+        # Feature Loss
+        disc_real = self.net_d(audio)
+        feat_loss = 0.0
+        for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+            for fake, real in zip(feat_fake, feat_real):
+                feat_loss += torch.mean(torch.abs(fake - real))
+        feat_loss = feat_loss / len(disc_fake)
+        feat_loss = feat_loss * 2
 
         # Kl Loss
         loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
@@ -192,9 +275,14 @@ class TrainModule(pl.LightningModule):
             optim_g.step()
             sched_g.step()
 
-        # Discriminator Loss
-        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
-        loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+        disc_fake = self.net_d(fake_audio.detach())
+        disc_real = self.net_d(audio)
+
+        loss_d = 0.0
+        for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+            loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+            loss_d += torch.mean(torch.pow(score_fake, 2))
+        loss_d = loss_d / len(disc_fake)
         
         if loss_d.requires_grad:
             optim_d.zero_grad()
@@ -204,7 +292,8 @@ class TrainModule(pl.LightningModule):
 
         return {'loss_g': loss_g, 'loss_d': loss_d, 'spk_loss': spk_loss, 
                 'mel_loss': mel_loss, 'stft_loss': stft_loss, 'score_loss': score_loss,
-                  'feat_loss': feat_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r}
+                  'feat_loss': feat_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r,
+                  'anchor_loss_d': anchor_loss_d, 'anchor_kl': anchor_kl}
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True)
@@ -241,7 +330,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--svc5_ckpt', type=str, default=None)
-    parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
 
@@ -253,15 +341,13 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    net_d = Discriminator(hp)
 
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
         state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
         load_state_dict_mismatch(net_g, state_dict)
-
-        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
-        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
         load_state_dict_mismatch(net_d, state_dict)
     elif args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
@@ -284,6 +370,7 @@ if __name__ == '__main__':
     print("Loading data...")
     train_dataset = dataset(config.train.train_filelist, is_train=True)
     val_dataset = dataset(config.train.val_filelist, is_train=False)
+    anchor_dataset = dataset(config.train.anchor_filelist, is_train=False)
     print("Creating dataloaders...")
     num_workers = config.train.get('num_workers', 4)
     train_dataloader = train_dataset.loader(
@@ -292,6 +379,10 @@ if __name__ == '__main__':
     val_dataloader = val_dataset.loader(
         batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, 
             persistent_workers=num_workers > 0)
+    anchor_dataloader = anchor_dataset.loader(
+        batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, 
+            persistent_workers=num_workers > 0
+    )
     print("Done")
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
@@ -322,4 +413,6 @@ if __name__ == '__main__':
         #val_check_interval=2,
         log_every_n_steps=config.train.get('log_interval', 50),
     )
-    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
+    trainer.fit(training_module, CombinedLoader(
+        {'train': train_dataloader, 'anchor': anchor_dataloader},
+        mode='max_size_cycle'), val_dataloader, ckpt_path=args.resume_from)
