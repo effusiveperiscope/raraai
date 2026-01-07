@@ -1,3 +1,9 @@
+import warnings
+import librosa
+import logging
+warnings.filterwarnings('error', category=RuntimeWarning)
+warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
+logging.getLogger('numba').setLevel(logging.WARNING)
 import itertools
 import random
 from einops import rearrange
@@ -165,7 +171,11 @@ class TrainModule(pl.LightningModule):
 
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
-        mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
+        try:
+            mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
+        except AssertionError:
+            print("mel_real error, skip") # some audio triggers this for some reason, but not most
+            return None
         mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
 
         # multi-resolution stft loss
@@ -175,7 +185,7 @@ class TrainModule(pl.LightningModule):
         # Generator Loss
         y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
         # score_loss
-        score_loss, _ = generator_loss(y_d_hat_r)
+        score_loss, _ = generator_loss(y_d_hat_g) # oops lmao
         # feat_loss
         feat_loss = feature_loss(fmap_r, fmap_g)
 
@@ -242,6 +252,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
+    parser.add_argument('--prior_ckpt', type=str, default=None)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
 
@@ -255,15 +266,7 @@ if __name__ == '__main__':
     )
     net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
 
-    if args.svc5_ckpt is not None:
-        print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
-        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
-        load_state_dict_mismatch(net_g, state_dict)
-
-        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
-        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
-        load_state_dict_mismatch(net_d, state_dict)
-    elif args.resume_from is not None:
+    if args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
@@ -274,6 +277,18 @@ if __name__ == '__main__':
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+    if args.svc5_ckpt is not None:
+        print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
+        load_state_dict_mismatch(net_g, state_dict)
+    if args.rvc_disc_ckpt is not None:
+        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
+        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
+        load_state_dict_mismatch(net_d, state_dict)
+    if args.prior_ckpt is not None:
+        print("Loading prior checkpoint: {}".format(args.prior_ckpt))
+        state_dict = torch.load(args.prior_ckpt, map_location='cpu', weights_only=False)['state_dict']
+        load_submodule_prefix(net_g.enc_p, 'net_g.enc_p.', state_dict)
 
     training_module = TrainModule(
         net_g=net_g, net_d=net_d, config=config)

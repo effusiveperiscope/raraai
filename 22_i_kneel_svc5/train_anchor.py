@@ -1,3 +1,9 @@
+import warnings
+import librosa
+import logging
+warnings.filterwarnings('error', category=RuntimeWarning)
+warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
+logging.getLogger('numba').setLevel(logging.WARNING)
 import itertools
 import random
 from einops import rearrange
@@ -8,7 +14,7 @@ import torch
 from modeling.vits import commons
 from modeling.vits.losses import kl_loss
 from modeling.vits.models import SynthesizerTrn
-from modeling.vits_decoder.discriminator import Discriminator
+from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
 from dataset import dataset
 
 from vits_extend.stft_loss import STFTLoss
@@ -239,7 +245,11 @@ class TrainModule(pl.LightningModule):
 
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
-        mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
+        try:
+            mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
+        except AssertionError:
+            print("mel_real error, skip") # some audio triggers this for some reason, but not most
+            return None
         mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
 
         # multi-resolution stft loss
@@ -330,6 +340,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--svc5_ckpt', type=str, default=None)
+    parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
 
@@ -341,15 +352,9 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = Discriminator(hp)
+    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
 
-    if args.svc5_ckpt is not None:
-        print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
-        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
-        load_state_dict_mismatch(net_g, state_dict)
-        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
-        load_state_dict_mismatch(net_d, state_dict)
-    elif args.resume_from is not None:
+    if args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
     elif args.transfer_from is not None:
         print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
@@ -360,6 +365,14 @@ if __name__ == '__main__':
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+    if args.svc5_ckpt is not None:
+        print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
+        load_state_dict_mismatch(net_g, state_dict)
+    if args.rvc_disc_ckpt is not None:
+        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
+        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
+        load_state_dict_mismatch(net_d, state_dict)
 
     training_module = TrainModule(
         net_g=net_g, net_d=net_d, config=config)
