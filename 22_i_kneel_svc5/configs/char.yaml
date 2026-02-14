@@ -1,4 +1,7 @@
-exp_name: base_v3
+# 2 try lower disc lr
+# 3 freeze decoder, reduce prior encoder freeze to 2
+# 5 higher lr?
+exp_name: applejack_sing5
 data:
   filter_length: 1536
   hop_length: 480
@@ -69,29 +72,30 @@ train:
   c_anchor: 0.3
   epochs: 602
   eps: 1e-7
-  lr: 5e-5
+  lr: 1e-4
+  disc_lr_factor: 0.2
   lr_decay: 0.999875
   model: sovits
   port: 8001
   seed: 1234
 
   save_interval: null
-  val_interval: 1
-  test_interval: 1
+  val_interval: 20
+  test_interval: 20
   keep_ckpts: 2
   log_dir: logs
-  train_filelist: data/base/train.txt
-  val_filelist: data/base/val.txt
+  train_filelist: data/applejack_sing/train.txt
+  val_filelist: data/applejack_sing/val.txt
   test_filelist: data/test/val.txt
-  anchor_filelist: data/base/train.txt
-  spk_index: data/base/sid_avgs.pt
+  anchor_filelist: data/applejack_sing/train.txt
+  spk_index: data/applejack_sing/sid_avgs.pt
+  max_steps: 300000
 
   test_sid: 0
   test_transpose: 12
 
   enc_p_freeze_n: 3
-
-  max_steps: 3e7
+  freeze_decoder: False
 
 vits:
   filter_channels: 640

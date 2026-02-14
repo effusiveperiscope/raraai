@@ -9,7 +9,8 @@ import argparse
 from tqdm import tqdm
 
 def process_filelist(filelist_path,
-    val_fraction=0.05, output_dir='data/preprocessed', shuffle_seed=42):
+    val_fraction=0.05, output_dir='data/preprocessed', shuffle_seed=42,
+    skip_if_one_exists=False):
 
     with open(filelist_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
@@ -50,6 +51,13 @@ def process_filelist(filelist_path,
         wav, sr = librosa.load(line, sr=48000)
         savepaths = []
         try:
+
+            expected_keys = extractor.expected_keys()
+            if all(os.path.exists(os.path.join(output_dir,
+                os.path.basename(base_line) + '.' + key)) for key in expected_keys) and skip_if_one_exists:
+                print('File already exists, skipping...')
+                return
+
             feats = extractor.extract_features(wav, sr)
             for key, value in feats.items():
                 savepath = os.path.join(output_dir,

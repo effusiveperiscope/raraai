@@ -3,3 +3,5 @@ data
 pretrain/*.pt*
 logs
 filelists
+recordings
+outputs

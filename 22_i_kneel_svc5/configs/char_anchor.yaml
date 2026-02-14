@@ -1,4 +1,21 @@
-exp_name: base_v3
+# 1
+# Instead of freezing prior use anchor set to regularize KL.
+# No discriminator regularization this time
+
+# 2 
+# Only use reverse KL (based on prior)
+# Lower c_anchor
+# Reduce anchor dataset significantly
+
+# 3
+# Different step scale for anchor 
+
+# 4
+# Use same set as 2
+
+# 5
+# Remove spk from anchor task
+exp_name: applejack_anchor_5
 data:
   filter_length: 1536
   hop_length: 480
@@ -66,32 +83,31 @@ train:
   c_kl: 0.2
   c_mel: 1.0
   c_stft: 9
-  c_anchor: 0.3
+  c_anchor: 0.2
   epochs: 602
   eps: 1e-7
   lr: 5e-5
   lr_decay: 0.999875
+  disc_lr_factor: 0.5
   model: sovits
   port: 8001
   seed: 1234
 
   save_interval: null
   val_interval: 1
-  test_interval: 1
   keep_ckpts: 2
   log_dir: logs
-  train_filelist: data/base/train.txt
-  val_filelist: data/base/val.txt
+  train_filelist: data/applejack/train.txt
+  val_filelist: data/applejack/val.txt
   test_filelist: data/test/val.txt
-  anchor_filelist: data/base/train.txt
-  spk_index: data/base/sid_avgs.pt
+  anchor_filelist: data/anchor_sing/train.txt
+  spk_index: data/applejack/sid_avgs.pt
+  max_steps: 300000
 
   test_sid: 0
   test_transpose: 12
 
-  enc_p_freeze_n: 3
-
-  max_steps: 3e7
+  anchor_step_interval: 2
 
 vits:
   filter_channels: 640

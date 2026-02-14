@@ -57,6 +57,13 @@ class Encoder(nn.Module):
             )
             self.norm_layers_2.append(LayerNorm(hidden_channels))
 
+    def freeze_layers(self, n): # freeze the first n layers
+        for i in range(n):
+            for param in self.attn_layers[i].parameters():
+                param.requires_grad = False
+            for param in self.ffn_layers[i].parameters():
+                param.requires_grad = False
+
     def forward(self, x, x_mask):
         attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
         x = x * x_mask

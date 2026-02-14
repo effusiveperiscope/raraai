@@ -151,6 +151,9 @@ class MyFeatures:
             'wave': torch.from_numpy(wav)
         }
 
+    def expected_keys(self):
+        return ['whisper', 'whisper_base', 'f0', 'f0_inharm', 'f0_subharm', 'f0_confidence', 'spec', 'spk', 'wave']
+
 if __name__ == "__main__":
     feats = MyFeatures()
     wav, sr = librosa.load("test.wav", sr=48000)

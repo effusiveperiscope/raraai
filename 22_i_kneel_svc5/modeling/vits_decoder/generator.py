@@ -252,6 +252,17 @@ class Generator(torch.nn.Module):
         self.ups.apply(init_weights)
 
         self.upp = math.prod(hp.gen.upsample_rates)
+    
+    def freeze_layers(self, n):
+        if n is None:
+            n = len(self.ups)
+        for i in range(n):
+            for param in self.ups[i].parameters():
+                param.requires_grad = False
+            for param in self.noise_convs[i].parameters():
+                param.requires_grad = False
+            for param in self.har_convs[i].parameters():
+                param.requires_grad = False
 
     def forward(self, spk, x, f0, pitch_extras=None):
         # Perturbation
