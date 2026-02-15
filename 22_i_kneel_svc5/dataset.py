@@ -46,6 +46,7 @@ def dataset(filelist, is_train : bool):
         is_train=is_train
     )
 
+
 def dataset_f0(filelist, is_train : bool = True):
     lines = []
     with open(filelist, encoding='utf-8') as f:
@@ -57,7 +58,7 @@ def dataset_f0(filelist, is_train : bool = True):
             dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
         ],
         actions=[
-            dt.PadGroup(fields=['f0'], dims=[0], values=[0])
+            dt.PadGroup(fields=['f0'], dims=[0], values=[0], to_multiple=[2])
         ],
         is_train=is_train
     )
