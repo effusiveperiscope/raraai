@@ -84,7 +84,7 @@ def process_filelist(filelist_path,
         val_lines = new_lines[-val_size:]
         train_lines = new_lines[:-val_size]
     else:
-        val_lines = []
+        val_lines = [new_lines[0]] # ensure at least one item in val for checkpointing
         train_lines = new_lines
 
     print('Saving sid_avgs...')
