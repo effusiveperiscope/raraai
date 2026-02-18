@@ -15,7 +15,13 @@
 
 # 5
 # Remove spk from anchor task
-exp_name: applejack_anchor_5
+
+# 6
+# use base v3 model
+
+# 7
+# use both forward and reverse kl
+exp_name: applejack_sing_anchor_6
 data:
   filter_length: 1536
   hop_length: 480
@@ -97,10 +103,10 @@ train:
   val_interval: 1
   keep_ckpts: 2
   log_dir: logs
-  train_filelist: data/applejack/train.txt
-  val_filelist: data/applejack/val.txt
+  train_filelist: data/applejack_sing/train.txt
+  val_filelist: data/applejack_sing/val.txt
   test_filelist: data/test/val.txt
-  anchor_filelist: data/anchor_sing/train.txt
+  anchor_filelist: data/anchor_sing_tiny/train.txt
   spk_index: data/applejack/sid_avgs.pt
   max_steps: 300000
 

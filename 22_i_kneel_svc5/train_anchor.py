@@ -14,9 +14,8 @@ import torch
 from modeling.vits import commons
 from modeling.vits.losses import kl_loss
 from modeling.vits.models import SynthesizerTrn
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from modeling.vits_decoder.discriminator import Discriminator
 from dataset import dataset
-from rvc_losses import feature_loss, discriminator_loss, generator_loss
 
 from vits_extend.stft_loss import STFTLoss
 from vits_extend.stft import TacotronSTFT
@@ -29,7 +28,7 @@ import ultimate_xc
 class TrainModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn,
-        net_d : MultiPeriodDiscriminatorV2,
+        net_d : Discriminator,
         config : OmegaConf):
         super().__init__()
         self.automatic_optimization = False
@@ -65,7 +64,7 @@ class TrainModule(pl.LightningModule):
             eps=self.config.train.eps)
         disc_optim = torch.optim.AdamW(
             self.net_d.parameters(),
-            lr=self.config.train.lr,
+            lr=self.config.train.lr * self.config.train.get('disc_lr_factor', 1.0),
             betas=self.config.train.betas,
             eps=self.config.train.eps)
         gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -82,6 +81,12 @@ class TrainModule(pl.LightningModule):
 
     def on_train_start(self):
         self.test()
+
+    def on_train_epoch_start(self):
+        self.net_g.enc_p.enc.freeze_layers(self.config.train.get('enc_p_freeze_n', 0))
+        if self.config.train.get('freeze_decoder', False):
+            self.net_g.dec.freeze_layers(n=None)
+        return super().on_train_epoch_start()
 
     def on_train_epoch_end(self):
         self.test()
@@ -178,10 +183,11 @@ class TrainModule(pl.LightningModule):
                 audio.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
 
             # Kl Loss
+            loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
             loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
 
             # Anchor gen loss
-            anchor_kl = loss_kl_r
+            anchor_kl = loss_kl_r + loss_kl_f
             anchor_loss_g = (anchor_kl) * hp.train.get('c_anchor', 0.5)
 
             batch = train
@@ -211,6 +217,9 @@ class TrainModule(pl.LightningModule):
         spk = batch['spk']
         audio = batch['wave']
 
+        if random.random() < self.config.train.get('p_pit_extra', 0.5):
+            pitch_extras = None # unconditional
+
         # generator
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r), spk_preds = self.net_g(
@@ -235,11 +244,20 @@ class TrainModule(pl.LightningModule):
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
         # Generator Loss
-        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
-        # score_loss
-        score_loss, _ = generator_loss(y_d_hat_g) # oops lmao
-        # feat_loss
-        feat_loss = feature_loss(fmap_r, fmap_g)
+        disc_fake = self.net_d(fake_audio)
+        score_loss = 0.0
+        for (_, score_fake) in disc_fake:
+            score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+        score_loss = score_loss / len(disc_fake)
+
+        # Feature Loss
+        disc_real = self.net_d(audio)
+        feat_loss = 0.0
+        for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+            for fake, real in zip(feat_fake, feat_real):
+                feat_loss += torch.mean(torch.abs(fake - real))
+        feat_loss = feat_loss / len(disc_fake)
+        feat_loss = feat_loss * 2
 
         # Kl Loss
         loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
@@ -255,8 +273,13 @@ class TrainModule(pl.LightningModule):
             sched_g.step()
 
         # Discriminator Loss
-        y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
-        loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+        disc_fake = self.net_d(fake_audio.detach())
+        disc_real = self.net_d(audio)
+        loss_d = 0.0
+        for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+            loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+            loss_d += torch.mean(torch.pow(score_fake, 2))
+        loss_d = loss_d / len(disc_fake)
         
         if loss_d.requires_grad:
             optim_d.zero_grad()
@@ -304,7 +327,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--svc5_ckpt', type=str, default=None)
-    parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
+    parser.add_argument('--prior_ckpt', type=str, default=None)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
 
@@ -316,7 +339,7 @@ if __name__ == '__main__':
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    net_d = Discriminator(hp=hp)
 
     if args.resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
@@ -331,12 +354,13 @@ if __name__ == '__main__':
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
     if args.svc5_ckpt is not None:
         print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
-        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
-        load_state_dict_mismatch(net_g, state_dict)
-    if args.rvc_disc_ckpt is not None:
-        print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
-        state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
-        load_state_dict_mismatch(net_d, state_dict)
+        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')
+        load_state_dict_mismatch(net_g, state_dict['model_g'])
+        load_state_dict_mismatch(net_d, state_dict['model_d'])
+    if args.prior_ckpt is not None:
+        print("Loading prior checkpoint: {}".format(args.prior_ckpt))
+        state_dict = torch.load(args.prior_ckpt, map_location='cpu', weights_only=False)['state_dict']
+        load_submodule_prefix(net_g.enc_p, 'net_g.enc_p.', state_dict)
 
     training_module = TrainModule(
         net_g=net_g, net_d=net_d, config=config)

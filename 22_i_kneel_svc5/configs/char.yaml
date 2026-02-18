@@ -1,7 +1,8 @@
 # 2 try lower disc lr
 # 3 freeze decoder, reduce prior encoder freeze to 2
 # 5 higher lr?
-exp_name: applejack_sing5
+# 6 base v3, freeze to 3
+exp_name: applejack_sing6
 data:
   filter_length: 1536
   hop_length: 480
@@ -72,7 +73,7 @@ train:
   c_anchor: 0.3
   epochs: 602
   eps: 1e-7
-  lr: 1e-4
+  lr: 5e-5
   disc_lr_factor: 0.2
   lr_decay: 0.999875
   model: sovits

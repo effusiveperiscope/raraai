@@ -2,6 +2,10 @@ import pdb
 import sys
 import traceback
 from PyQt5.QtCore import pyqtRemoveInputHook
+def custom_pdb():
+    pyqtRemoveInputHook()
+    import pdb; pdb.set_trace()
+
 def custom_excepthook(exc_type, exc_value, exc_traceback):
     """
     Custom exception hook that prints the exception information

@@ -1,5 +1,6 @@
 from einops import rearrange
 import ultimate_xc
+from ultimate_xc import custom_pdb
 import os
 from PyQt5.QtCore import pyqtRemoveInputHook
 from PyQt5.QtWidgets import QApplication, QMainWindow
@@ -141,10 +142,10 @@ class MainWindow(QMainWindow):
         if len(prefill_files) > 0:
             if len(prefill_files) > 1:
                 logger.warning('Only using first prefill file')
-            prefill_data, _ = librosa.load(prefill_files[0], sr=16000)
-            prefill_len_16k = prefill_data.shape[0]
+            prefill_data, _ = librosa.load(prefill_files[0], sr=48000)
+            prefill_len = prefill_data.shape[0]
         else:
-            prefill_len_16k = 0
+            prefill_len = 0
 
         if len(data['audio_files']['spk_files']) > 0:
             if len(data['audio_files']['spk_files']) > 1:
@@ -221,7 +222,7 @@ class MainWindow(QMainWindow):
                     noise_scale=data['noise_scale'])
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
-                o_np = o_np[int(prefill_len_16k * (48000/16000)):]
+                o_np = o_np[int(prefill_len):]
                 out.append(AudioResult(
                     label=os.path.basename(filepath)+data['model_labels'][0],
                     audio=o_np))
