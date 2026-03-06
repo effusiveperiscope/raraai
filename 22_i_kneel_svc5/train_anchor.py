@@ -57,11 +57,27 @@ class TrainModule(pl.LightningModule):
         self.spk_index = torch.load(self.config.train.spk_index)
 
     def configure_optimizers(self):
+        # collect all prior encoder param ids
+        enc_p_params = dict(self.net_g.enc_p.named_parameters())
+        # separate out the rel embedding params
+        rel_emb_names = {name for name, _ in self.net_g.enc_p.named_parameters() 
+                        if 'emb_rel' in name}
+
+        enc_p_rel = [p for name, p in enc_p_params.items() if name in rel_emb_names]
+        enc_p_other = [p for name, p in enc_p_params.items() if name not in rel_emb_names]
+
+        enc_p_ids = {id(p) for p in enc_p_params.values()}
+        rest = [p for p in self.net_g.parameters() if id(p) not in enc_p_ids]
+
         gen_optim = torch.optim.AdamW(
-            self.net_g.parameters(), 
-            lr=self.config.train.lr,
+            [
+                {'params': enc_p_rel,   'lr': 0.0},
+                {'params': enc_p_other, 'lr': self.config.train.lr * 0.3},
+                {'params': rest,        'lr': self.config.train.lr},
+            ],
             betas=self.config.train.betas,
-            eps=self.config.train.eps)
+            eps=self.config.train.eps
+        )
         disc_optim = torch.optim.AdamW(
             self.net_d.parameters(),
             lr=self.config.train.lr * self.config.train.get('disc_lr_factor', 1.0),
@@ -186,17 +202,20 @@ class TrainModule(pl.LightningModule):
             loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
             loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
 
+            # Mel Loss
+            mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
+            mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
+            mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
+
             # Anchor gen loss
-            anchor_kl = loss_kl_r + loss_kl_f
-            anchor_loss_g = (anchor_kl) * hp.train.get('c_anchor', 0.5)
+            anchor_loss_g = (loss_kl_f + loss_kl_r + mel_loss) * hp.train.get('c_anchor', 0.5) 
 
             batch = train
         elif 'anchor' in batch:
             batch = batch['train']
             anchor_loss_g = 0
-            anchor_kl = None
         else:
-            anchor_kl = None
+            anchor_loss_g = 0
 
         for k, x in batch.items():
             if k in {'whisper', 'hubert', 'f0',
@@ -232,11 +251,7 @@ class TrainModule(pl.LightningModule):
 
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
-        try:
-            mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
-        except AssertionError:
-            print("mel_real error, skip") # some audio triggers this for some reason, but not most
-            return None
+        mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
         mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
 
         # multi-resolution stft loss
@@ -264,7 +279,7 @@ class TrainModule(pl.LightningModule):
         loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
 
         # Loss
-        loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + loss_kl_r * 0.5 + spk_loss * 2 + anchor_loss_g
+        loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + loss_kl_r * 1.5 + spk_loss * 2 + anchor_loss_g
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -290,7 +305,7 @@ class TrainModule(pl.LightningModule):
         return {'loss_g': loss_g, 'loss_d': loss_d, 'spk_loss': spk_loss, 
                 'mel_loss': mel_loss, 'stft_loss': stft_loss, 'score_loss': score_loss,
                   'feat_loss': feat_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r,
-                  'anchor_kl': anchor_kl}
+                  'anchor_loss_g': anchor_loss_g}
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx, is_train=True)
@@ -319,10 +334,7 @@ class TrainModule(pl.LightningModule):
 
         return val_loss
 
-if __name__ == '__main__':
-    import torch.multiprocessing as mp
-    mp.set_start_method('spawn', force=True) # This is needed on Linux
-
+def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
@@ -333,6 +345,17 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
+    return config, args
+
+def train(config,
+    resume_from=None,
+    transfer_from=None,
+    svc5_ckpt=None,
+    prior_ckpt=None):
+    hp = config
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True) # This is needed on Linux
+
     hp = config
     net_g = SynthesizerTrn(
         spec_channels=hp.data.filter_length // 2 + 1,
@@ -341,25 +364,25 @@ if __name__ == '__main__':
     )
     net_d = Discriminator(hp=hp)
 
-    if args.resume_from is not None:
-        print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
-    elif args.transfer_from is not None:
-        print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
-        state = torch.load(args.transfer_from, map_location='cpu', weights_only=False)['state_dict']
+    if resume_from is not None:
+        print('Resuming from lightning checkpoint: {}'.format(resume_from))
+    elif transfer_from is not None:
+        print('Transferring from lightning checkpoint: {}'.format(transfer_from))
+        state = torch.load(transfer_from, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
         load_submodule_prefix(net_d, 'net_d.', state)
     else:
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-    if args.svc5_ckpt is not None:
-        print("Loading SVC5 checkpoint: {}".format(args.svc5_ckpt))
-        state_dict = torch.load(args.svc5_ckpt, map_location='cpu')
+    if svc5_ckpt is not None:
+        print("Loading SVC5 checkpoint: {}".format(svc5_ckpt))
+        state_dict = torch.load(svc5_ckpt, map_location='cpu')
         load_state_dict_mismatch(net_g, state_dict['model_g'])
         load_state_dict_mismatch(net_d, state_dict['model_d'])
-    if args.prior_ckpt is not None:
-        print("Loading prior checkpoint: {}".format(args.prior_ckpt))
-        state_dict = torch.load(args.prior_ckpt, map_location='cpu', weights_only=False)['state_dict']
+    if prior_ckpt is not None:
+        print("Loading prior checkpoint: {}".format(prior_ckpt))
+        state_dict = torch.load(prior_ckpt, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g.enc_p, 'net_g.enc_p.', state_dict)
 
     training_module = TrainModule(
@@ -416,4 +439,15 @@ if __name__ == '__main__':
     )
     trainer.fit(training_module, CombinedLoader(
         {'train': train_dataloader, 'anchor': anchor_dataloader},
-        mode='max_size_cycle'), val_dataloader, ckpt_path=args.resume_from)
+        mode='max_size_cycle'), val_dataloader, ckpt_path=resume_from)
+
+if __name__ == '__main__':
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True) # This is needed on Linux
+
+    config, args = parse_args()
+    train(config,
+        resume_from=args.resume_from,
+        transfer_from=args.transfer_from,
+        svc5_ckpt=args.svc5_ckpt,
+        prior_ckpt=args.prior_ckpt)

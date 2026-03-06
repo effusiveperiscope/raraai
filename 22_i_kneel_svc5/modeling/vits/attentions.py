@@ -57,12 +57,24 @@ class Encoder(nn.Module):
             )
             self.norm_layers_2.append(LayerNorm(hidden_channels))
 
+    
+    def freeze_repe(self, do_freeze=False):
+        for layer in self.attn_layers:
+            layer : MultiHeadAttention
+            layer.freeze_repe(do_freeze)
+
     def freeze_layers(self, n): # freeze the first n layers
+        m = len(self.attn_layers)
         for i in range(n):
             for param in self.attn_layers[i].parameters():
                 param.requires_grad = False
             for param in self.ffn_layers[i].parameters():
                 param.requires_grad = False
+        for i in range(n, m):
+            for param in self.attn_layers[i].parameters():
+                param.requires_grad = True
+            for param in self.ffn_layers[i].parameters():
+                param.requires_grad = True
 
     def forward(self, x, x_mask):
         attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
@@ -218,6 +230,10 @@ class MultiHeadAttention(nn.Module):
             with torch.no_grad():
                 self.conv_k.weight.copy_(self.conv_q.weight)
                 self.conv_k.bias.copy_(self.conv_q.bias)
+
+    def freeze_repe(self, do_freeze=False):
+        self.emb_rel_k.requires_grad = not do_freeze
+        self.emb_rel_v.requires_grad = not do_freeze
 
     def forward(self, x, c, attn_mask=None):
         q = self.conv_q(x)

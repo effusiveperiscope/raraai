@@ -1,45 +1,4 @@
-#p 1
-# Instead of freezing prior use anchor set to regularize KL.
-# No discriminator regularization this time
-
-# 2 
-# Only use reverse KL (based on prior)
-# Lower c_anchor
-# Reduce anchor dataset significantly
-
-# 3
-# Different step scale for anchor 
-
-# 4
-# Use same set as 2
-
-# 5
-# Remove spk from anchor task
-
-# 6
-# use base v3 model
-
-# 7
-# use both forward and reverse kl
-
-# 8
-# same thing but don't stop training in the middle
-
-# 9
-# try mel loss
-
-# 10
-# try staged, revert to kl only
-
-# 11
-# use frozen repe + 0.3 prior lr + use mel (may have been bugged?)
-
-# 12
-# oops. only use spk now as we are only targeting resemblance
-
-# 13
-# use frozen repe + 0.2 prior lr + use mel
-exp_name: autumn_blaze_sing
+exp_name: acoustic_anchor
 data:
   filter_length: 1536
   hop_length: 480
@@ -118,16 +77,16 @@ train:
   seed: 1234
 
   save_interval: null
-  val_interval: 20
-  test_interval: 20
+  val_interval: 1
+  test_interval: 1
   keep_ckpts: 2
   log_dir: logs
-  train_filelist: data/autumn_blaze_sing/train.txt
-  val_filelist: data/autumn_blaze_sing/val.txt
+  train_filelist: data/titan/train.txt
+  val_filelist: data/titan/val.txt
   test_filelist: data/test/val.txt
   anchor_filelist: data/anchor_sing_tiny/train.txt
-  spk_index: data/autumn_blaze_sing/sid_avgs.pt
-  max_steps: 300000
+  spk_index: data/titan/sid_avgs.pt
+  max_steps: 300000000
 
   test_sid: 0
   test_transpose: 12

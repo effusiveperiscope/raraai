@@ -1,6 +1,6 @@
 import os
 import re
-from train import train
+from train_anchor import train
 from preprocess import process_filelist
 from omegaconf import OmegaConf
 
@@ -15,8 +15,8 @@ logging.getLogger('fsspec').setLevel(logging.WARNING)
 
 SOURCE_FILELIST_PATH = "/mnt/data/Code/MasterDataset/pony_enhanced/"
 TMP_FILELIST = "filelists/tmp.txt"
-CONFIG = "configs/char.yaml"
-TRANSFER_FROM = "pretrain/titan_last.ckpt"
+CONFIG = "configs/char_anchor.yaml"
+TRANSFER_FROM = "pretrain/base_v3.ckpt"
 
 def linux_filelist_line(line):
     if os.name == 'nt': return line

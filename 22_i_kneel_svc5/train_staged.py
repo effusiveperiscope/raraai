@@ -56,27 +56,11 @@ class TrainModule(pl.LightningModule):
         self.spk_index = torch.load(self.config.train.spk_index)
 
     def configure_optimizers(self):
-        # collect all prior encoder param ids
-        enc_p_params = dict(self.net_g.enc_p.named_parameters())
-        # separate out the rel embedding params
-        rel_emb_names = {name for name, _ in self.net_g.enc_p.named_parameters() 
-                        if 'emb_rel' in name}
-
-        enc_p_rel = [p for name, p in enc_p_params.items() if name in rel_emb_names]
-        enc_p_other = [p for name, p in enc_p_params.items() if name not in rel_emb_names]
-
-        enc_p_ids = {id(p) for p in enc_p_params.values()}
-        rest = [p for p in self.net_g.parameters() if id(p) not in enc_p_ids]
-
         gen_optim = torch.optim.AdamW(
-            [
-                {'params': enc_p_rel,   'lr': 0.0},
-                {'params': enc_p_other, 'lr': self.config.train.lr * 0.3},
-                {'params': rest,        'lr': self.config.train.lr},
-            ],
+            self.net_g.parameters(), 
+            lr=self.config.train.lr,
             betas=self.config.train.betas,
-            eps=self.config.train.eps
-        )
+            eps=self.config.train.eps)
         disc_optim = torch.optim.AdamW(
             self.net_d.parameters(),
             lr=self.config.train.lr * self.config.train.get('disc_lr_factor', 1.0),
@@ -98,9 +82,15 @@ class TrainModule(pl.LightningModule):
         self.test()
 
     def on_train_epoch_start(self):
-        self.net_g.enc_p.enc.freeze_layers(self.config.train.get('enc_p_freeze_n', 0))
-        if self.config.train.get('freeze_decoder', False):
-            self.net_g.dec.freeze_layers(n=None)
+        # my thinking was that the problem lies in the prior encoder, 
+        # so I offload the adaptation to the rest of the network 
+        # so that the encoder doesn't need to change as much
+        if self.global_step < self.config.train.get('stage2_steps'):
+            # stage 1. freeze prior encoder
+            self.net_g.enc_p.enc.freeze_layers(6)
+        else:
+            # stage 2. unfreeze
+            self.net_g.enc_p.enc.freeze_layers(0)
         return super().on_train_epoch_start()
 
     def on_train_epoch_end(self):
