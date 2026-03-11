@@ -398,12 +398,12 @@ if __name__ == '__main__':
 
         if args.codec_ckpt is not None:
             print("Loading codec checkpoint: {}".format(args.codec_ckpt))
-            state_dict = torch.load(args.codec_ckpt, map_location='cpu')['state_dict']
+            state_dict = torch.load(args.codec_ckpt, map_location='cpu', weights_only=False)['state_dict']
             load_submodule_prefix(codec, 'model.', state_dict)
 
         if args.rvc_disc_ckpt is not None:
             print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
-            state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu')['model']
+            state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu', weights_only=False)['model']
             load_state_dict_mismatch(net_d, state_dict)
 
     if args.reset_prior > 0:

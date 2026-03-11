@@ -57,7 +57,8 @@ class MainWindow(QMainWindow):
         ))
         self.setCentralWidget(gui.build())
 
-        my_feats = MyFeatures(feats_to_extract={'whisper', 'f0'})
+        my_feats = MyFeatures(
+            feats_to_extract={'whisper', 'f0'})
         self.my_feats = my_feats
         self.dtype = torch.bfloat16
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -240,8 +241,8 @@ class MainWindow(QMainWindow):
 
             with torch.no_grad():
                 o = self.net_g.infer(
-                    ppg_q=ppg_q,
-                    ppg=ppg_interp,
+                    ppg_q=ppg_q.to(self.dtype).to(self.device),
+                    ppg=ppg_interp.to(self.dtype).to(self.device),
                     pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
                     spk=spk_feats,
                     ppg_l=ppg_len,

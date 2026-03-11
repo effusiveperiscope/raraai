@@ -27,7 +27,7 @@ class TextEncoder(nn.Module):
         self.out_channels = out_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
 
-        bottleneck_dim = 128
+        bottleneck_dim = hidden_channels
         self.ppg_bottleneck = nn.Conv1d(in_channels, bottleneck_dim, kernel_size=5, padding=2)
         self.ppg_norm = nn.LayerNorm(bottleneck_dim)
         self.ppg_proj = nn.Conv1d(bottleneck_dim, hidden_channels, kernel_size=5, padding=2)
@@ -35,6 +35,10 @@ class TextEncoder(nn.Module):
             nn.Linear(1, bottleneck_dim),
             nn.SiLU(),
             nn.Linear(bottleneck_dim, bottleneck_dim)
+        )
+        self.perturb_film = FiLMGenerator(
+            condition_dim=bottleneck_dim,
+            target_dim=bottleneck_dim
         )
 
 
@@ -73,10 +77,12 @@ class TextEncoder(nn.Module):
         x2 = self.ppg_norm(rearrange(x2, "b c t -> b t c"))
 
         if type(perturb_scale) == float:
-            perturb_scale = torch.tensor([perturb_scale]).to(x2.device)
+            perturb_scale = torch.tensor([perturb_scale]).to(x2.device).to(x2.dtype)
         perturb_emb = self.perturb_embed(perturb_scale.view(-1, 1).to(x2.dtype))
 
-        x2 = x2 + torch.randn_like(x2) * perturb_scale + perturb_emb.unsqueeze(1)
+        x2 = x2 + (torch.randn_like(x2) * perturb_scale).to(x2.dtype)
+        gamma, beta = self.perturb_film(perturb_emb)
+        x2 = gamma * x2 + beta
         x2 = self.ppg_proj(rearrange(x2, "b t c -> b c t")) 
 
         x = x + x2

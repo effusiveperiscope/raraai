@@ -14,6 +14,7 @@ class MyFeatures:
     def __init__(self, 
         device='cuda',
         config='configs/base_linux.yaml',
+        whisper = 'openai/whisper-small',
         feats_to_extract : set[str] = {'whisper', 'spk', 'f0', 'spec', 'wave'},
         do_normalize=True):
         config = OmegaConf.load(config)
@@ -21,7 +22,7 @@ class MyFeatures:
         self.expected_sample_rate=16000
 
         if 'whisper' in feats_to_extract:
-            whisper_model = 'openai/whisper-base'
+            whisper_model = whisper
             self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model)
             self.device = 'cuda'
             self.model = WhisperModel.from_pretrained(whisper_model).to(self.device).half()
