@@ -16,7 +16,7 @@ class MyFeatures:
         config='configs/base_linux.yaml',
         whisper = 'openai/whisper-small',
         feats_to_extract : set[str] = {'whisper', 'spk', 'f0', 'spec', 'wave'},
-        do_normalize=True):
+        do_normalize=False):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract
         self.expected_sample_rate=16000

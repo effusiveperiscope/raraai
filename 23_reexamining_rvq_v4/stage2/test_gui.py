@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
 
             with torch.no_grad():
                 o = self.net_g.infer(
-                    ppg_q=ppg_q_aug,
+                    ppg_zq=ppg_q_aug,
                     pit=pit.to(self.dtype).to(self.device).unsqueeze(0),
                     spk=spk_feats,
                     ppg_l=lens,

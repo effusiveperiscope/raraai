@@ -27,25 +27,20 @@ class TextEncoder(nn.Module):
         self.out_channels = out_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
 
-        bottleneck_dim = hidden_channels
-        self.ppg_bottleneck = nn.Conv1d(in_channels, bottleneck_dim, kernel_size=5, padding=2)
-        self.ppg_norm = nn.LayerNorm(bottleneck_dim)
-        self.ppg_proj = nn.Conv1d(bottleneck_dim, hidden_channels, kernel_size=5, padding=2)
-        self.perturb_embed = nn.Sequential(
-            nn.Linear(1, bottleneck_dim),
-            nn.SiLU(),
-            nn.Linear(bottleneck_dim, bottleneck_dim)
-        )
-        self.perturb_film = FiLMGenerator(
-            condition_dim=bottleneck_dim,
-            target_dim=bottleneck_dim
-        )
-
-
         self.pit = PitchConditioner2(hidden_channels)
 
         self.spk_emb = nn.Embedding(max_spk_count, hidden_channels)
         self.spk_adapter = FiLMGenerator(
+            condition_dim=hidden_channels,
+            target_dim=hidden_channels
+        )
+
+        self.alpha_embed = nn.Sequential(
+            nn.Linear(1, hidden_channels),
+            nn.SiLU(),
+            nn.Linear(hidden_channels, hidden_channels)
+        )
+        self.alpha_film = FiLMGenerator(
             condition_dim=hidden_channels,
             target_dim=hidden_channels
         )
@@ -62,9 +57,8 @@ class TextEncoder(nn.Module):
     def reset_layers(self, n):
         self.enc.reset_layers(n)
 
-    def forward(self, ppg_q, ppg, x_lengths, f0, pitch_extras=None, sid=None,
-        perturb_scale=1.0, noise_scale=1.0): 
-        # higher perturb scale = less specific ppg information = greater speaker conversion
+    def forward(self, ppg_q, x_lengths, f0, pitch_extras=None, sid=None,
+        alpha_scale=1.0, noise_scale=1.0): 
         x = rearrange(ppg_q, "b t c -> b c t")  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
@@ -72,20 +66,14 @@ class TextEncoder(nn.Module):
 
         x = self.pre(x) * x_mask
 
-        x2 = self.ppg_bottleneck(rearrange(ppg, "b t c -> b c t"))
-        x2 = F.gelu(x2)
-        x2 = self.ppg_norm(rearrange(x2, "b c t -> b t c"))
-
-        if type(perturb_scale) == float:
-            perturb_scale = torch.tensor([perturb_scale]).to(x2.device).to(x2.dtype)
-        perturb_emb = self.perturb_embed(perturb_scale.view(-1, 1).to(x2.dtype))
-
-        x2 = x2 + (torch.randn_like(x2) * perturb_scale).to(x2.dtype)
-        gamma, beta = self.perturb_film(perturb_emb)
-        x2 = gamma * x2 + beta
-        x2 = self.ppg_proj(rearrange(x2, "b t c -> b c t")) 
-
-        x = x + x2
+        if type(alpha_scale) == float:
+            alpha_scale = torch.tensor([alpha_scale]).to(x.device).to(x.dtype)
+        gamma, beta = self.alpha_film(self.alpha_embed(
+            alpha_scale.view(-1, 1)
+        ))
+        x = rearrange(x, "b c t -> b t c")
+        x = x + x * gamma + beta
+        x = rearrange(x, "b t c -> b c t")
 
         if pitch_extras is None:
             pitch_extras = {}
@@ -252,11 +240,14 @@ class SynthesizerTrn(nn.Module):
         self.flow.freeze_layers(flow_n)
         self.dec.freeze_layers(dec_n)
 
-    def forward(self, ppg_q, ppg, pit, spec, spk, ppg_l, spec_l, sid, perturb_scale=1.0, pitch_extras=None):
+    def forward(self, ppg_zq, ppg_z, pit, spec, spk, ppg_l, spec_l, sid, 
+        ppg_alpha=1.0, # 1.0 = FULLY quantized, 0.0 = not quantized
+        pitch_extras=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
+        ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg_q, ppg, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid, 
-                perturb_scale=perturb_scale)
+            ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
+            alpha_scale=ppg_alpha)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
 
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
@@ -274,12 +265,13 @@ class SynthesizerTrn(nn.Module):
         return audio, ids_slice, spec_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r)
 
-    def infer(self, ppg_q, ppg, pit, spk, ppg_l, sid, noise_scale=0.3, 
-            perturb_scale=1.0, pitch_extras=None):
+    def infer(self, ppg_zq, ppg_z, pit, spk, ppg_l, sid, noise_scale=0.3, 
+            ppg_lerp=1.0, pitch_extras=None):
+        ppg_use = (ppg_lerp * ppg_zq) + ((1.0 - ppg_lerp) * ppg_z)
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
-            ppg_q, ppg, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
-                perturb_scale=perturb_scale, noise_scale=noise_scale)
+            ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
+                noise_scale=noise_scale, alpha_scale=ppg_alpha)
 
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
         o = self.dec(spk, z * ppg_mask, f0=pit, pitch_extras=pitch_extras)

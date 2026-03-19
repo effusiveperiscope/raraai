@@ -90,13 +90,16 @@ class TrainingModule(pl.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
-                _, ppg_q, _, _, _ = self.codec(ppg)
-                ppg_q = F.interpolate(ppg_q, scale_factor=2)
-                ppg_q = rearrange(ppg_q, "b c t -> b t c")
+                _, ppg_zq, ppg_z, _, _ = self.codec(ppg)
+                ppg_zq = F.interpolate(ppg_zq, scale_factor=2)
+                ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
+                ppg_z = F.interpolate(ppg_z, scale_factor=2) 
+                ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
                 f0 = batch['f0'].to(self.dtype).to(self.device)
                 ppg_interp = ppg_interp[:,:f0.shape[1],:]
-                ppg_q = ppg_q[:,:f0.shape[1],:]
+                ppg_zq = ppg_zq[:,:f0.shape[1],:]
+                ppg_z = ppg_z[:,:f0.shape[1],:]
                 f0 = f0 * (2 ** (self.config.train.get('test_transpose', 0) / 12))
 
                 f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype).to(self.device)
@@ -118,7 +121,7 @@ class TrainingModule(pl.LightningModule):
 
                 ppg_mask = commons.sequence_mask(ppg_len, max_length=f0.shape[1]).to(self.device)
 
-                out_audio = self.net_g.infer(ppg_q, ppg, f0, spk, ppg_len, sid=sid, noise_scale = 
+                out_audio = self.net_g.infer(ppg_zq, ppg_z, f0, spk, ppg_len, sid=sid, noise_scale = 
                     self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras)
 
             for i, audio in enumerate(out_audio):
@@ -178,13 +181,16 @@ class TrainingModule(pl.LightningModule):
         ppg_len = batch['whisper_length'] * 2
 
         with torch.no_grad():
-            _, ppg_q, _, _, _ = self.codec(ppg)
-            ppg_q = F.interpolate(ppg_q, scale_factor=2) # upsample quantized latent
-            ppg_q = rearrange(ppg_q, "b c t -> b t c")
+            _, ppg_zq, ppg_z, _, _ = self.codec(ppg)
+            ppg_zq = F.interpolate(ppg_zq, scale_factor=2) # upsample quantized latent
+            ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
+            ppg_z = F.interpolate(ppg_z, scale_factor=2) 
+            ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
         f0 = batch['f0'].to(ppg_interp.dtype)
-        ppg_q = ppg_q[:,:f0.shape[1],:]
+        ppg_zq = ppg_zq[:,:f0.shape[1],:]
         ppg_interp = ppg_interp[:,:f0.shape[1],:]
+        ppg_z = ppg_z[:,:f0.shape[1],:]
         f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype)
         f0_subharmonic = batch['f0_subharmonic'].to(ppg_interp.dtype)
         f0_inharmonic = batch['f0_inharmonic'].to(ppg_interp.dtype)
@@ -207,12 +213,13 @@ class TrainingModule(pl.LightningModule):
         hp = self.config
         if random.random() < self.config.train.get('p_pit_extra', 0.5):
             pitch_extras = None # unconditional
-        perturb_scale = torch.rand(1).to(ppg_q.device) * float(self.config.train.get('max_perturb', 3))
+
+        ppg_alpha = torch.rand(1).to(ppg_zq.device)
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r) = self.net_g(
-                ppg_q, ppg, f0, spec, spk, ppg_len, spec_len, sid=sid,
-                pitch_extras=pitch_extras, perturb_scale=perturb_scale)
+                ppg_zq, ppg_z, f0, spec, spk, ppg_len, spec_len, sid=sid,
+                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha)
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice

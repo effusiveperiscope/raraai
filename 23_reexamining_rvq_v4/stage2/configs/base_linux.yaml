@@ -1,4 +1,4 @@
-exp_name: base768_64
+exp_name: base768_64_0.3
 tensorboard_version: 0
 codec:
   whisper_dim: 768

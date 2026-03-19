@@ -9,6 +9,11 @@ import numpy as np
 from modeling.vits.models import SynthesizerTrn
 from modeling.vits import commons
 from logging import getLogger
+import logging
+import warnings
+warnings.filterwarnings('error', category=RuntimeWarning)
+warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
+logging.getLogger('numba').setLevel(logging.WARNING)
 from svc_helper.gui import *
 from omegaconf import OmegaConf
 from features import MyFeatures
@@ -241,8 +246,8 @@ class MainWindow(QMainWindow):
 
             with torch.no_grad():
                 o = self.net_g.infer(
-                    ppg_q=ppg_q.to(self.dtype).to(self.device),
-                    ppg=ppg_interp.to(self.dtype).to(self.device),
+                    ppg_zq=ppg_q.to(self.dtype).to(self.device),
+                    ppg_z=ppg_interp.to(self.dtype).to(self.device),
                     pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
                     spk=spk_feats,
                     ppg_l=ppg_len,

@@ -139,6 +139,7 @@ class TrainModule(pl.LightningModule):
                     key = str(key)
                 spk = self.spk_index[key].to(self.dtype).to(self.device).unsqueeze(0)
 
+                self.net_g : SynthesizerTrn
                 out_audio = self.net_g.infer(ppg, vec, pit, spk, ppg_len, pitch_extras=pitch_extras,
                     noise_scale=0.35)
 
