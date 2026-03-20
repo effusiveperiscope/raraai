@@ -47,11 +47,11 @@ def process_filelist(
         out_lines.append(out_filepath)
 
     if val_fraction > 0:
-        val_size = int(len(lines) * val_fraction)
+        val_size = max(int(len(lines) * val_fraction), 1)
         val_lines = out_lines[-val_size:]
         train_lines = out_lines[:-val_size]
     else:
-        val_lines = []
+        val_lines = [out_lines[0]]
         train_lines = out_lines
 
     with open(os.path.join(output_dir, 'train.txt'), 'w', encoding='utf-8') as f:

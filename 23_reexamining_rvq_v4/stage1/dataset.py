@@ -20,10 +20,11 @@ def dataset(filelist, is_train: bool):
         filelist=filelist,
         field_specs=[
             dt.FieldSpec(name='whisper', datatype=torch.Tensor,
-                dim=torch.Size([-1, 512]), keep_in_memory=False)
+                dim=torch.Size([-1, 1024]), keep_in_memory=False)
         ],
         actions=[
             dt.LiveMapRow(operation=interp_row),
+            dt.RandomSubsample(fields=['whisper'], dims=[0], length=800), 
             dt.PadGroup(fields=['whisper'], dims=[0], values=[0])
         ]
     )

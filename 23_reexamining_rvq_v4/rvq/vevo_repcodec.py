@@ -615,9 +615,18 @@ class VevoRepCodec(nn.Module):
         x = self.encoder(x)
         z = self.projector(x)
         zq, vqloss, perplexity = self.quantizer(z)
-        y = self.decoder(zq)
+        yq = self.decoder(zq)
+        yq = rearrange(yq, "b t c -> b c t")
+        y = self.decoder(z)
         y = rearrange(y, "b t c -> b c t")
-        return y, zq, z, vqloss, perplexity
+        return yq, y, zq, z, vqloss, perplexity
+
+    def forward_index(self, x):
+        x = rearrange(x, "b c t -> b t c")
+        x = self.encoder(x)
+        z = self.projector(x)
+        _, indices = self.quantizer.inference(z)
+        return indices
 
 if __name__ == '__main__':
     from utils import count_parameters

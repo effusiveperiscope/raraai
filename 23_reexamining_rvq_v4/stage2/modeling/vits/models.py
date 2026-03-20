@@ -266,8 +266,8 @@ class SynthesizerTrn(nn.Module):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r)
 
     def infer(self, ppg_zq, ppg_z, pit, spk, ppg_l, sid, noise_scale=0.3, 
-            ppg_lerp=1.0, pitch_extras=None):
-        ppg_use = (ppg_lerp * ppg_zq) + ((1.0 - ppg_lerp) * ppg_z)
+            ppg_alpha=1.0, pitch_extras=None):
+        ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,

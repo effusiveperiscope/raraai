@@ -1,17 +1,17 @@
-exp_name: base_whisper768_code48_alt
+exp_name: base_whisper768_code48_test
 
 whisper_dim: 768
 codebook_size: 48
 code_dim: 256
 
-train_filelist: data/full/train.txt
-val_filelist: data/full/val.txt
+train_filelist: data/test/train.txt
+val_filelist: data/test/val.txt
 log_dir: logs
 val_interval: 1 # Epoch
 
 lr: 1e-4
 c_vqloss: 1
 c_reconloss: 0.5
-batch_size: 16
+batch_size: 2
 
 keep_ckpts: 2
