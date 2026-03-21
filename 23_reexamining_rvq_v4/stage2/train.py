@@ -90,10 +90,8 @@ class TrainingModule(pl.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
-                _, ppg_zq, ppg_z, _, _ = self.codec(ppg)
-                ppg_zq = F.interpolate(ppg_zq, scale_factor=2)
+                _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
-                ppg_z = F.interpolate(ppg_z, scale_factor=2) 
                 ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
                 f0 = batch['f0'].to(self.dtype).to(self.device)
@@ -181,10 +179,8 @@ class TrainingModule(pl.LightningModule):
         ppg_len = batch['whisper_length'] * 2
 
         with torch.no_grad():
-            _, ppg_zq, ppg_z, _, _ = self.codec(ppg)
-            ppg_zq = F.interpolate(ppg_zq, scale_factor=2) # upsample quantized latent
+            _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
             ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
-            ppg_z = F.interpolate(ppg_z, scale_factor=2) 
             ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
         f0 = batch['f0'].to(ppg_interp.dtype)
@@ -370,7 +366,7 @@ if __name__ == '__main__':
         output_channels=hp.codec.whisper_dim,
         encode_channels=hp.codec.whisper_dim,
         decode_channels=hp.codec.whisper_dim,
-        code_dim=hp.codec.whisper_dim,
+        code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),
         codebook_num=1,
         codebook_size=hp.codec.codebook_size
     )

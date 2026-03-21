@@ -1,8 +1,9 @@
-exp_name: base768_64_0.3
+exp_name: base768_48_0.4
 tensorboard_version: 0
 codec:
   whisper_dim: 768
-  codebook_size: 64
+  code_dim: 256
+  codebook_size: 48
 data:
   filter_length: 1536
   hop_length: 480

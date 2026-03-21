@@ -18,7 +18,7 @@ def f0_dataset(filelist, is_train : bool):
     return dt.Dataset(
         filelist=filelist,
         field_specs=[
-            dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 1280]), provide_length=True, keep_in_memory=False),
+            dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 768]), provide_length=True, keep_in_memory=False),
             dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_confidence', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_subharmonic', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),

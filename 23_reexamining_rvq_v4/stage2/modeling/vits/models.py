@@ -200,7 +200,7 @@ class SynthesizerTrn(nn.Module):
         self.segment_size = segment_size
         self.emb_g = nn.Linear(hp.vits.spk_dim, hp.vits.gin_channels)
         self.enc_p = TextEncoder(
-            hp.codec.whisper_dim,
+            hp.codec.get('code_dim', hp.codec.whisper_dim),
             hp.vits.inter_channels,
             hp.vits.hidden_channels,
             hp.vits.filter_channels,
