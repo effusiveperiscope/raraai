@@ -1,3 +1,4 @@
+import numpy as np
 from svc_helper.speaker.models import SVC5SpeakerEncoder
 from svc_helper.pitch.rmvpe import RMVPEModel
 from utils import print_memory_usage
@@ -14,9 +15,9 @@ class MyFeatures:
     def __init__(self, 
         device='cuda',
         config='configs/base_linux.yaml',
-        whisper = 'openai/whisper-small',
+        whisper = 'openai/whisper-base',
         feats_to_extract : set[str] = {'whisper', 'spk', 'f0', 'spec', 'wave'},
-        do_normalize=False):
+        do_normalize=True):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract
         self.expected_sample_rate=16000
@@ -59,7 +60,7 @@ class MyFeatures:
         if data.sum() == 0:
             raise ValueError(f'File {file} is empty')
         if self.do_normalize:
-            data = librosa.util.normalize(data)
+            data = data / (np.abs(data).max()) * 0.99
         feat = {}
         if 'whisper' in self.feats_to_extract:
             feat['whisper'] = self.extract_whisper_features(data).squeeze(0)

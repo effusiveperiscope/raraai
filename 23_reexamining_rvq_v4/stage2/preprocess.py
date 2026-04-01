@@ -48,6 +48,7 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
 
     is_multispk = False
     new_lines = []
+    new_f0_lines = []
     sid_avgs = {}
     sid_sums = {}
     skip_flag = False
@@ -96,6 +97,7 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                         savepaths['wave'], 
                         str(sid)])
                 new_lines.append(newline)
+                new_f0_lines.append(savepaths['f0'])
                 continue
 
             try:
@@ -128,6 +130,7 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                 savepaths['wave'],
                 str(sid)
             ])
+            new_f0_lines.append(savepaths['f0'])
             new_lines.append(newline)
             if feats_to_extract is None or 'spk' in feats_to_extract:
                 if sid not in sid_avgs:
@@ -149,6 +152,7 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                    savepaths['spk'],
                     savepaths['wave'], 
                     str(sid)])
+            new_f0_lines.append(savepaths['f0'])
             new_lines.append(newline)
 
 
@@ -156,9 +160,13 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
         val_size = int(len(lines) * val_fraction)
         val_lines = new_lines[-val_size:]
         train_lines = new_lines[:-val_size]
+        val_f0_lines = new_f0_lines[-val_size:]
+        train_f0_lines = new_f0_lines[:-val_size]
     else:
-        val_lines = []
         train_lines = new_lines
+        val_lines = [train_lines[0]] # Ensure at least one val sample even if it's not really a val sample
+        train_f0_lines = new_f0_lines
+        val_f0_lines = [train_f0_lines[0]]
 
     if not regen_filelist and not skip_flag: # can't regen sid_avgs if skipped any
         if feats_to_extract is None or 'sid' in feats_to_extract:
@@ -176,6 +184,10 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
         f.write('\n'.join(train_lines))
     with open(os.path.join(output_dir, 'val.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(val_lines))
+    with open(os.path.join(output_dir, 'train_f0.txt'), 'w', encoding='utf-8') as f:
+        f.write('\n'.join(train_f0_lines))
+    with open(os.path.join(output_dir, 'val_f0.txt'), 'w', encoding='utf-8') as f:
+        f.write('\n'.join(val_f0_lines))
 
     if not regen_filelist:
         del extractor

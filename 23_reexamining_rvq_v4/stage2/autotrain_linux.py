@@ -22,9 +22,9 @@ logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)
 import torch.multiprocessing as mp
 
 def main():
-    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/pony'
-    BASE_MODEL = 'checkpoints/base768_64.ckpt'
-    SRC_CONFIG = 'configs/char.yaml'
+    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/april_fools'
+    BASE_MODEL = 'pretrain/base512_48_ft0.ckpt'
+    SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
         basename = os.path.basename(filelist).split('.')[0]
@@ -39,7 +39,7 @@ def main():
 
         config = OmegaConf.load(SRC_CONFIG)
         config.exp_name = basename
-        config.train.test_filelist = 'data/test/val_linux.txt'
+        config.train.test_filelist = 'data/test/val.txt'
         hp = config
 
         config.train.train_filelist = os.path.join(data_dir, 'train.txt')
@@ -57,19 +57,17 @@ def main():
             output_channels=hp.codec.whisper_dim,
             encode_channels=hp.codec.whisper_dim,
             decode_channels=hp.codec.whisper_dim,
-            code_dim=hp.codec.whisper_dim,
+            code_dim=hp.codec.code_dim,
             codebook_num=1,
             codebook_size=hp.codec.codebook_size
         )
-        net_i = IntensityModel(in_channels=hp.codec.whisper_dim)
 
         resume_ckpt = os.path.join('checkpoints', basename, 'last.ckpt')
 
         with open(config.train.train_filelist) as f:
             line_count = len(f.readlines())
         len_dataset = line_count
-        steps_factor = 40
-        max_steps = 40000 + (len_dataset * steps_factor)
+        max_steps = 120000
         config.train.test_interval = int(4200 * 2 / len_dataset)
         
         if not os.path.exists(resume_ckpt):
@@ -80,7 +78,6 @@ def main():
             load_submodule_prefix(net_g, 'net_g.', state)
             load_submodule_prefix(codec, 'codec.', state) # oops lol
             load_submodule_prefix(net_d, 'net_d.', state)
-            load_submodule_prefix(net_i, 'net_i.', state)
             resume_ckpt = None
         else:
             resume_ckpt_state = torch.load(resume_ckpt, map_location='cpu', weights_only=False)
@@ -91,7 +88,7 @@ def main():
             print(f'Resuming from {resume_ckpt}')
 
         training_module = TrainingModule(
-            net_g=net_g, net_d=net_d, codec=codec, net_i=net_i, config=config)
+            net_g=net_g, net_d=net_d, codec=codec, config=config)
         logger = pl.loggers.TensorBoardLogger(
             config.train.get('log_dir', 'logs'), name=config.exp_name,
             version=config.get('tensorboard_version', 0)
@@ -110,8 +107,9 @@ def main():
 
         callbacks = [
             pl.callbacks.ModelCheckpoint( # just save last
+                every_n_epochs=(1 if len_dataset > 100 else 20),
                 dirpath=f'checkpoints/{config.exp_name}',
-                save_last=True
+                filename='last'
             )
         ]
 
@@ -130,7 +128,6 @@ def main():
         del net_g
         del net_d
         del codec
-        del net_i
 
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)

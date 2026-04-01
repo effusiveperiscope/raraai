@@ -1,7 +1,7 @@
-exp_name: base768_48_0.4
+exp_name: base512_48_ft
 tensorboard_version: 0
 codec:
-  whisper_dim: 768
+  whisper_dim: 512
   code_dim: 256
   codebook_size: 48
 data:

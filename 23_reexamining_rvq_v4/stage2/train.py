@@ -8,6 +8,7 @@ logging.getLogger('numba').setLevel(logging.WARNING)
 
 import numpy as np
 import torch
+from torch.distributions import Beta
 import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
@@ -59,6 +60,8 @@ class TrainingModule(pl.LightningModule):
 
     def setup(self, stage=None):
         hp = self.config
+        # Goal is to sample mostly quantized 
+        self.alpha_dist = Beta(torch.tensor([4.0]), torch.tensor([1.0]))
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -210,7 +213,7 @@ class TrainingModule(pl.LightningModule):
         if random.random() < self.config.train.get('p_pit_extra', 0.5):
             pitch_extras = None # unconditional
 
-        ppg_alpha = torch.rand(1).to(ppg_zq.device)
+        ppg_alpha = self.alpha_dist.sample().to(ppg_zq.device)
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r) = self.net_g(
@@ -334,10 +337,7 @@ class TrainingModule(pl.LightningModule):
 
         return val_loss
 
-if __name__ == '__main__':
-    import torch.multiprocessing as mp
-    mp.set_start_method('spawn', force=True) # This is needed on Linux
-
+def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
@@ -351,7 +351,41 @@ if __name__ == '__main__':
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def train(args):
+    """Run training. ``args`` may be a dict or any object with attribute access
+    (e.g. an argparse.Namespace).  When a plain dict is supplied it is
+    converted to a SimpleNamespace so the rest of the function can use
+    attribute-style access uniformly.
+
+    Recognised keys / attributes (all optional except ``config``):
+        config          – path to the OmegaConf YAML config file (default: 'configs/base.yaml')
+        svc5_ckpt       – path to SVC5 generator checkpoint
+        rvc_gen_ckpt    – path to RVC generator checkpoint
+        rvc_disc_ckpt   – path to RVC discriminator checkpoint
+        codec_ckpt      – path to codec checkpoint
+        reset_prior     – number of prior layers to reset (default: 0)
+        resume_from     – path to a Lightning checkpoint to resume from
+        transfer_from   – path to a Lightning checkpoint to transfer weights from
+    """
+    from types import SimpleNamespace
+    if isinstance(args, dict):
+        # Fill in defaults for any keys that were not provided
+        defaults = dict(
+            config='configs/base.yaml',
+            svc5_ckpt=None,
+            rvc_gen_ckpt=None,
+            rvc_disc_ckpt=None,
+            codec_ckpt=None,
+            reset_prior=0,
+            resume_from=None,
+            transfer_from=None,
+        )
+        defaults.update(args)
+        args = SimpleNamespace(**defaults)
+
     config = OmegaConf.load(args.config)
     hp = config
 
@@ -461,3 +495,10 @@ if __name__ == '__main__':
         log_every_n_steps=config.train.get('log_interval', 50),
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
+
+
+if __name__ == '__main__':
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn', force=True) # This is needed on Linux
+
+    train(parse_args())

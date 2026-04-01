@@ -63,7 +63,7 @@ class F0FM(nn.Module):
 
     def loss(self,
         f0_target,
-        f0, ppg_q, emb_spk, lens):
+         ppg_q, emb_spk, lens):
 
         t = torch.rand(f0_target.shape[0]).to(f0_target.device).unsqueeze(-1)
 

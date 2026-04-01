@@ -53,7 +53,7 @@ class MainWindow(QMainWindow):
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.34))
-        gui.addParam(DoubleParam(label="Perturb Scale", id='perturb_scale', min=0, max=9, default=0.0))
+        gui.addParam(DoubleParam(label="Alpha Scale", id='alpha_scale', min=0, max=1, default=0.0))
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=20000, default=0))
         gui.addParam(BoolParam(label="Use pitch smoothing", id='use_smooth_pitch', default=False))
         gui.addInference(Inference(
@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
             output_channels=hp.codec.whisper_dim,
             encode_channels=hp.codec.whisper_dim,
             decode_channels=hp.codec.whisper_dim,
-            code_dim=hp.codec.whisper_dim,
+            code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),
             codebook_num=1,
             codebook_size=hp.codec.codebook_size
         )
@@ -209,9 +209,9 @@ class MainWindow(QMainWindow):
             ppg_len = torch.tensor([feats['whisper'].shape[0]]).to(self.device) * 2
 
             with torch.no_grad():
-                _, ppg_q, _, _, _ = self.codec(ppg)
-            ppg_q = F.interpolate(ppg_q, scale_factor=2)
-            ppg_q = rearrange(ppg_q, 'b c t -> b t c')
+                _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
+                ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
+                ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
             # Transpose
             f0 = feats['f0'] * (2 ** (transpose / 12))
@@ -220,15 +220,15 @@ class MainWindow(QMainWindow):
                 f0 = torch.from_numpy(smooth_pitch(f0.cpu().numpy()))
 
             # Truncate
-            f0 = f0[:ppg_q.shape[1]]
+            f0 = f0[:ppg_zq.shape[1]]
 
             f0_confidence = feats['f0_confidence'].to(ppg.dtype).to(self.device)
             f0_subharmonic = feats['f0_subharmonic'].to(ppg.dtype).to(self.device)
             f0_inharmonic = feats['f0_inharmonic'].to(ppg.dtype).to(self.device)
 
-            f0_confidence = f0_confidence[:ppg_q.shape[1]].unsqueeze(0)
-            f0_subharmonic = f0_subharmonic[:ppg_q.shape[1]].unsqueeze(0)
-            f0_inharmonic = f0_inharmonic[:ppg_q.shape[1]].unsqueeze(0)
+            f0_confidence = f0_confidence[:ppg_zq.shape[1]].unsqueeze(0)
+            f0_subharmonic = f0_subharmonic[:ppg_zq.shape[1]].unsqueeze(0)
+            f0_inharmonic = f0_inharmonic[:ppg_zq.shape[1]].unsqueeze(0)
 
             pitch_extras = {
                 'confidence': f0_confidence,
@@ -246,15 +246,15 @@ class MainWindow(QMainWindow):
 
             with torch.no_grad():
                 o = self.net_g.infer(
-                    ppg_zq=ppg_q.to(self.dtype).to(self.device),
-                    ppg_z=ppg_interp.to(self.dtype).to(self.device),
+                    ppg_zq=ppg_zq.to(self.dtype).to(self.device),
+                    ppg_z=ppg_z.to(self.dtype).to(self.device),
                     pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
                     spk=spk_feats,
                     ppg_l=ppg_len,
                     sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
                     noise_scale=data['noise'],
                     pitch_extras=pitch_extras,
-                    perturb_scale=data['perturb_scale'])
+                    ppg_alpha=data['alpha_scale'])
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]
