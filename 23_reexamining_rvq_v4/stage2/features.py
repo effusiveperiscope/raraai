@@ -52,6 +52,16 @@ class MyFeatures:
             encoder_features = encoder_features[:, :feature_len, :]
         return encoder_features
 
+    def extract_whisper_features_chunked(self, audio_16k):
+        CHUNK_LEN = 25 # sec
+        CHUNK_SAMPLE = CHUNK_LEN * 16000 # samples
+
+        chunks = [audio_16k[i : i + CHUNK_SAMPLE] for i in range(0, len(audio_16k), CHUNK_SAMPLE)]
+        chunks_feats = [self.extract_whisper_features(chunk) for chunk in chunks]
+        out = torch.cat(chunks_feats, dim=1)
+        print(out.shape)
+        return out
+
     def extract_speaker_features(self, file : str):
         return self.svc5_spk_model.extract_feature(file)
 
@@ -63,7 +73,7 @@ class MyFeatures:
             data = data / (np.abs(data).max()) * 0.99
         feat = {}
         if 'whisper' in self.feats_to_extract:
-            feat['whisper'] = self.extract_whisper_features(data).squeeze(0)
+            feat['whisper'] = self.extract_whisper_features_chunked(data).squeeze(0)
             if type(data) == io.BytesIO:
                 data.seek(0)
         if 'spk' in self.feats_to_extract:

@@ -61,7 +61,7 @@ class TrainingModule(pl.LightningModule):
     def setup(self, stage=None):
         hp = self.config
         # Goal is to sample mostly quantized 
-        self.alpha_dist = Beta(torch.tensor([4.0]), torch.tensor([1.0]))
+        self.alpha_dist = Beta(torch.tensor([1.5]), torch.tensor([1.0]))
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -479,8 +479,7 @@ def train(args):
         interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_interval,
             dirpath=f'checkpoints/{config.exp_name}',
-            filename='interval-checkpoint-{epoch:04d}',
-            save_top_k=-1
+            filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
         )
         callbacks.append(interval_checkpoint_callback)
 
@@ -489,6 +488,7 @@ def train(args):
         accelerator='gpu',
         precision='bf16-mixed',
         max_steps=config.train.get('max_steps', 160000),
+        max_epochs=10000000,
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
         #val_check_interval=2,

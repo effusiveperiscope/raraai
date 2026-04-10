@@ -3,7 +3,7 @@ import torch
 from transformers import WhisperFeatureExtractor, WhisperModel
 
 class FeatureExtractor:
-    def __init__(self, whisper_model = 'openai/whisper-small'):
+    def __init__(self, whisper_model = 'openai/whisper-base'):
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model)
         self.device = 'cuda'
         self.model = WhisperModel.from_pretrained(whisper_model).to(self.device)

@@ -22,8 +22,8 @@ logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)
 import torch.multiprocessing as mp
 
 def main():
-    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/april_fools'
-    BASE_MODEL = 'pretrain/base512_48_ft0.ckpt'
+    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
+    BASE_MODEL = 'pretrain/titanplus512_48.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -67,7 +67,7 @@ def main():
         with open(config.train.train_filelist) as f:
             line_count = len(f.readlines())
         len_dataset = line_count
-        max_steps = 120000
+        max_steps = 300000
         config.train.test_interval = int(4200 * 2 / len_dataset)
         
         if not os.path.exists(resume_ckpt):

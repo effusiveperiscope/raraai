@@ -1,7 +1,11 @@
-exp_name: test_debug
+# (n/a) Singing dataset based on VocalSet1-2 containing 4 speakers with long held notes.
+# 2 anchor_sing_full
+# 3 titan_plus ( titan + sing_tiny )
+exp_name: titan_plus
 tensorboard_version: 0
 codec:
   whisper_dim: 512
+  code_dim: 256
   codebook_size: 48
 data:
   filter_length: 1536
@@ -41,7 +45,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 2
+  batch_size: 8
 
   weight_decay: 1e-4
   cosine_anneal_steps: 100000
@@ -64,19 +68,19 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/test/val.txt
-  val_filelist: ./data/test/val.txt
-  spk_index: ./data/test/sid_avgs.pt
+  train_filelist: ./data/train_plus.txt
+  val_filelist: ./data/val_plus.txt
+  spk_index: ./data/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
-  test_interval: 100
-  test_transpose: 0
-  test_sid: 0
-  val_interval: 100
+  test_interval: 1
+  test_transpose: 12
+  test_sid: 1
+  max_perturb: 3
+  val_interval: 1
 
   disc_label: 0.9
   f0_gen_interval: 3
-  log_interval: 5
   c_f0: 0.5
   c_f0_adv: 0.5
   train_f0_only: False
@@ -85,9 +89,10 @@ train:
   p_pit_extra: 0.5
 
   keep_ckpts: 2
-  num_workers: 0
+  num_workers: 4
 
   stage2_epoch: 0 # start training using gen/disc losses
+  save_interval: 50
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -95,7 +100,5 @@ vits:
   inter_channels: 192
   ppg_dim: 1280
   spk_dim: 256
-  max_spk_count: 256
+  max_spk_count: 16384
   vec_dim: 256
-  use_pitch_predictor: true
-  pitch_quant_dim: 10

@@ -1,5 +1,4 @@
 from einops import rearrange
-from modeling.intensity import IntensityModel
 import ultimate_xc
 import os
 from PyQt5.QtCore import pyqtRemoveInputHook
@@ -63,7 +62,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(gui.build())
 
         my_feats = MyFeatures(
-            feats_to_extract={'whisper', 'f0'})
+            feats_to_extract={'whisper', 'f0', 'spk'})
         self.my_feats = my_feats
         self.dtype = torch.bfloat16
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
