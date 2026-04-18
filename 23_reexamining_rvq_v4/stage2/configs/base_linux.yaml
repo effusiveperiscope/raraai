@@ -1,4 +1,4 @@
-exp_name: base512_48_ft
+exp_name: base512_48_scratch_fix
 tensorboard_version: 0
 codec:
   whisper_dim: 512
@@ -42,7 +42,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 8
+  batch_size: 16
 
   weight_decay: 1e-4
   cosine_anneal_steps: 100000
@@ -65,9 +65,9 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/titan/train.txt
-  val_filelist: ./data/titan/val.txt
-  spk_index: ./data/titan/sid_avgs.pt
+  train_filelist: ./data/ac_sing_full/train.txt
+  val_filelist: ./data/ac_sing_full/val.txt
+  spk_index: ./data/ac_sing_full/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
   test_interval: 1

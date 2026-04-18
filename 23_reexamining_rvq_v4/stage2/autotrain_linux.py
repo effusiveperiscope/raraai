@@ -22,8 +22,8 @@ logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)
 import torch.multiprocessing as mp
 
 def main():
-    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/titanplus512_48.ckpt'
+    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/pony_enhanced2'
+    BASE_MODEL = 'pretrain/sing_ac.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -38,7 +38,7 @@ def main():
             filepath_regex_rep="/mnt/data/")
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename
+        config.exp_name = basename + '_singac'
         config.train.test_filelist = 'data/test/val.txt'
         hp = config
 
@@ -62,7 +62,7 @@ def main():
             codebook_size=hp.codec.codebook_size
         )
 
-        resume_ckpt = os.path.join('checkpoints', basename, 'last.ckpt')
+        resume_ckpt = os.path.join('checkpoints', config.exp_name, 'last.ckpt')
 
         with open(config.train.train_filelist) as f:
             line_count = len(f.readlines())
@@ -105,6 +105,7 @@ def main():
                 persistent_workers=num_workers > 0)
         print("Done")
 
+        est_epochs = max_steps / len_dataset
         callbacks = [
             pl.callbacks.ModelCheckpoint( # just save last
                 every_n_epochs=(1 if len_dataset > 100 else 20),
@@ -112,6 +113,13 @@ def main():
                 filename='last'
             )
         ]
+
+        interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            every_n_epochs=est_epochs // 4,
+            dirpath=f'checkpoints/{config.exp_name}',
+            filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
+        )
+        callbacks.append(interval_checkpoint_callback)
 
         trainer = pl.Trainer(
             logger=logger,
