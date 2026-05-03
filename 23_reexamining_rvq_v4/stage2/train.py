@@ -154,8 +154,17 @@ class TrainingModule(pl.LightningModule):
         pass
 
     def configure_optimizers(self):
+
+        dec = self.net_g.dec
+        dec_ids = list(map(id, dec.parameters()))
+        base_params = [p for p in self.net_g.parameters() if id(p) not in dec_ids]
+        dec_params = dec.parameters()
+
         gen_optim = torch.optim.AdamW(
-            self.net_g.parameters(), lr=self.config.train.lr, betas=self.config.train.betas,
+            params=[
+                {'params': base_params},
+                {'params': dec_params, 'lr': self.config.train.lr * self.config.train.get('dec_lr_mul', 1.0)}],
+            lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         disc_optim = torch.optim.AdamW(
             itertools.chain(

@@ -75,6 +75,7 @@ train:
   test_sid: 0
   max_perturb: 3
   val_interval: 1
+  dec_lr_mul: 1
 
   disc_label: 0.9
   f0_gen_interval: 3

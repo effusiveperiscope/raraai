@@ -22,8 +22,8 @@ logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)
 import torch.multiprocessing as mp
 
 def main():
-    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/pony_enhanced2'
-    BASE_MODEL = 'pretrain/sing_ac.ckpt'
+    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
+    BASE_MODEL = 'pretrain/512_48_sf.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -38,7 +38,7 @@ def main():
             filepath_regex_rep="/mnt/data/")
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_singac'
+        config.exp_name = basename + '_singac2'
         config.train.test_filelist = 'data/test/val.txt'
         hp = config
 
@@ -67,9 +67,23 @@ def main():
         with open(config.train.train_filelist) as f:
             line_count = len(f.readlines())
         len_dataset = line_count
-        max_steps = 300000
         config.train.test_interval = int(4200 * 2 / len_dataset)
+
+        print("Loading data...")
+        train_dataset = dataset(config.train.train_filelist, is_train=True)
+        print("Creating dataloaders...")
+        if len_dataset < 100:
+            num_workers = 0 # Short datasets will incur too much overhead with num_workers > 0
+        else:
+            num_workers = config.train.get('num_workers', 4)
+        train_dataloader = train_dataset.loader(
+            batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
+                persistent_workers=num_workers > 0)
+        print("Done")
         
+        max_steps = min(len_dataset * 2000, 300000) # 2000 epochs or 300k steps whichever is fewer
+        est_epochs = max_steps / len_dataset
+
         if not os.path.exists(resume_ckpt):
             print('Found no checkpoint, transfering from base')
             # transfer learn from base
@@ -93,19 +107,7 @@ def main():
             config.train.get('log_dir', 'logs'), name=config.exp_name,
             version=config.get('tensorboard_version', 0)
         )
-        print("Loading data...")
-        train_dataset = dataset(config.train.train_filelist, is_train=True)
-        print("Creating dataloaders...")
-        if len_dataset < 100:
-            num_workers = 0 # Short datasets will incur too much overhead with num_workers > 0
-        else:
-            num_workers = config.train.get('num_workers', 4)
-        train_dataloader = train_dataset.loader(
-            batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
-                persistent_workers=num_workers > 0)
-        print("Done")
 
-        est_epochs = max_steps / len_dataset
         callbacks = [
             pl.callbacks.ModelCheckpoint( # just save last
                 every_n_epochs=(1 if len_dataset > 100 else 20),
