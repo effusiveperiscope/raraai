@@ -42,6 +42,24 @@ import logging
 warnings.filterwarnings('error', category=RuntimeWarning)
 logging.getLogger('numba').setLevel(logging.WARNING)
 
+def weighted_mel_loss(mel_pred, mel_target, voiced_mask, unvoiced_weight=0.1):
+    """
+    mel_pred, mel_target: (B, n_mels, T)
+    voiced_mask: (B, T) — 1 for voiced, 0 for unvoiced
+    """
+
+    # Expand mask to mel bins
+    w = voiced_mask.unsqueeze(1)  # (B, 1, T)
+    w = voiced_mask_to_weight(w, unvoiced_weight)
+    
+    loss = F.l1_loss(mel_pred, mel_target, reduction='none')  # (B, n_mels, T)
+    weighted = (loss * w).sum() / (w.sum() * mel_pred.shape[1] + 1e-8)
+    return weighted
+
+def voiced_mask_to_weight(voiced_mask, unvoiced_weight=0.1):
+    # voiced=1.0, unvoiced=unvoiced_weight
+    return voiced_mask + (1.0 - voiced_mask) * unvoiced_weight
+
 class TrainingModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
@@ -161,9 +179,7 @@ class TrainingModule(pl.LightningModule):
         dec_params = dec.parameters()
 
         gen_optim = torch.optim.AdamW(
-            params=[
-                {'params': base_params},
-                {'params': dec_params, 'lr': self.config.train.lr * self.config.train.get('dec_lr_mul', 1.0)}],
+            params=self.net_g.parameters(),
             lr=self.config.train.lr, betas=self.config.train.betas,
             weight_decay=self.config.train.weight_decay)
         disc_optim = torch.optim.AdamW(
@@ -250,10 +266,20 @@ class TrainingModule(pl.LightningModule):
         fake_audio = fake_audio[:, :, :min_dim]
         audio = audio[:, :, :min_dim]
 
+        # f0 shape: (B, T) — 0 or NaN on unvoiced frames
+        f0_sliced = slice_segments_general(f0, ids_slice, hp.data.segment_size // hp.data.hop_length)
+        voiced_mask = (f0_sliced > 0).float()  # (B, T), 1=voiced, 0=unvoiced
+
+        # Smooth the mask slightly to avoid hard discontinuities at transitions
+        # (optional but helps — unvoiced/voiced boundaries are ambiguous)
+        voiced_mask_smooth = F.max_pool1d(
+            voiced_mask.unsqueeze(1), kernel_size=5, stride=1, padding=2
+        ).squeeze(1)
+
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
         mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
-        mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
+        mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth) * hp.train.c_mel
 
         # # audio is of shape [b, 1, t]
         # dump_batched_audio(audio, prefix="gt_", sr=hp.data.sampling_rate)
@@ -261,8 +287,9 @@ class TrainingModule(pl.LightningModule):
         # dump_batched_spectrogram(mel_real, prefix="mel_real_")
 
         # Multi-Resolution STFT Loss
-        sc_loss, mag_loss = self.stft_criterion(fake_audio.squeeze(1), audio.squeeze(1))
-        stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
+        sc_loss, mag_loss = self.stft_criterion(
+            fake_audio.squeeze(1), audio.squeeze(1), voiced_mask_mel=voiced_mask_smooth)
+        stft_loss = (sc_loss + mag_loss) * hp.train.c_stft 
 
         disc_label = self.config.train.get('disc_label', 1.0)
         # Generator Loss
