@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.distributions import Beta
 import torch.nn as nn
-import pytorch_lightning as pl
+import lightning as L
 import torch.nn.functional as F
 from einops import rearrange
 from omegaconf import OmegaConf
@@ -34,6 +34,17 @@ import itertools
 import sys
 sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
+
+from lightning.pytorch.callbacks import WeightAveraging
+from torch.optim.swa_utils import get_ema_avg_fn
+
+class EMAWeightAveraging(WeightAveraging):
+    def __init__(self):
+        super().__init__(avg_fn=get_ema_avg_fn())
+
+    def should_update(self, step_idx=None, epoch_idx=None):
+        # Start after 100 steps.
+        return (step_idx is not None) and (step_idx >= 100)
 
 import warnings
 import numpy as np
@@ -60,7 +71,7 @@ def voiced_mask_to_weight(voiced_mask, unvoiced_weight=0.1):
     # voiced=1.0, unvoiced=unvoiced_weight
     return voiced_mask + (1.0 - voiced_mask) * unvoiced_weight
 
-class TrainingModule(pl.LightningModule):
+class TrainingModule(L.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
         net_d: MultiPeriodDiscriminatorV2, 
@@ -485,7 +496,7 @@ def train(args):
 
     training_module = TrainingModule(
         net_g=net_g, net_d=net_d, codec=codec, config=config)
-    logger = pl.loggers.TensorBoardLogger(
+    logger = L.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=config.get('tensorboard_version', 0)
     )
@@ -502,7 +513,7 @@ def train(args):
             persistent_workers=num_workers > 0)
     print("Done")
 
-    val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    val_checkpoint_callback = L.callbacks.ModelCheckpoint(
         monitor='val_loss',
         dirpath=f'checkpoints/{config.exp_name}',
         filename='best-checkpoint',
@@ -512,14 +523,17 @@ def train(args):
     )
     callbacks = [val_checkpoint_callback]
     if config.train.get('save_interval') is not None:
-        interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        interval_checkpoint_callback = L.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_interval,
             dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
         )
         callbacks.append(interval_checkpoint_callback)
 
-    trainer = pl.Trainer(
+    if config.train.get('use_ema'):
+        callbacks.append(EMAWeightAveraging())
+
+    trainer = L.Trainer(
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',

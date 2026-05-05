@@ -10,8 +10,8 @@ sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
 from commons import load_submodule_prefix
 from dataset import dataset
-import pytorch_lightning as pl
 from train import TrainingModule
+import lightning as L
 
 import logging
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -23,7 +23,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/512_48_sf.ckpt'
+    BASE_MODEL = 'pretrain/sing_ac.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -38,13 +38,15 @@ def main():
             filepath_regex_rep="/mnt/data/")
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_singac2'
+        config.exp_name = basename + '_dw_ema'
         config.train.test_filelist = 'data/test/val.txt'
         hp = config
 
         config.train.train_filelist = os.path.join(data_dir, 'train.txt')
         config.train.val_filelist = os.path.join(data_dir, 'val.txt')
         config.train.spk_index = os.path.join(data_dir, 'sid_avgs.pt')
+
+        config.train.use_ema = True
 
         net_g = SynthesizerTrn(
             spec_channels=hp.data.filter_length // 2 + 1,
@@ -81,7 +83,9 @@ def main():
                 persistent_workers=num_workers > 0)
         print("Done")
         
-        max_steps = min(len_dataset * 2000, 300000) # 2000 epochs or 300k steps whichever is fewer
+        max_steps = min(
+            len_dataset / config.train.batch_size * 2000, 
+            250000) # 2000 epochs or 250k steps whichever is fewer
         est_epochs = max_steps / len_dataset
 
         if not os.path.exists(resume_ckpt):
@@ -103,27 +107,27 @@ def main():
 
         training_module = TrainingModule(
             net_g=net_g, net_d=net_d, codec=codec, config=config)
-        logger = pl.loggers.TensorBoardLogger(
+        logger = L.loggers.TensorBoardLogger(
             config.train.get('log_dir', 'logs'), name=config.exp_name,
             version=config.get('tensorboard_version', 0)
         )
 
         callbacks = [
-            pl.callbacks.ModelCheckpoint( # just save last
+            L.callbacks.ModelCheckpoint( # just save last
                 every_n_epochs=(1 if len_dataset > 100 else 20),
                 dirpath=f'checkpoints/{config.exp_name}',
                 filename='last'
             )
         ]
 
-        interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        interval_checkpoint_callback = L.callbacks.ModelCheckpoint(
             every_n_epochs=est_epochs // 4,
             dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
         )
         callbacks.append(interval_checkpoint_callback)
 
-        trainer = pl.Trainer(
+        trainer = L.Trainer(
             logger=logger,
             accelerator='gpu',
             precision='bf16-mixed',
