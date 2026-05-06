@@ -496,7 +496,7 @@ def train(args):
 
     training_module = TrainingModule(
         net_g=net_g, net_d=net_d, codec=codec, config=config)
-    logger = L.loggers.TensorBoardLogger(
+    logger = L.pytorch.loggers.tensorboard.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,
         version=config.get('tensorboard_version', 0)
     )
@@ -513,7 +513,7 @@ def train(args):
             persistent_workers=num_workers > 0)
     print("Done")
 
-    val_checkpoint_callback = L.callbacks.ModelCheckpoint(
+    val_checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
         monitor='val_loss',
         dirpath=f'checkpoints/{config.exp_name}',
         filename='best-checkpoint',
@@ -523,7 +523,7 @@ def train(args):
     )
     callbacks = [val_checkpoint_callback]
     if config.train.get('save_interval') is not None:
-        interval_checkpoint_callback = L.callbacks.ModelCheckpoint(
+        interval_checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_interval,
             dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}', save_top_k=-1

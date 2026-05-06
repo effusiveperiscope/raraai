@@ -107,20 +107,20 @@ def main():
 
         training_module = TrainingModule(
             net_g=net_g, net_d=net_d, codec=codec, config=config)
-        logger = L.loggers.TensorBoardLogger(
+        logger = L.pytorch.loggers.tensorboard.TensorBoardLogger(
             config.train.get('log_dir', 'logs'), name=config.exp_name,
             version=config.get('tensorboard_version', 0)
         )
 
         callbacks = [
-            L.callbacks.ModelCheckpoint( # just save last
+            L.pytorch.callbacks.ModelCheckpoint( # just save last
                 every_n_epochs=(1 if len_dataset > 100 else 20),
                 dirpath=f'checkpoints/{config.exp_name}',
                 filename='last'
             )
         ]
 
-        interval_checkpoint_callback = L.callbacks.ModelCheckpoint(
+        interval_checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
             every_n_epochs=est_epochs // 4,
             dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
