@@ -1,4 +1,4 @@
-exp_name: base512_48_scratch_fix
+exp_name: titan_fix
 tensorboard_version: 0
 codec:
   whisper_dim: 512
@@ -12,7 +12,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 8000
+  segment_size: 17280
   win_length: 1536
 dist_config:
   dist_backend: nccl
@@ -65,9 +65,9 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/ac_sing_full/train.txt
-  val_filelist: ./data/ac_sing_full/val.txt
-  spk_index: ./data/ac_sing_full/sid_avgs.pt
+  train_filelist: ./data/titan/train.txt
+  val_filelist: ./data/titan/val.txt
+  spk_index: ./data/titan/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
   test_interval: 1
@@ -91,6 +91,7 @@ train:
 
   stage2_epoch: 0 # start training using gen/disc losses
   save_interval: 50
+  disc_only: 20
 vits:
   filter_channels: 640
   gin_channels: 256

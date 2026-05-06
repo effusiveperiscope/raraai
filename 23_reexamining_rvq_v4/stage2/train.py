@@ -19,7 +19,8 @@ import ultimate_xc
 import math
 
 from modeling.vits.models import SynthesizerTrn
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+# from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from modeling.vits_decoder.discriminator import Discriminator
 from rvc_losses import generator_loss, feature_loss, discriminator_loss
 from vits_extend.stft_loss import STFTLoss
 from modeling.vits.losses import kl_loss
@@ -74,7 +75,7 @@ def voiced_mask_to_weight(voiced_mask, unvoiced_weight=0.1):
 class TrainingModule(L.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn, 
-        net_d: MultiPeriodDiscriminatorV2, 
+        net_d: Discriminator, 
         codec : VevoRepCodec,
         config : OmegaConf):
         super().__init__()
@@ -170,10 +171,16 @@ class TrainingModule(L.LightningModule):
 
     def on_train_epoch_start(self):
         self.update_stage()
-        for param in self.net_d.parameters():
-            param.requires_grad = True
-        for param in self.net_g.parameters():
-            param.requires_grad = True
+        if self.current_epoch < self.config.train.get('disc_only', 0):
+            for param in self.net_d.parameters():
+                param.requires_grad = False
+            for param in self.net_g.parameters():
+                param.requires_grad = True
+        else:
+            for param in self.net_d.parameters():
+                param.requires_grad = True
+            for param in self.net_g.parameters():
+                param.requires_grad = True
 
     def on_train_epoch_end(self):
         self.test()
@@ -302,15 +309,22 @@ class TrainingModule(L.LightningModule):
             fake_audio.squeeze(1), audio.squeeze(1), voiced_mask_mel=voiced_mask_smooth)
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft 
 
-        disc_label = self.config.train.get('disc_label', 1.0)
-        # Generator Loss
         if self.use_adv:
-            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = self.net_d(audio, fake_audio)
+            # Generator Loss
+            disc_fake = self.net_d(fake_audio)
+            score_loss = 0.0
+            for (_, score_fake) in disc_fake:
+                score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+            score_loss = score_loss / len(disc_fake)
 
-            # score_loss
-            score_loss, _ = generator_loss(y_d_hat_r)
-            # feat_loss
-            feat_loss = feature_loss(fmap_r, fmap_g)
+            # Feature Loss
+            disc_real = self.net_d(audio)
+            feat_loss = 0.0
+            for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+                for fake, real in zip(feat_fake, feat_real):
+                    feat_loss += torch.mean(torch.abs(fake - real))
+            feat_loss = feat_loss / len(disc_fake)
+            feat_loss = feat_loss * 2
         else:
             score_loss = torch.tensor(0.0).to(self.device)
             feat_loss = torch.tensor(0.0).to(self.device)
@@ -336,11 +350,12 @@ class TrainingModule(L.LightningModule):
         # Discriminator
         loss_d = 0.0
         if self.use_adv:
-            y_d_hat_r, y_d_hat_g, _, _ = self.net_d(audio, fake_audio.detach())
-            loss_d, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
-
-            loss_d = loss_d
-
+            disc_fake = self.net_d(fake_audio.detach())
+            disc_real = self.net_d(audio)
+            for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+                loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+                loss_d += torch.mean(torch.pow(score_fake, 2))
+            loss_d = loss_d / len(disc_fake)
         else:
             loss_d = torch.tensor(0.0).to(self.device)
 
@@ -411,7 +426,7 @@ def train(args):
         config          – path to the OmegaConf YAML config file (default: 'configs/base.yaml')
         svc5_ckpt       – path to SVC5 generator checkpoint
         rvc_gen_ckpt    – path to RVC generator checkpoint
-        rvc_disc_ckpt   – path to RVC discriminator checkpoint
+        disc_ckpt       – path to SVC5 discriminator checkpoint
         codec_ckpt      – path to codec checkpoint
         reset_prior     – number of prior layers to reset (default: 0)
         resume_from     – path to a Lightning checkpoint to resume from
@@ -424,7 +439,7 @@ def train(args):
             config='configs/base.yaml',
             svc5_ckpt=None,
             rvc_gen_ckpt=None,
-            rvc_disc_ckpt=None,
+            disc_ckpt=None,
             codec_ckpt=None,
             reset_prior=0,
             resume_from=None,
@@ -441,7 +456,7 @@ def train(args):
         segment_size=hp.data.segment_size // hp.data.hop_length,
         hp=hp
     )
-    net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+    net_d = Discriminator(hp=hp)
     codec = VevoRepCodec(
         input_channels=hp.codec.whisper_dim,
         output_channels=hp.codec.whisper_dim,
@@ -485,9 +500,9 @@ def train(args):
             state_dict = torch.load(args.codec_ckpt, map_location='cpu', weights_only=False)['state_dict']
             load_submodule_prefix(codec, 'model.', state_dict)
 
-        if args.rvc_disc_ckpt is not None:
-            print("Loading RVC discriminator checkpoint: {}".format(args.rvc_disc_ckpt))
-            state_dict = torch.load(args.rvc_disc_ckpt, map_location='cpu', weights_only=False)['model']
+        if args.disc_ckpt is not None:
+            print("Loading SVC5 discriminator checkpoint: {}".format(args.disc_ckpt))
+            state_dict = torch.load(args.disc_ckpt, map_location='cpu')['model_d']
             load_state_dict_mismatch(net_d, state_dict)
 
     if args.reset_prior > 0:

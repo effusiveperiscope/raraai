@@ -245,6 +245,9 @@ class SynthesizerTrn(nn.Module):
         pitch_extras=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
+
+        ppg_use = ppg_use + torch.randn_like(ppg_z) * 1 # perturbation
+
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
             alpha_scale=ppg_alpha)

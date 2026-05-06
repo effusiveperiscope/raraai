@@ -23,7 +23,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/sing_ac.ckpt'
+    BASE_MODEL = 'pretrain/titanplus512_48.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -84,7 +84,7 @@ def main():
         print("Done")
         
         max_steps = min(
-            len_dataset / config.train.batch_size * 2000, 
+            len_dataset * 2000 / config.train.batch_size * 2,  # not sure why need x2
             250000) # 2000 epochs or 250k steps whichever is fewer
         est_epochs = max_steps / len_dataset
 
@@ -137,7 +137,7 @@ def main():
             limit_val_batches=0,
             log_every_n_steps=config.train.get('log_interval', 50),
         )
-        trainer.fit(training_module, train_dataloader, ckpt_path = resume_ckpt)
+        trainer.fit(training_module, train_dataloader, ckpt_path = resume_ckpt, weights_only=False)
 
         del net_g
         del net_d

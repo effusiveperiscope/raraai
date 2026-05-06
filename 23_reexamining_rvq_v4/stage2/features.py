@@ -59,7 +59,6 @@ class MyFeatures:
         chunks = [audio_16k[i : i + CHUNK_SAMPLE] for i in range(0, len(audio_16k), CHUNK_SAMPLE)]
         chunks_feats = [self.extract_whisper_features(chunk) for chunk in chunks]
         out = torch.cat(chunks_feats, dim=1)
-        print(out.shape)
         return out
 
     def extract_speaker_features(self, file : str):

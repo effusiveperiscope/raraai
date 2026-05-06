@@ -19,7 +19,7 @@ class MyFeatures:
         self.hps = OmegaConf.load("./configs/base.yaml").data
 
         self.load_whisper()
-        self.load_whisper_base()
+        self.load_hubert()
         self.load_rmvpe()
         self.svc5_spk_model = SVC5SpeakerEncoder(device=device)
 
@@ -117,7 +117,7 @@ class MyFeatures:
     def extract_features(self, wav, sr):
         wav_16k = librosa.resample(wav, orig_sr=sr, target_sr=16000)
         ppg = self.extract_whisper(wav_16k)
-        vec = self.extract_whisper_base(wav_16k)
+        vec = self.extract_hubert(wav_16k)
 
         f0, extras = self.extract_pitch(wav_16k)
         f0_inharm = torch.from_numpy(extras['inharmonic_confidence'])
@@ -141,7 +141,7 @@ class MyFeatures:
 
         return {
             'whisper': ppg,
-            'whisper_base': vec,
+            'hubert': vec,
             'f0': f0,
             'f0_inharm': f0_inharm,
             'f0_subharm': f0_subharm,
@@ -152,7 +152,7 @@ class MyFeatures:
         }
 
     def expected_keys(self):
-        return ['whisper', 'whisper_base', 'f0', 'f0_inharm', 'f0_subharm', 'f0_confidence', 'spec', 'spk', 'wave']
+        return ['whisper', 'hubert', 'f0', 'f0_inharm', 'f0_subharm', 'f0_confidence', 'spec', 'spk', 'wave']
 
 if __name__ == "__main__":
     feats = MyFeatures()
