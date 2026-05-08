@@ -406,7 +406,7 @@ def parse_args():
 
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)
-    parser.add_argument('--rvc_disc_ckpt', type=str, default=None)
+    parser.add_argument('--disc_ckpt', type=str, default=None)
     parser.add_argument('--codec_ckpt', type=str, default=None)
     parser.add_argument('--reset_prior', type=int, default=0)
 
@@ -559,7 +559,7 @@ def train(args):
         #val_check_interval=2,
         log_every_n_steps=config.train.get('log_interval', 50),
     )
-    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)
+    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from, weights_only=False)
 
 
 if __name__ == '__main__':

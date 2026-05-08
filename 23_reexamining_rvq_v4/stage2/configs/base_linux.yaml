@@ -1,4 +1,4 @@
-exp_name: titan_fix
+exp_name: titan_svc5d_plus
 tensorboard_version: 0
 codec:
   whisper_dim: 512
@@ -65,8 +65,8 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/titan/train.txt
-  val_filelist: ./data/titan/val.txt
+  train_filelist: ./data/train_plus.txt
+  val_filelist: ./data/val_plus.txt
   spk_index: ./data/titan/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34
@@ -91,7 +91,7 @@ train:
 
   stage2_epoch: 0 # start training using gen/disc losses
   save_interval: 50
-  disc_only: 20
+  disc_only: 0
 vits:
   filter_channels: 640
   gin_channels: 256
