@@ -1,6 +1,7 @@
 import numpy as np
 from svc_helper.speaker.models import SVC5SpeakerEncoder
 from svc_helper.pitch.rmvpe import RMVPEModel
+from svc5hubert import hubert_model
 from utils import print_memory_usage
 from vits_extend.stft import TacotronSTFT
 from transformers import WhisperFeatureExtractor, WhisperModel
@@ -37,6 +38,22 @@ class MyFeatures:
             self.config = config
             self.device = device
         self.do_normalize = do_normalize
+
+
+    def load_hubert(self):
+        print("loading hubert...")
+        model = hubert_model.hubert_soft("pretrain/hubert-soft-0d54a1f4.pt")
+        model.eval()
+        model.to(self.dtype)
+        model.to(self.device)
+        self.hubert_model = model
+
+    def extract_hubert(self, wav_16k):
+        feats = torch.from_numpy(wav_16k).to(self.device)
+        feats = feats[None, None, :].to(self.dtype)
+        with torch.no_grad():
+            vec = self.hubert_model.units(feats).squeeze().data.cpu()
+        return vec
 
     def extract_whisper_features(self, audio_16k):
         inputs = self.feature_extractor(

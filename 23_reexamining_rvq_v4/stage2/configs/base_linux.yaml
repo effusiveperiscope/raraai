@@ -12,7 +12,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 17280
+  segment_size: 12000
   win_length: 1536
 dist_config:
   dist_backend: nccl

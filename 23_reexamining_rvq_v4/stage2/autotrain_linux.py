@@ -3,7 +3,8 @@ from preprocess import process_filelist
 import torch
 from omegaconf import OmegaConf
 from modeling.vits.models import SynthesizerTrn
-from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+# from svc_helper.svc.rvc.lib.infer_pack.models import MultiPeriodDiscriminatorV2
+from modeling.vits_decoder.discriminator import Discriminator
 from modeling.intensity import IntensityModel
 import sys
 sys.path.append('..')
@@ -23,7 +24,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/titanplus512_48.ckpt'
+    BASE_MODEL = 'pretrain/titanplussvc5d.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -38,7 +39,7 @@ def main():
             filepath_regex_rep="/mnt/data/")
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_dw_ema'
+        config.exp_name = basename + '_dw_ema2'
         config.train.test_filelist = 'data/test/val.txt'
         hp = config
 
@@ -53,7 +54,7 @@ def main():
             segment_size=hp.data.segment_size // hp.data.hop_length,
             hp=hp
         )
-        net_d = MultiPeriodDiscriminatorV2(use_spectral_norm=False)
+        net_d = Discriminator(hp=hp)
         codec = VevoRepCodec(
             input_channels=hp.codec.whisper_dim,
             output_channels=hp.codec.whisper_dim,
@@ -83,9 +84,10 @@ def main():
                 persistent_workers=num_workers > 0)
         print("Done")
         
-        max_steps = min(
-            len_dataset * 2000 / config.train.batch_size * 2,  # not sure why need x2
-            250000) # 2000 epochs or 250k steps whichever is fewer
+        max_steps = 250000
+        # max_steps = min(
+            # len_dataset * 2000 / config.train.batch_size * 2,  # not sure why need x2
+            # 250000) # 2000 epochs or 250k steps whichever is fewer
         est_epochs = max_steps / len_dataset
 
         if not os.path.exists(resume_ckpt):
