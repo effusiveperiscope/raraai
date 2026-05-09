@@ -92,7 +92,6 @@ class TrainingModule(L.LightningModule):
         hp = self.config
         # Goal is to sample mostly quantized 
         self.alpha_dist = Beta(torch.tensor([1.5]), torch.tensor([1.0]))
-        self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -103,8 +102,6 @@ class TrainingModule(L.LightningModule):
                             center=False,
                             device=self.device)
         self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions))
-        self.f0_stft = STFTLoss(self.device, 
-            fft_size=512, shift_size=50, win_length=200, window="hann_window")
         self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.test_dataset = dataset(self.config.train.test_filelist, is_train=False)
         self.test_dataloader = self.test_dataset.loader()
