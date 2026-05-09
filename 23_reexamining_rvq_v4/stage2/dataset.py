@@ -12,13 +12,15 @@ def interp2(tensor):
 
 def process_row(row):
     row['whisper_interp'] = interp2(row['whisper'])
+    row['hubert_interp'] = interp2(row['hubert'])
     return row
 
 def f0_dataset(filelist, is_train : bool):
     return dt.Dataset(
         filelist=filelist,
         field_specs=[
-            dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 768]), provide_length=True, keep_in_memory=False),
+            dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 512]), provide_length=True, keep_in_memory=False),
+            dt.FieldSpec(name='hubert', datatype=torch.Tensor, dim=torch.Size([-1, 512]), provide_length=True, keep_in_memory=False),
             dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_confidence', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_subharmonic', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),

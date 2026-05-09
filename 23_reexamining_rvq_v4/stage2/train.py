@@ -124,6 +124,8 @@ class TrainingModule(L.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
+                vec_interp = batch['hubert_interp'].to(self.dtype).to(self.device)
+
                 _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
                 ppg_z = rearrange(ppg_z, "b c t -> b t c")
@@ -154,7 +156,7 @@ class TrainingModule(L.LightningModule):
                 ppg_mask = commons.sequence_mask(ppg_len, max_length=f0.shape[1]).to(self.device)
 
                 out_audio = self.net_g.infer(ppg_zq, ppg_z, f0, spk, ppg_len, sid=sid, noise_scale = 
-                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras)
+                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras, hub=vec_interp)
 
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
@@ -230,6 +232,8 @@ class TrainingModule(L.LightningModule):
             ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
             ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
+        vec_interp = batch['hubert_interp']
+
         f0 = batch['f0'].to(ppg_interp.dtype)
         ppg_zq = ppg_zq[:,:f0.shape[1],:]
         ppg_interp = ppg_interp[:,:f0.shape[1],:]
@@ -262,7 +266,7 @@ class TrainingModule(L.LightningModule):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r, spk_preds) = self.net_g(
                 ppg_zq, ppg_z, f0, spec, spk, ppg_len, spec_len, sid=sid,
-                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha)
+                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha, hub=vec_interp)
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice

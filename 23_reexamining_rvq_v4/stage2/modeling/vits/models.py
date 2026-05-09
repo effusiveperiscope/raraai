@@ -231,6 +231,8 @@ class SynthesizerTrn(nn.Module):
             6,
             3,
             0.1,
+            vec_channels=hp.vits.get('hubert_dim', None),
+            spk_dim=hp.vits.spk_dim
         )
         self.enc_q = PosteriorEncoder(
             spec_channels,
@@ -275,7 +277,7 @@ class SynthesizerTrn(nn.Module):
 
         z_p, m_p, logs_p, ppg_mask, x, spk_preds = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
-            alpha_scale=ppg_alpha)
+            alpha_scale=ppg_alpha, hub=hub)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
 
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
@@ -294,12 +296,12 @@ class SynthesizerTrn(nn.Module):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r, spk_preds)
 
     def infer(self, ppg_zq, ppg_z, pit, spk, ppg_l, sid, noise_scale=0.3, 
-            ppg_alpha=1.0, pitch_extras=None):
+            ppg_alpha=1.0, pitch_extras=None, hub=None):
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x, _ = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
-                noise_scale=noise_scale, alpha_scale=ppg_alpha)
+                noise_scale=noise_scale, alpha_scale=ppg_alpha, hub=hub)
 
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
         o = self.dec(spk, z * ppg_mask, f0=pit, pitch_extras=pitch_extras)

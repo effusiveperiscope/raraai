@@ -101,3 +101,4 @@ vits:
   spk_dim: 256
   max_spk_count: 16384
   vec_dim: 256
+  hubert_dim: 512

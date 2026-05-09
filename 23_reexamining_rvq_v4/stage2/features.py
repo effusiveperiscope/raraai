@@ -17,7 +17,7 @@ class MyFeatures:
         device='cuda',
         config='configs/base_linux.yaml',
         whisper = 'openai/whisper-base',
-        feats_to_extract : set[str] = {'whisper', 'spk', 'f0', 'spec', 'wave'},
+        feats_to_extract : set[str] = {'whisper', 'hubert', 'spk', 'f0', 'spec', 'wave'},
         do_normalize=True):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract
@@ -90,6 +90,10 @@ class MyFeatures:
         feat = {}
         if 'whisper' in self.feats_to_extract:
             feat['whisper'] = self.extract_whisper_features_chunked(data).squeeze(0)
+            if type(data) == io.BytesIO:
+                data.seek(0)
+        if 'hubert' in self.feats_to_extract:
+            feats['hubert'] = self.extract_hubert(data)
             if type(data) == io.BytesIO:
                 data.seek(0)
         if 'spk' in self.feats_to_extract:

@@ -75,7 +75,7 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
 
         if not regen_filelist:
             expected_keys = [
-                'whisper', 'f0',
+                'whisper', 'hubert', 'f0',
                 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic',
                 'spec', 'spk', 'wave']
             savepaths = {}
