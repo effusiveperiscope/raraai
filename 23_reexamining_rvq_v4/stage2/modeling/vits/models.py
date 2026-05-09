@@ -9,6 +9,7 @@ from . import modules
 from .utils import f0_to_coarse
 from ..rvc.my_nsf import MyGeneratorNSF, SpeakerAdapter
 from ..rvc.commons import FiLMGenerator, PitchConditioner2
+from modeling.vits.modules_grl import SpeakerClassifier
 from einops import rearrange
 
 
@@ -22,10 +23,20 @@ class TextEncoder(nn.Module):
                  n_heads,
                  n_layers,
                  kernel_size,
-                 p_dropout):
+                 p_dropout,
+                 # Only specify below if using hubert
+                 vec_channels=None,
+                 spk_dim=None):
         super().__init__()
         self.out_channels = out_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
+
+        if vec_channels is not None:
+            self.hub = nn.Conv1d(vec_channels, hidden_channels, kernel_size=5, padding=2)
+            self.speaker_classifier = SpeakerClassifier(
+                hidden_channels,
+                spk_dim,
+            )
 
         self.pit = PitchConditioner2(hidden_channels)
 
@@ -58,13 +69,24 @@ class TextEncoder(nn.Module):
         self.enc.reset_layers(n)
 
     def forward(self, ppg_q, x_lengths, f0, pitch_extras=None, sid=None,
-        alpha_scale=1.0, noise_scale=1.0): 
+        alpha_scale=1.0, noise_scale=1.0, hub=None): 
         x = rearrange(ppg_q, "b t c -> b c t")  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         ).to(x.device)
 
         x = self.pre(x) * x_mask
+
+        if hub:
+            # The input embeddings, due to quantization, are assumed to already be speaker invariant, or close to it.
+            # We care about speaker invariance of the input hubert feature.
+            assert hasattr(self, 'hub')
+            v = rearrange(hub, "b t c -> b c t")
+            v = self.hub(hub)
+            x = x + v 
+            spk_preds = self.speaker_classifier(v) 
+        else:
+            spk_preds = None
 
         if type(alpha_scale) == float:
             alpha_scale = torch.tensor([alpha_scale]).to(x.device).to(x.dtype)
@@ -95,7 +117,7 @@ class TextEncoder(nn.Module):
         # from commons import plot_spectrogram
         # import matplotlib.pyplot as plt
         # import pdb; pdb.set_trace()
-        return z, m, logs, x_mask, x
+        return z, m, logs, x_mask, x, spk_preds
 
 
 class ResidualCouplingBlock(nn.Module):
@@ -242,13 +264,14 @@ class SynthesizerTrn(nn.Module):
 
     def forward(self, ppg_zq, ppg_z, pit, spec, spk, ppg_l, spec_l, sid, 
         ppg_alpha=1.0, # 1.0 = FULLY quantized, 0.0 = not quantized
-        pitch_extras=None):
+        pitch_extras=None,
+        hub=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
 
         ppg_use = ppg_use + torch.randn_like(ppg_z) * 1 # perturbation
 
-        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
+        z_p, m_p, logs_p, ppg_mask, x, spk_preds = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
             alpha_scale=ppg_alpha)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
@@ -266,13 +289,13 @@ class SynthesizerTrn(nn.Module):
         z_f, logdet_f = self.flow(z_q, spec_mask, g=spk)
         z_r, logdet_r = self.flow(z_p, spec_mask, g=spk, reverse=True)
         return audio, ids_slice, spec_mask, \
-            (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r)
+            (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r, spk_preds)
 
     def infer(self, ppg_zq, ppg_z, pit, spk, ppg_l, sid, noise_scale=0.3, 
             ppg_alpha=1.0, pitch_extras=None):
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
-        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
+        z_p, m_p, logs_p, ppg_mask, x, _ = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
                 noise_scale=noise_scale, alpha_scale=ppg_alpha)
 

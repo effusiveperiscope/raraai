@@ -92,6 +92,7 @@ class TrainingModule(L.LightningModule):
         hp = self.config
         # Goal is to sample mostly quantized 
         self.alpha_dist = Beta(torch.tensor([1.5]), torch.tensor([1.0]))
+        self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -259,7 +260,7 @@ class TrainingModule(L.LightningModule):
         ppg_alpha = self.alpha_dist.sample().to(ppg_zq.device)
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
-            logs_q, logdet_f, logdet_r) = self.net_g(
+            logs_q, logdet_f, logdet_r, spk_preds) = self.net_g(
                 ppg_zq, ppg_z, f0, spec, spk, ppg_len, spec_len, sid=sid,
                 pitch_extras=pitch_extras, ppg_alpha=ppg_alpha)
 
@@ -293,6 +294,10 @@ class TrainingModule(L.LightningModule):
         voiced_mask_smooth = F.max_pool1d(
             voiced_mask.unsqueeze(1), kernel_size=5, stride=1, padding=2
         ).squeeze(1)
+
+        # Spk Loss
+        spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
+            .to(self.device).fill_(1.0))
 
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
@@ -335,7 +340,7 @@ class TrainingModule(L.LightningModule):
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + \
-            loss_kl_r * 0.5
+            loss_kl_r * 0.5 + spk_loss * 2
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
