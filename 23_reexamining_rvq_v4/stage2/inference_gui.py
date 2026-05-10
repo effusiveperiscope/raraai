@@ -54,7 +54,8 @@ class MainWindow(QMainWindow):
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.34))
         gui.addParam(DoubleParam(label="Alpha Scale", id='alpha_scale', min=0, max=1, default=0.0))
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=20000, default=0))
-        gui.addParam(BoolParam(label="Use pitch smoothing", id='use_smooth_pitch', default=False))
+        gui.addParam(BoolParam(label="Use pitch smoothing", id='use_smooth_pitch', default=True))
+        gui.addParam(BoolParam(label="Send pitch extras", id='use_pitch_extras', default=True))
         gui.addInference(Inference(
             info=InferenceInfo(sr=48000, extension='flac'),
             infer_action=self.inferAction
@@ -252,7 +253,7 @@ class MainWindow(QMainWindow):
                     ppg_l=ppg_len,
                     sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
                     noise_scale=data['noise'],
-                    pitch_extras=pitch_extras,
+                    pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
                     ppg_alpha=data['alpha_scale'])
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
