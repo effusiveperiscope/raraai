@@ -30,6 +30,8 @@ class MyFeatures:
             self.model = WhisperModel.from_pretrained(whisper_model).to(self.device).half()
             del self.model.decoder
             self.model.eval()
+        if 'hubert' in feats_to_extract:
+            self.load_hubert()
         if 'spk' in feats_to_extract:
             self.svc5_spk_model = SVC5SpeakerEncoder(device=device)
         if 'f0' in feats_to_extract:
@@ -44,13 +46,13 @@ class MyFeatures:
         print("loading hubert...")
         model = hubert_model.hubert_soft("pretrain/hubert-soft-0d54a1f4.pt")
         model.eval()
-        model.to(self.dtype)
+        model.half()
         model.to(self.device)
         self.hubert_model = model
 
     def extract_hubert(self, wav_16k):
         feats = torch.from_numpy(wav_16k).to(self.device)
-        feats = feats[None, None, :].to(self.dtype)
+        feats = feats[None, None, :].half()
         with torch.no_grad():
             vec = self.hubert_model.units(feats).squeeze().data.cpu()
         return vec
@@ -93,7 +95,7 @@ class MyFeatures:
             if type(data) == io.BytesIO:
                 data.seek(0)
         if 'hubert' in self.feats_to_extract:
-            feats['hubert'] = self.extract_hubert(data)
+            feat['hubert'] = self.extract_hubert(data)
             if type(data) == io.BytesIO:
                 data.seek(0)
         if 'spk' in self.feats_to_extract:

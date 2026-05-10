@@ -77,11 +77,11 @@ class TextEncoder(nn.Module):
 
         x = self.pre(x) * x_mask
 
-        if hub:
+        if hub is not None:
             # The input embeddings, due to quantization, are assumed to already be speaker invariant, or close to it.
             # We care about speaker invariance of the input hubert feature.
             assert hasattr(self, 'hub')
-            v = rearrange(hub, "b t c -> b c t")
+            hub = rearrange(hub, "b t c -> b c t")
             v = self.hub(hub)
             x = x + v 
             spk_preds = self.speaker_classifier(v) 
@@ -231,7 +231,7 @@ class SynthesizerTrn(nn.Module):
             6,
             3,
             0.1,
-            vec_channels=hp.vits.get('hubert_dim', None),
+            vec_channels=hp.vits.get('vec_dim', None),
             spk_dim=hp.vits.spk_dim
         )
         self.enc_q = PosteriorEncoder(

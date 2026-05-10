@@ -121,7 +121,9 @@ class TrainingModule(L.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
-                vec_interp = batch['hubert_interp'].to(self.dtype).to(self.device)
+                vec = batch['hubert'].to(self.dtype).to(self.device)
+                vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
+                vec_interp = rearrange(vec_interp, 'b d t -> b t d')
 
                 _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
@@ -129,6 +131,7 @@ class TrainingModule(L.LightningModule):
 
                 f0 = batch['f0'].to(self.dtype).to(self.device)
                 ppg_interp = ppg_interp[:,:f0.shape[1],:]
+                vec_interp = vec_interp[:,:f0.shape[1],:]
                 ppg_zq = ppg_zq[:,:f0.shape[1],:]
                 ppg_z = ppg_z[:,:f0.shape[1],:]
                 f0 = f0 * (2 ** (self.config.train.get('test_transpose', 0) / 12))
@@ -229,11 +232,14 @@ class TrainingModule(L.LightningModule):
             ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
             ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
-        vec_interp = batch['hubert_interp']
+        vec = batch['hubert']
+        vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
+        vec_interp = rearrange(vec_interp, 'b d t -> b t d')
 
         f0 = batch['f0'].to(ppg_interp.dtype)
         ppg_zq = ppg_zq[:,:f0.shape[1],:]
         ppg_interp = ppg_interp[:,:f0.shape[1],:]
+        vec_interp = vec_interp[:,:f0.shape[1],:]
         ppg_z = ppg_z[:,:f0.shape[1],:]
         f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype)
         f0_subharmonic = batch['f0_subharmonic'].to(ppg_interp.dtype)

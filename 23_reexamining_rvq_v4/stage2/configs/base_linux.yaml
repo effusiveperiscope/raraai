@@ -1,4 +1,4 @@
-exp_name: titan_svc5d_plus
+exp_name: titan_svc5dp_hubert
 tensorboard_version: 0
 codec:
   whisper_dim: 512
@@ -101,4 +101,3 @@ vits:
   spk_dim: 256
   max_spk_count: 16384
   vec_dim: 256
-  hubert_dim: 512
