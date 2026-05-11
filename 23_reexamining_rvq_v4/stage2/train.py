@@ -382,6 +382,7 @@ class TrainingModule(L.LightningModule):
         return {'loss_g': loss_g, 'loss_d': loss_d, 'g_norm': g_norm, 'd_norm': d_norm,
                 'score_loss': score_loss, 'feat_loss': feat_loss, 'mel_loss': mel_loss,
                 'stft_loss': stft_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r,
+                'spk_loss': spk_loss
                 }
 
     def training_step(self, batch, batch_idx):

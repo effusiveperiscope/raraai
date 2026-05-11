@@ -63,16 +63,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(gui.build())
 
         my_feats = MyFeatures(
-            feats_to_extract={'whisper', 'f0', 'spk'})
+            feats_to_extract={'whisper', 'hubert', 'f0', 'spk'})
         self.my_feats = my_feats
         self.dtype = torch.bfloat16
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-
-        # self.hubert_stats_path = config.data.get('hubert_stats_path', 
-        #     'hubert_large_stat.npz')
-        # stat = np.load(self.hubert_stats_path)
-        # self.hubert_feat_norm_mean = torch.tensor(stat["mean"])
-        # self.hubert_feat_norm_std = torch.tensor(stat["std"])
 
         self.emb_file = None
         self.emb = None
@@ -208,6 +202,10 @@ class MainWindow(QMainWindow):
             ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
             ppg_len = torch.tensor([feats['whisper'].shape[0]]).to(self.device) * 2
 
+            vec = feats['hubert'].to(self.dtype).to(self.device).unsqueeze(0)
+            vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
+            vec_interp = rearrange(vec_interp, 'b d t -> b t d')
+
             with torch.no_grad():
                 _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
@@ -254,7 +252,8 @@ class MainWindow(QMainWindow):
                     sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
                     noise_scale=data['noise'],
                     pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
-                    ppg_alpha=data['alpha_scale'])
+                    ppg_alpha=data['alpha_scale'],
+                    hub=vec_interp)
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]
