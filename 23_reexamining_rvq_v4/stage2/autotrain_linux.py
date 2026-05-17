@@ -24,7 +24,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/titanplussvc5d.ckpt'
+    BASE_MODEL = 'pretrain/isnn.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -36,10 +36,10 @@ def main():
             abs_path, val_fraction=0.00,
             output_dir=data_dir, skip_exists=True,
             filepath_regex_pattern=r"D:\\",
-            filepath_regex_rep="/mnt/data/")
+            filepath_regex_rep="/mnt/data/", do_normalize=False) # No Normalization November
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_dw_ema2'
+        config.exp_name = basename + '_nnn'
         config.train.test_filelist = 'data/test/val.txt'
         hp = config
 

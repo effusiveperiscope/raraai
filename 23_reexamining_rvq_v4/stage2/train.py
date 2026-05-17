@@ -327,7 +327,7 @@ class TrainingModule(L.LightningModule):
             score_loss = 0.0
             for (_, score_fake) in disc_fake:
                 score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
-            score_loss = score_loss / len(disc_fake)
+            score_loss = score_loss / len(disc_fake) * hp.train.get('c_score')
 
             # Feature Loss
             disc_real = self.net_d(audio)
@@ -489,10 +489,8 @@ def train(args):
             state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_g']
             load_state_dict_mismatch(net_g, state_dict)
 
-            assert args.rvc_gen_ckpt is not None
-            print("Loading RVC generator checkpoint: {}".format(args.rvc_gen_ckpt))
-            state_dict = torch.load(args.rvc_gen_ckpt, map_location='cpu')['model']
-            load_submodule_prefix(net_g.dec, 'dec.', state_dict)
+            state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
+            load_state_dict_mismatch(net_d, state_dict)
 
             assert args.codec_ckpt is not None
         elif args.resume_from is not None:

@@ -1,4 +1,4 @@
-exp_name: svc5tf_base
+exp_name: intensity_subset_no_norm
 tensorboard_version: 0
 codec:
   whisper_dim: 512
@@ -66,8 +66,8 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/train_plus.txt
-  val_filelist: ./data/val_plus.txt
+  train_filelist: ./data/intensity_no_norm/train.txt
+  val_filelist: ./data/intensity_no_norm/val.txt
   spk_index: ./data/titan/sid_avgs.pt
   test_filelist: ./data/test/val.txt
   test_noise_scale: 0.34

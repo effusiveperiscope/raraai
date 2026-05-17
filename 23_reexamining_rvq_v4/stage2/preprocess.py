@@ -22,7 +22,8 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                      regen_filelist=False,
                      skip_exists=False,
                      filepath_regex_pattern=None,
-                     filepath_regex_rep=None):
+                     filepath_regex_rep=None,
+                     do_normalize=True):
     with open(filelist_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
 
@@ -39,11 +40,11 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
 
     if not regen_filelist:
         if feats_to_extract is None:
-            extractor = MyFeatures(config=config)
+            extractor = MyFeatures(config=config, do_normalize=do_normalize)
         else:
             extractor = MyFeatures(
                 config=config,
-                feats_to_extract=feats_to_extract
+                feats_to_extract=feats_to_extract, do_normalize=do_normalize
             )
 
     is_multispk = False
@@ -224,6 +225,7 @@ if __name__ == '__main__':
     parser.add_argument('--shuffle_seed', type=int, default=42)
     parser.add_argument('--regen_filelist', action='store_true')
     parser.add_argument('--regen_spk_index', action='store_true')
+    parser.add_argument('--no_normalize', action='store_true')
 
     args = parser.parse_args()
 
@@ -238,5 +240,6 @@ if __name__ == '__main__':
         shuffle_seed=args.shuffle_seed,
         regen_filelist=args.regen_filelist,
         feats_to_extract=None,
+        do_normalize=not args.no_normalize
         #skip_exists=True
     )

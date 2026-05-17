@@ -273,7 +273,7 @@ class SynthesizerTrn(nn.Module):
 
         ppg_use = ppg_use + torch.randn_like(ppg_z) * 1 # perturbation
         if hub is not None:
-            hub = hub + torch.randn_like(hub) * 2 # perturbation
+            hub = hub + torch.randn_like(hub) * 1 # perturbation
 
         z_p, m_p, logs_p, ppg_mask, x, spk_preds = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,

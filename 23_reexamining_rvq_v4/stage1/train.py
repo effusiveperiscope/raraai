@@ -3,6 +3,8 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 import sys
+
+from commons import load_submodule_prefix
 sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
 import ultimate_xc
@@ -18,9 +20,18 @@ class TrainingModule(pl.LightningModule):
 
     def step(self, batch, batch_idx, is_test=False):
         whisper = batch['whisper']
+        whisper_len = batch['whisper_length']
         yq, y, zq, z, vqloss, perplexity = self.model(whisper)
-        q_recon_loss = F.mse_loss(yq, whisper)
-        recon_loss = F.mse_loss(y, whisper)
+
+        # Create a mask based on lengths [B, T, 1]
+        B, T, C = whisper.shape
+        mask = torch.arange(T, device=whisper.device)[None, :] < whisper_len[:, None]  # [B, T]
+        mask = mask.unsqueeze(-1).float()  # [B, T, 1]
+
+        # Apply mask and compute mean over valid positions only
+        q_recon_loss = (F.mse_loss(yq, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
+        recon_loss = (F.mse_loss(y, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
+
         loss = q_recon_loss + vqloss * self.config.c_vqloss + recon_loss * self.config.c_reconloss
         od = {
             'loss': loss,
@@ -104,6 +115,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--resume_from', type=str, default=None)
+    parser.add_argument('--transfer_from', type=str, default=None)
 
     args = parser.parse_args()
 
@@ -121,9 +133,14 @@ if __name__ == '__main__':
     if os.path.exists(f'checkpoints/{config.exp_name}/last.ckpt'):
         print('Detected interrupted training - resuming from last.ckpt')
         args.resume_from = f'checkpoints/{config.exp_name}/last.ckpt'
+    elif args.transfer_from is not None:
+            print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
+            state = torch.load(args.transfer_from, map_location='cpu', weights_only=False)['state_dict']
+            load_submodule_prefix(model, 'model.', state)
     else:
         if args.resume_from is not None:
             print(f'Resuming from {args.resume_from}')
+
     training_module = TrainingModule(model, config)
     train_dataset = dataset(config.train_filelist, is_train=True)
     val_dataset = dataset(config.val_filelist, is_train=False)

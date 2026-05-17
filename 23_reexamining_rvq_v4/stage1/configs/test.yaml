@@ -1,6 +1,6 @@
-exp_name: base_whisper768_code48_test
+exp_name: base_whisper1280_code48_test
 
-whisper_dim: 768
+whisper_dim: 1280
 codebook_size: 48
 code_dim: 256
 

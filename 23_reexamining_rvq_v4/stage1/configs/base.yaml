@@ -1,6 +1,6 @@
-exp_name: base_whisper512_code48_alt2
+exp_name: base_whisper1280_code48_2
 
-whisper_dim: 512
+whisper_dim: 1280
 codebook_size: 48
 code_dim: 256
 

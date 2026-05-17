@@ -20,7 +20,7 @@ def dataset(filelist, is_train: bool):
         filelist=filelist,
         field_specs=[
             dt.FieldSpec(name='whisper', datatype=torch.Tensor,
-                dim=torch.Size([-1, 1024]), keep_in_memory=False)
+                dim=torch.Size([-1, 1024]), keep_in_memory=False, provide_length=True)
         ],
         actions=[
             dt.LiveMapRow(operation=interp_row),

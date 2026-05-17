@@ -590,7 +590,7 @@ class VevoRepCodec(nn.Module):
         Forward pass through the VevoRepCodec.
 
         Args:
-            x (Tensor): Input tensor of shape (B, input_channels, T)
+            x (Tensor): Input tensor of shape (B, T, input_channels)
                 where B = batch size, input_channels = number of channels
                 in the input features, and T = temporal length.
 
@@ -611,7 +611,7 @@ class VevoRepCodec(nn.Module):
             - T' may differ from T if the encoder/decoder use strides.
             - The quantizer is a Residual Vector Quantizer (ResidualVQ) that may use multiple codebooks.
         """
-        x = rearrange(x, "b c t -> b t c")
+        x = rearrange(x, "b t c -> b c t")
         x = self.encoder(x)
         z = self.projector(x)
         zq, vqloss, perplexity = self.quantizer(z)
