@@ -1,4 +1,4 @@
-exp_name: base_whisper1280_code48_2
+exp_name: base_whisper1280_code48_3
 
 whisper_dim: 1280
 codebook_size: 48

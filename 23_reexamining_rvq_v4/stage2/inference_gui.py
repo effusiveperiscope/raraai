@@ -39,7 +39,7 @@ class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
         super().__init__()
         self.config = config
-        self.setWindowTitle("21 Inference GUI")
+        self.setWindowTitle("23 Inference GUI")
         self.setGeometry(100, 100, 800, 600)
 
         gui = VoiceGUI()
@@ -63,7 +63,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(gui.build())
 
         my_feats = MyFeatures(
-            feats_to_extract={'whisper', 'hubert', 'f0', 'spk'}, do_normalize=False)
+            # whisper = 'openai/whisper-base', # XXX
+            feats_to_extract={'whisper', 'f0', 'spk'}, do_normalize=False)
         self.my_feats = my_feats
         self.dtype = torch.bfloat16
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -207,11 +208,6 @@ class MainWindow(QMainWindow):
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
                 ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
-            vec = feats['hubert'].to(self.dtype).to(self.device).unsqueeze(0)
-            vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
-            vec_interp = F.pad(vec_interp, (0, ppg_zq.shape[1] - vec_interp.shape[2]), value=0) # pad to fit
-            vec_interp = rearrange(vec_interp, 'b d t -> b t d')
-
             # Transpose
             f0 = feats['f0'] * (2 ** (transpose / 12))
 
@@ -253,8 +249,7 @@ class MainWindow(QMainWindow):
                     sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
                     noise_scale=data['noise'],
                     pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
-                    ppg_alpha=data['alpha_scale'],
-                    hub=vec_interp)
+                    ppg_alpha=data['alpha_scale'])
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]

@@ -1,7 +1,7 @@
 exp_name: large_base
 tensorboard_version: 0
 codec:
-  whisper_dim: 1280
+  whisper_dim: 512
   code_dim: 256
   codebook_size: 48
 data:

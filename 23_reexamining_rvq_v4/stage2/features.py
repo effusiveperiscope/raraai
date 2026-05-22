@@ -16,8 +16,8 @@ class MyFeatures:
     def __init__(self, 
         device='cuda',
         config='configs/base_linux.yaml',
-        whisper = 'openai/whisper-base',
-        feats_to_extract : set[str] = {'whisper', 'hubert', 'spk', 'f0', 'spec', 'wave'},
+        whisper = 'openai/whisper-large-v2',
+        feats_to_extract : set[str] = {'whisper', 'spk', 'f0', 'spec', 'wave'},
         do_normalize=True):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract

@@ -12,7 +12,6 @@ def interp2(tensor):
 
 def process_row(row):
     row['whisper_interp'] = interp2(row['whisper'])
-    row['hubert_interp'] = interp2(row['hubert'])
     return row
 
 def f0_dataset(filelist, is_train : bool):
@@ -20,7 +19,6 @@ def f0_dataset(filelist, is_train : bool):
         filelist=filelist,
         field_specs=[
             dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 512]), provide_length=True, keep_in_memory=False),
-            dt.FieldSpec(name='hubert', datatype=torch.Tensor, dim=torch.Size([-1, 512]), provide_length=True, keep_in_memory=False),
             dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_confidence', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_subharmonic', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
@@ -46,7 +44,6 @@ def dataset(filelist, is_train : bool):
         filelist=filelist,
         field_specs=[
             dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 1280]), provide_length=True, keep_in_memory=False),
-            dt.FieldSpec(name='hubert', datatype=torch.Tensor, dim=torch.Size([-1, 512]), provide_length=True, keep_in_memory=False),
             dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_confidence', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
             dt.FieldSpec(name='f0_subharmonic', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
@@ -57,12 +54,12 @@ def dataset(filelist, is_train : bool):
             dt.FieldSpec(name='sid', datatype=int),
         ],
         actions=[
-            dt.RandomSubsample(fields=['whisper', 'hubert', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
+            dt.RandomSubsample(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
                 # whisper is at half-resolution pre-interpolation
                 int(48000 / 480 * 2), # 4 seconds at half-resolution
-                frame_multiples=[1, 1, 2, 2, 2, 2, 2, 960],
+                frame_multiples=[1, 2, 2, 2, 2, 2, 960],
                 dims=[0, 0, 0, 0, 0, 0, 0, 0],),
-            dt.PadGroup(fields=['whisper', 'hubert', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
+            dt.PadGroup(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
             dims = [0, 0, 0, 0, 0, 0, 0], values = [0, 0, 0, 0, 0, 0, 0], to_length=[257, 257, 257, 257, 257, 257, 257]), # fft_size // 2 + 1
             dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
         ],

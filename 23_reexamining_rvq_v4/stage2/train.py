@@ -121,17 +121,12 @@ class TrainingModule(L.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
-                vec = batch['hubert'].to(self.dtype).to(self.device)
-                vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
-                vec_interp = rearrange(vec_interp, 'b d t -> b t d')
-
                 _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
                 ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
                 f0 = batch['f0'].to(self.dtype).to(self.device)
                 ppg_interp = ppg_interp[:,:f0.shape[1],:]
-                vec_interp = vec_interp[:,:f0.shape[1],:]
                 ppg_zq = ppg_zq[:,:f0.shape[1],:]
                 ppg_z = ppg_z[:,:f0.shape[1],:]
                 f0 = f0 * (2 ** (self.config.train.get('test_transpose', 0) / 12))
@@ -156,7 +151,7 @@ class TrainingModule(L.LightningModule):
                 ppg_mask = commons.sequence_mask(ppg_len, max_length=f0.shape[1]).to(self.device)
 
                 out_audio = self.net_g.infer(ppg_zq, ppg_z, f0, spk, ppg_len, sid=sid, noise_scale = 
-                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras, hub=vec_interp)
+                    self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras)
 
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
@@ -232,14 +227,9 @@ class TrainingModule(L.LightningModule):
             ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
             ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
-        vec = batch['hubert']
-        vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
-        vec_interp = rearrange(vec_interp, 'b d t -> b t d')
-
         f0 = batch['f0'].to(ppg_interp.dtype)
         ppg_zq = ppg_zq[:,:f0.shape[1],:]
         ppg_interp = ppg_interp[:,:f0.shape[1],:]
-        vec_interp = vec_interp[:,:f0.shape[1],:]
         ppg_z = ppg_z[:,:f0.shape[1],:]
         f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype)
         f0_subharmonic = batch['f0_subharmonic'].to(ppg_interp.dtype)
@@ -269,7 +259,7 @@ class TrainingModule(L.LightningModule):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r, spk_preds) = self.net_g(
                 ppg_zq, ppg_z, f0, spec, spk, ppg_len, spec_len, sid=sid,
-                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha, hub=vec_interp)
+                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha)
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
@@ -415,7 +405,7 @@ class TrainingModule(L.LightningModule):
 def parse_args():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/base.yaml')
+    parser.add_argument('--config', type=str, default='configs/base_linux.yaml')
 
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--rvc_gen_ckpt', type=str, default=None)

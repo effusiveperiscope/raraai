@@ -75,7 +75,7 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
             continue
 
         expected_keys = [
-            'whisper', 'hubert', 'f0',
+            'whisper', 'f0',
             'f0_confidence', 'f0_subharmonic', 'f0_inharmonic',
             'spec', 'spk', 'wave']
         if not regen_filelist:
@@ -89,7 +89,6 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                 print("skip_flag triggered on line ", line)
                 newline = '|'.join(
                     [savepaths['whisper'],
-                    savepaths['hubert'],
                     savepaths['f0'],
                     savepaths['f0_confidence'],
                     savepaths['f0_subharmonic'],
@@ -123,7 +122,6 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
 
             newline = '|'.join([
                 savepaths['whisper'],
-                savepaths['hubert'],
                 savepaths['f0'],
                 savepaths['f0_confidence'],
                 savepaths['f0_subharmonic'],
@@ -147,7 +145,6 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                 savepaths[key] = os.path.join(output_dir, os.path.basename(line) + '.' + key)
             newline = '|'.join(
                 [savepaths['whisper'],
-                savepaths['hubert'],
                  savepaths['f0'],
                   savepaths['f0_confidence'],
                   savepaths['f0_subharmonic'],
