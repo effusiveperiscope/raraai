@@ -293,8 +293,11 @@ class TrainingModule(L.LightningModule):
         ).squeeze(1)
 
         # Spk Loss
-        spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
-            .to(self.device).fill_(1.0))
+        if spk_preds is not None:
+            spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
+                .to(self.device).fill_(1.0))
+        else:
+            spk_loss = 0
 
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
