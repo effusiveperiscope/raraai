@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
 
         my_feats = MyFeatures(
             # whisper = 'openai/whisper-base', # XXX
-            feats_to_extract={'whisper', 'f0', 'spk'}, do_normalize=False)
+            feats_to_extract={'whisper', 'f0', 'spk'}, do_normalize=True)
         self.my_feats = my_feats
         self.dtype = torch.bfloat16
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')

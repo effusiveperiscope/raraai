@@ -1,4 +1,4 @@
-exp_name: large_base
+exp_name: mlp_base
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
@@ -56,7 +56,6 @@ train:
   c_mel: 1.0
   c_stft: 9
   c_score: 4
-  c_unvoiced: 0.6
   epochs: 602
   eps: 1e-9
   lr: 1e-4

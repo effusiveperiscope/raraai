@@ -101,7 +101,8 @@ class TrainingModule(L.LightningModule):
                             mel_fmax=hp.data.mel_fmax,
                             center=False,
                             device=self.device)
-        self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions))
+        self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions),
+            unvoiced_weight = self.config.train.get('c_unvoiced', 0.5))
         self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.test_dataset = dataset(self.config.train.test_filelist, is_train=False)
         self.test_dataloader = self.test_dataset.loader()
@@ -302,7 +303,8 @@ class TrainingModule(L.LightningModule):
         # Mel Loss
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
         mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
-        mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth) * hp.train.c_mel
+        mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth,
+            unvoiced_weight = self.config.train.get('c_unvoiced', 0.5)) * hp.train.c_mel
 
         # # audio is of shape [b, 1, t]
         # dump_batched_audio(audio, prefix="gt_", sr=hp.data.sampling_rate)
@@ -538,9 +540,14 @@ def train(args):
         filename='best-checkpoint',
         save_top_k=config.train.keep_ckpts,
         mode='min',
+    )
+    last_callback = L.pytorch.callbacks.ModelCheckpoint( # just save last
+        dirpath=f'checkpoints/{config.exp_name}',
+        filename='last',
         save_last=True
     )
-    callbacks = [val_checkpoint_callback]
+
+    callbacks = [val_checkpoint_callback, last_callback]
     if config.train.get('save_interval') is not None:
         interval_checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_interval,

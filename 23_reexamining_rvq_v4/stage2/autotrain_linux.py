@@ -42,6 +42,7 @@ def main():
         config.exp_name = basename + '_large_halflr'
         config.train.test_filelist = 'data/test/val.txt'
         config.train.lr = config.train.lr / 2
+        config.train.c_unvoiced = 0.2
         print(f"using lr {config.train.lr}")
         hp = config
 
