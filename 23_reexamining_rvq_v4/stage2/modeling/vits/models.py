@@ -33,10 +33,6 @@ class TextEncoder(nn.Module):
 
         if vec_channels is not None:
             self.hub = nn.Conv1d(vec_channels, hidden_channels, kernel_size=5, padding=2)
-            self.speaker_classifier = SpeakerClassifier(
-                hidden_channels,
-                spk_dim,
-            )
 
         self.pit = PitchConditioner2(hidden_channels)
 
@@ -84,9 +80,6 @@ class TextEncoder(nn.Module):
             hub = rearrange(hub, "b t c -> b c t")
             v = self.hub(hub)
             x = x + v 
-            spk_preds = self.speaker_classifier(v) 
-        else:
-            spk_preds = None
 
         if type(alpha_scale) == float:
             alpha_scale = torch.tensor([alpha_scale]).to(x.device).to(x.dtype)
@@ -117,7 +110,7 @@ class TextEncoder(nn.Module):
         # from commons import plot_spectrogram
         # import matplotlib.pyplot as plt
         # import pdb; pdb.set_trace()
-        return z, m, logs, x_mask, x, spk_preds
+        return z, m, logs, x_mask, x
 
 
 class ResidualCouplingBlock(nn.Module):
@@ -253,6 +246,10 @@ class SynthesizerTrn(nn.Module):
             p_dropout=0.2
         )
         self.dec = MyGeneratorNSF(hp=hp)
+        self.speaker_classifier = SpeakerClassifier(
+            hp.vits.hidden_channels,
+            hp.vits.spk_dim,
+        )
 
     def freeze_layers(self,
         enc_p_n=0,
@@ -275,10 +272,12 @@ class SynthesizerTrn(nn.Module):
         if hub is not None:
             hub = hub + torch.randn_like(hub) * 1 # perturbation
 
-        z_p, m_p, logs_p, ppg_mask, x, spk_preds = self.enc_p(
+        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
             alpha_scale=ppg_alpha, hub=hub)
         z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
+
+        spk_preds = self.speaker_classifier(z_p) 
 
         z_slice, pit_slice, ids_slice = commons.rand_slice_segments_with_pitch(
             z_q, pit, spec_l, self.segment_size)
@@ -299,7 +298,7 @@ class SynthesizerTrn(nn.Module):
             ppg_alpha=1.0, pitch_extras=None, hub=None):
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
-        z_p, m_p, logs_p, ppg_mask, x, _ = self.enc_p(
+        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
                 noise_scale=noise_scale, alpha_scale=ppg_alpha, hub=hub)
 

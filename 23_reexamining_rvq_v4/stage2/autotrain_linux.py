@@ -24,7 +24,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/large_base.ckpt'
+    BASE_MODEL = 'pretrain/mlp_base_large.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -39,7 +39,7 @@ def main():
             filepath_regex_rep="/mnt/data/") 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_large_halflr'
+        config.exp_name = basename + '_large_halflr_mlpbase'
         config.train.test_filelist = 'data/test/val.txt'
         config.train.lr = config.train.lr / 2
         config.train.c_unvoiced = 0.2

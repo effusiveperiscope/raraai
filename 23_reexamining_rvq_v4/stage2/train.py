@@ -487,8 +487,13 @@ def train(args):
             state_dict = torch.load(args.svc5_ckpt, map_location='cpu')['model_d']
             load_state_dict_mismatch(net_d, state_dict)
 
-            assert args.codec_ckpt is not None
-        elif args.resume_from is not None:
+            if args.codec_ckpt is None:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('No codec file provided')
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            # assert args.codec_ckpt is not None
+
+        if args.resume_from is not None:
             print('Resuming from lightning checkpoint: {}'.format(args.resume_from))
         elif args.transfer_from is not None:
             print('Transferring from lightning checkpoint: {}'.format(args.transfer_from))
