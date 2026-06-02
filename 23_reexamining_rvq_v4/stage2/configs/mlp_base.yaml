@@ -12,7 +12,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 12000
+  segment_size: 8000
   win_length: 1536
 dist_config:
   dist_backend: nccl
@@ -42,7 +42,7 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 16
+  batch_size: 12
 
   weight_decay: 1e-4
   cosine_anneal_steps: 100000
