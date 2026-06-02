@@ -40,6 +40,19 @@ def drop_len_check(row):
         return True
 
 def dataset(filelist, is_train : bool):
+
+    actions = [
+        dt.PadGroup(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
+        dims = [0, 0, 0, 0, 0, 0, 0], values = [0, 0, 0, 0, 0, 0, 0], to_length=[257, 257, 257, 257, 257, 257, 257]), # fft_size // 2 + 1
+        dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
+    ]
+    if is_train: # Don't perform random subsampling on test samples
+        actions.append(
+            dt.RandomSubsample(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
+            # whisper is at half-resolution pre-interpolation
+            int(48000 / 480 * 2), # 4 seconds at half-resolution
+            frame_multiples=[1, 2, 2, 2, 2, 2, 960],
+            dims=[0, 0, 0, 0, 0, 0, 0, 0],)),
     return dt.Dataset(
         filelist=filelist,
         field_specs=[
@@ -53,16 +66,7 @@ def dataset(filelist, is_train : bool):
             dt.FieldSpec(name='wave', datatype=torch.Tensor, dim=torch.Size([-1]), provide_length=True, keep_in_memory=False),
             dt.FieldSpec(name='sid', datatype=int),
         ],
-        actions=[
-            dt.RandomSubsample(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
-                # whisper is at half-resolution pre-interpolation
-                int(48000 / 480 * 2), # 4 seconds at half-resolution
-                frame_multiples=[1, 2, 2, 2, 2, 2, 960],
-                dims=[0, 0, 0, 0, 0, 0, 0, 0],),
-            dt.PadGroup(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
-            dims = [0, 0, 0, 0, 0, 0, 0], values = [0, 0, 0, 0, 0, 0, 0], to_length=[257, 257, 257, 257, 257, 257, 257]), # fft_size // 2 + 1
-            dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
-        ],
+        actions = actions,
         is_train=is_train
     )
 
