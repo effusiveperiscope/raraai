@@ -268,7 +268,7 @@ class SynthesizerTrn(nn.Module):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
 
-        ppg_use = ppg_use + torch.randn_like(ppg_z) * 1 # perturbation
+        ppg_use = ppg_use + torch.randn_like(ppg_z) * 0.3 # perturbation
         if hub is not None:
             hub = hub + torch.randn_like(hub) * 1 # perturbation
 
@@ -297,6 +297,10 @@ class SynthesizerTrn(nn.Module):
     def infer(self, ppg_zq, ppg_z, pit, spk, ppg_l, sid, noise_scale=0.3, 
             ppg_alpha=1.0, pitch_extras=None, hub=None):
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
+
+        # print(ppg_use.std())
+        # print(ppg_use.std(2)) # channel
+
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,

@@ -1,4 +1,4 @@
-exp_name: mlp_base_newcod1
+exp_name: mlp_base_newcod2
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
