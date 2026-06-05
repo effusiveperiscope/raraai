@@ -1,6 +1,8 @@
 import datatia as dt
 import torch
 import torch.nn.functional as F
+import os
+from pathlib import Path
 from einops import rearrange
 
 def interp2(tensor):
@@ -41,6 +43,25 @@ def drop_len_check(row):
 
 def dataset(filelist, is_train : bool):
 
+    filelines = []
+    with open(filelist) as f:
+        filelines = f.readlines()
+
+    def relpath(fileline):
+        fileline = fileline.strip()
+        parent = Path(filelist).parent # Assume the filelist path is correct and where the data is located
+        name = Path(fileline).name
+        return str(parent / name)
+        
+    if len(filelines) > 0 and not os.path.exists(filelines[0]):
+        print(f"Checking for relative path resolution of data @ {Path(filelist).parent} ...")
+        # Check for relative paths
+        if os.path.exists(relpath(filelines[0])):
+            print("Found")
+            filelines = [relpath(x) for x in filelines]
+        else:
+            raise ValueError(f"Could not find data files @ {Path(filelist).parent}")
+
     actions = [
         dt.PadGroup(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
         dims = [0, 0, 0, 0, 0, 0, 0], values = [0, 0, 0, 0, 0, 0, 0], to_length=[257, 257, 257, 257, 257, 257, 257]), # fft_size // 2 + 1
@@ -54,7 +75,7 @@ def dataset(filelist, is_train : bool):
             frame_multiples=[1, 2, 2, 2, 2, 2, 960],
             dims=[0, 0, 0, 0, 0, 0, 0, 0],)),
     return dt.Dataset(
-        filelist=filelist,
+        filelist=filelines,
         field_specs=[
             dt.FieldSpec(name='whisper', datatype=torch.Tensor, dim=torch.Size([-1, 1280]), provide_length=True, keep_in_memory=False),
             dt.FieldSpec(name='f0', datatype=torch.Tensor, dim=torch.Size([-1]), keep_in_memory=False),
