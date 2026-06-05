@@ -1,8 +1,9 @@
-exp_name: mlp_base_newcod2
+exp_name: mlp_base_newcod3
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
   code_dim: 256
+  hidden_dim: 512
   codebook_size: 48
 data:
   filter_length: 1536

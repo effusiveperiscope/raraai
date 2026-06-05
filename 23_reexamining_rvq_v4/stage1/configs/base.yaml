@@ -1,7 +1,8 @@
-exp_name: base_whisper1280_code48_3
+exp_name: base_whisper1280_code48_small
 
 whisper_dim: 1280
 codebook_size: 48
+hidden_dim: 512
 code_dim: 256
 
 train_filelist: data/full2/train.txt

@@ -123,8 +123,8 @@ if __name__ == '__main__':
     model = VevoRepCodec(
         input_channels=config.whisper_dim,
         output_channels=config.whisper_dim,
-        encode_channels=config.whisper_dim,
-        decode_channels=config.whisper_dim,
+        encode_channels=config.hidden_dim,
+        decode_channels=config.hidden_dim,
         code_dim=config.code_dim,
         codebook_num=1,
         codebook_size=config.codebook_size

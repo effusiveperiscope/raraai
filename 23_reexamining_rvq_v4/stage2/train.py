@@ -420,6 +420,7 @@ def parse_args():
 
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
+    parser.add_argument('--decoder_from', type=str, default=None)
 
     return parser.parse_args()
 
@@ -468,8 +469,8 @@ def train(args):
     codec = VevoRepCodec(
         input_channels=hp.codec.whisper_dim,
         output_channels=hp.codec.whisper_dim,
-        encode_channels=hp.codec.whisper_dim,
-        decode_channels=hp.codec.whisper_dim,
+        encode_channels=hp.codec.hidden_dim,
+        decode_channels=hp.codec.hidden_dim,
         code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),
         codebook_num=1,
         codebook_size=hp.codec.codebook_size
@@ -505,6 +506,11 @@ def train(args):
             print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
             print('!!! No checkpoint file found - starting from scratch !!!')
             print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+
+        if args.decoder_from is not None:
+            print('Transferring decoder from lightning checkpoint: {}'.format(args.decoder_from))
+            state = torch.load(args.decoder_from, map_location='cpu', weights_only=False)['state_dict']
+            load_submodule_prefix(net_g.dec, 'net_g.dec.', state)
 
         if args.codec_ckpt is not None:
             print("Loading codec checkpoint: {}".format(args.codec_ckpt))
