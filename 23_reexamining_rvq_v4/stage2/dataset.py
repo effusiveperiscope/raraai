@@ -43,24 +43,25 @@ def drop_len_check(row):
 
 def dataset(filelist, is_train : bool):
 
-    filelines = []
-    with open(filelist) as f:
-        filelines = f.readlines()
+    # filelines = []
+    # with open(filelist) as f:
+    #     filelines = f.readlines()
 
-    def relpath(fileline):
-        fileline = fileline.strip()
-        parent = Path(filelist).parent # Assume the filelist path is correct and where the data is located
-        name = Path(fileline).name
-        return str(parent / name)
+    # def relpath(fileline):
+    #     fileline = fileline.strip()
+    #     parent = Path(filelist).parent # Assume the filelist path is correct and where the data is located
+    #     name = Path(fileline).name
+    #     return str(parent / name)
         
-    if len(filelines) > 0 and not os.path.exists(filelines[0]):
-        print(f"Checking for relative path resolution of data @ {Path(filelist).parent} ...")
-        # Check for relative paths
-        if os.path.exists(relpath(filelines[0])):
-            print("Found")
-            filelines = [relpath(x) for x in filelines]
-        else:
-            raise ValueError(f"Could not find data files @ {Path(filelist).parent}")
+    # if len(filelines) > 0 and not os.path.exists(filelines[0]):
+    #     print(f"Checking for relative path resolution of data @ {Path(filelist).parent} ...")
+    #     # Check for relative paths
+    #     if os.path.exists(relpath(filelines[0])):
+    #         print("Found")
+    #         filelines = [relpath(x) for x in filelines]
+    #     else:
+    #         raise ValueError(f"Could not find data files @ {Path(filelist).parent}")
+    filelines = filelist
 
     actions = [
         dt.PadGroup(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
