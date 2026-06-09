@@ -33,7 +33,7 @@ import io
 
 logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
-CONFIG = 'configs/base_linux.yaml' # ~! remember to update this
+CONFIG = 'configs/mlp_base.yaml' # ~! remember to update this
 
 class MainWindow(QMainWindow):
     def __init__(self, config: OmegaConf):
@@ -105,6 +105,17 @@ class MainWindow(QMainWindow):
             ),
             None
         )
+        config = next(
+            (
+                os.path.join(root, f)
+                for root, _, files in os.walk(checkpoint_path)
+                for f in files
+                if f.endswith('.yaml')
+            ),
+            None
+        )
+        if config is not None:
+            self.config = OmegaConf.load(config)
 
         # Points to a lightning checkpoint
         self.net_g = SynthesizerTrn(
@@ -116,8 +127,8 @@ class MainWindow(QMainWindow):
         self.codec = VevoRepCodec(
             input_channels=hp.codec.whisper_dim,
             output_channels=hp.codec.whisper_dim,
-            encode_channels=hp.codec.whisper_dim,
-            decode_channels=hp.codec.whisper_dim,
+            encode_channels=hp.codec.get('hidden_dim', hp.codec.code_dim),
+            decode_channels=hp.codec.get('hidden_dim', hp.codec.code_dim),
             code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),
             codebook_num=1,
             codebook_size=hp.codec.codebook_size
@@ -131,7 +142,10 @@ class MainWindow(QMainWindow):
             if type(list(self.spk_index.keys())[0]) == str:
                 self.spk_index = {int(k): v for k, v in self.spk_index.items()}
         load_submodule_prefix(self.net_g, 'net_g.', state, quiet=True)
-        load_submodule_prefix(self.codec, 'codec.', state, quiet=True)
+        load_submodule_prefix(self.codec, 'codec.', state, quiet=False)
+
+        del self.codec.decoder
+
         self.net_g.to('cuda')
         self.net_g.eval()
         self.net_g.to(self.dtype)
@@ -204,7 +218,7 @@ class MainWindow(QMainWindow):
             ppg_len = torch.tensor([feats['whisper'].shape[0]]).to(self.device) * 2
 
             with torch.no_grad():
-                _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
+                ppg_zq, ppg_z = self.codec.forward_encode(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
                 ppg_z = rearrange(ppg_z, "b c t -> b t c")
 

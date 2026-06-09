@@ -621,6 +621,13 @@ class VevoRepCodec(nn.Module):
         y = rearrange(y, "b t c -> b c t")
         return yq, y, zq, z, vqloss, perplexity
 
+    def forward_encode(self, x):
+        x = rearrange(x, "b t c -> b c t")
+        x = self.encoder(x)
+        z = self.projector(x)
+        zq, vqloss, perplexity = self.quantizer(z)
+        return zq, z
+
     def forward_index(self, x):
         x = rearrange(x, "b c t -> b t c")
         x = self.encoder(x)
