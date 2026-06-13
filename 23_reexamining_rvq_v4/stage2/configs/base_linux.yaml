@@ -2,7 +2,7 @@ exp_name: large_base
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
-  code_dim: 256
+  code_dim: 512
   hidden_dim: 512
   codebook_size: 48
 data:
@@ -13,7 +13,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 12000
+  segment_size: 8000
   win_length: 1536
 dist_config:
   dist_backend: nccl
@@ -43,10 +43,10 @@ mrd:
     240)]'
   use_spectral_norm: false
 train:
-  batch_size: 16
+  batch_size: 12
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 100000
+  cosine_anneal_steps: 500000
   warmup_steps: 10000
   # test05_warmup: 10000
   betas:
@@ -57,7 +57,6 @@ train:
   c_mel: 1.0
   c_stft: 9
   c_score: 4
-  c_unvoiced: 0.6
   epochs: 602
   eps: 1e-9
   lr: 1e-4

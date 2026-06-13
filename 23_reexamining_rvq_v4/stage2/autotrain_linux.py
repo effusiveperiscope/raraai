@@ -24,7 +24,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/mlp_base_large.ckpt'
+    BASE_MODEL = 'pretrain/mlp_base_plus.ckpt'
     SRC_CONFIG = 'configs/base_linux.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -39,7 +39,7 @@ def main():
             filepath_regex_rep="/mnt/data/") 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_large_halflr_mlpbase'
+        config.exp_name = basename + '_mlpbase_plus'
         config.train.test_filelist = 'data/test/val.txt'
         config.train.lr = config.train.lr / 2
         config.train.c_unvoiced = 0.2
@@ -61,9 +61,9 @@ def main():
         codec = VevoRepCodec(
             input_channels=hp.codec.whisper_dim,
             output_channels=hp.codec.whisper_dim,
-            encode_channels=hp.codec.whisper_dim,
-            decode_channels=hp.codec.whisper_dim,
-            code_dim=hp.codec.code_dim,
+            encode_channels=hp.codec.hidden_dim,
+            decode_channels=hp.codec.hidden_dim,
+            code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),
             codebook_num=1,
             codebook_size=hp.codec.codebook_size
         )

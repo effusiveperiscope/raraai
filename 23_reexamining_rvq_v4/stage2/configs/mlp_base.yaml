@@ -1,8 +1,8 @@
-exp_name: mlp_base_newcod3
+exp_name: mlp_base_newcod5_plus_TEST
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
-  code_dim: 256
+  code_dim: 512
   hidden_dim: 512
   codebook_size: 48
 data:
@@ -46,7 +46,7 @@ train:
   batch_size: 12
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 100000
+  cosine_anneal_steps: 500000
   warmup_steps: 10000
   # test05_warmup: 10000
   betas:

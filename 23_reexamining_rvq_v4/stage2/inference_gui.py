@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
                          format='WAV', subtype='PCM_16')
                 file.seek(0)
 
-            feats = self.my_feats.extract_features(file)
+            feats = self.my_feats.extract_features(file, no_spk=True) # No need to extract spk here
 
             ppg = feats['whisper'].to(self.dtype).to(self.device).unsqueeze(0)
             ppg_interp = F.interpolate(rearrange(ppg, 'b t d -> b d t'), scale_factor=2)
