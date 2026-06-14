@@ -295,7 +295,7 @@ class TrainingModule(L.LightningModule):
         ).squeeze(1)
 
         # Spk Loss
-        if spk_preds is not None:
+        if spk_preds is not None and not self.config.train.get('disable_spk', False):
             spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
                 .to(self.device).fill_(1.0))
         else:
