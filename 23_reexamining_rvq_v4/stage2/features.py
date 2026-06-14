@@ -83,7 +83,7 @@ class MyFeatures:
     def extract_speaker_features(self, file : str):
         return self.svc5_spk_model.extract_feature(file)
 
-    def extract_features(self, file : str, no_spk : bool):
+    def extract_features(self, file : str, no_spk : bool = False):
         data, _ = librosa.load(file, sr=self.expected_sample_rate)
         if data.sum() == 0:
             raise ValueError(f'File {file} is empty')
