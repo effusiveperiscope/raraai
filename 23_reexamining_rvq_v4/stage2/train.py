@@ -153,7 +153,7 @@ class TrainingModule(L.LightningModule):
 
                 out_audio = self.net_g.infer(ppg_zq, ppg_z, f0, spk, ppg_len, sid=sid, noise_scale = 
                     self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras,
-                    ppg_alpha=0.5)
+                    ppg_alpha=self.config.train.get('test_alpha', 0.2))
 
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
