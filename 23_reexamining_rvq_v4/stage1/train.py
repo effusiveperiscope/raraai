@@ -144,7 +144,7 @@ if __name__ == '__main__':
     training_module = TrainingModule(model, config)
     train_dataset = dataset(config.train_filelist, is_train=True)
     val_dataset = dataset(config.val_filelist, is_train=False)
-    n_workers = 0
+    n_workers = 4
     train_dataloader = train_dataset.loader(
         batch_size=config.batch_size, shuffle=True, num_workers=n_workers, persistent_workers=n_workers > 0)
     val_dataloader = val_dataset.loader(
