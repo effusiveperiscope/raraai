@@ -87,6 +87,9 @@ class MyFeatures:
         data, _ = librosa.load(file, sr=self.expected_sample_rate)
         if data.sum() == 0:
             raise ValueError(f'File {file} is empty')
+        return self.extract_features_data(data)
+
+    def extract_features_data(self, data):
         if self.do_normalize:
             data = data / (np.abs(data).max()) * 0.99
         feat = {}
@@ -113,11 +116,8 @@ class MyFeatures:
             if type(data) == io.BytesIO:
                 data.seek(0)
         if 'spec' in self.feats_to_extract:
-
             hps = self.config.data
-            audio, _ = librosa.load(file, sr=hps.sampling_rate)
-            if self.do_normalize:
-                audio = librosa.util.normalize(audio)
+            audio = data
             audio = torch.from_numpy(audio).unsqueeze(0)
             n_fft = hps.filter_length
             sampling_rate = hps.sampling_rate
@@ -129,9 +129,7 @@ class MyFeatures:
             if type(data) == io.BytesIO:
                 data.seek(0)
         if 'wave' in self.feats_to_extract:
-            data_spec, _ = librosa.load(file, sr=self.config.data.sampling_rate)
-            if self.do_normalize:
-                data_spec = librosa.util.normalize(data_spec)
+            data_spec = data
             feat['wave'] = torch.from_numpy(data_spec)
             if type(data) == io.BytesIO:
                 data.seek(0)
