@@ -102,7 +102,7 @@ class TrainingModule(L.LightningModule):
                             center=False,
                             device=self.device)
         self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions),
-            unvoiced_weight = self.config.train.get('c_unvoiced', 0.5))
+            unvoiced_weight = self.config.train.get('c_unvoiced', 0.8))
         self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.test_dataset = dataset(self.config.train.test_filelist, is_train=False)
         self.test_dataloader = self.test_dataset.loader()
@@ -181,6 +181,9 @@ class TrainingModule(L.LightningModule):
                 param.requires_grad = True
             for param in self.net_g.parameters():
                 param.requires_grad = True
+        if self.config.train.get('freeze_dec', False):
+            for param in self.net_g.dec.parameters():
+                param.requires_grad = False
 
     def on_train_epoch_end(self):
         self.test()
@@ -305,7 +308,7 @@ class TrainingModule(L.LightningModule):
         mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
         mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
         mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth,
-            unvoiced_weight = self.config.train.get('c_unvoiced', 0.5)) * hp.train.c_mel
+            unvoiced_weight = self.config.train.get('c_unvoiced', 0.8)) * hp.train.c_mel
 
         # # audio is of shape [b, 1, t]
         # dump_batched_audio(audio, prefix="gt_", sr=hp.data.sampling_rate)

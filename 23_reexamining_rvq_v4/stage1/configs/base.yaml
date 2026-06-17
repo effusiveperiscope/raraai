@@ -1,18 +1,18 @@
-exp_name: base_whisper1280_code48_med
+exp_name: base_whisper1280_code48_gentest
 
 whisper_dim: 1280
 codebook_size: 48
 hidden_dim: 512
-code_dim: 512
+code_dim: 1280
 
-train_filelist: data/full2/train.txt
-val_filelist: data/full2/val.txt
+train_filelist: data/diverse_100/train.txt
+val_filelist: data/diverse_100/val.txt
 log_dir: logs
 val_interval: 1 # Epoch
 
 lr: 1e-4
 c_vqloss: 1
 c_reconloss: 0.1
-batch_size: 16
+batch_size: 24
 
 keep_ckpts: 2

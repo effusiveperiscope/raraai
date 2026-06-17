@@ -1,8 +1,8 @@
-exp_name: mlp_base_newcod5_plus_TEST
+exp_name: mlp_base_newcod6_longtune
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
-  code_dim: 512
+  code_dim: 1280
   hidden_dim: 512
   codebook_size: 48
 data:
@@ -44,6 +44,7 @@ mrd:
   use_spectral_norm: false
 train:
   batch_size: 12
+  freeze_dec: True
 
   weight_decay: 1e-4
   cosine_anneal_steps: 500000
