@@ -540,7 +540,8 @@ def train(args):
     train_dataset = dataset(config.train.train_filelist, is_train=True)
     val_dataset = dataset(config.train.val_filelist, is_train=False)
     print("Creating dataloaders...")
-    num_workers = config.train.get('num_workers', 4)
+    # num_workers = config.train.get('num_workers', 4)
+    num_workers = 4
     train_dataloader = train_dataset.loader(
         batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
             persistent_workers=num_workers > 0)
