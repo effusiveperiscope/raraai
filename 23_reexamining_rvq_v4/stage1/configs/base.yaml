@@ -13,6 +13,6 @@ val_interval: 1 # Epoch
 lr: 1e-4
 c_vqloss: 1
 c_reconloss: 0.1
-batch_size: 24
+batch_size: 16
 
 keep_ckpts: 2
