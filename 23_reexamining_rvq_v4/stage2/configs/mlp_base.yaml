@@ -1,4 +1,4 @@
-exp_name: mlp_base_newcod6_longtune
+exp_name: mlp_base_longtune7
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
