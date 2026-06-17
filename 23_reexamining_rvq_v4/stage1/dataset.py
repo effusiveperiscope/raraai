@@ -46,8 +46,15 @@ def dataset(filelist, is_train: bool):
                 dim=torch.Size([-1, 1024]), keep_in_memory=False, provide_length=True)
         ],
         actions=[
+            # I accidentally sequence dim on 1 for truncate.
+            dt.Truncate(field='whisper', dims=[1], max_lengths=[800]),
             dt.LiveMapRow(operation=interp_row),
-            dt.RandomSubsample(fields=['whisper'], dims=[0], length=800), 
+
+            # It's possible that whisper features are absolute position dependent, 
+            # and so random subsampling is not a valid approach!
+            # This is probably why RVC clips audio prior to preprocessing.
+
+            # livemaprow squeezes so now the sequence dim is 0
             dt.PadGroup(fields=['whisper'], dims=[0], values=[0])
         ]
     )
