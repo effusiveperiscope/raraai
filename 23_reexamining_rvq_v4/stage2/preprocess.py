@@ -192,20 +192,23 @@ def process_filelist(filelist_path: str,
                 continue
 
             try:
-                audio, _ = librosa.load(audio_path, sr=extractor.expected_sample_rate)
+                audio_16k, _ = librosa.load(audio_path, sr=16000)
+                audio_48k, _ = librosa.load(audio_path, sr=48000)
             except Exception as e:
                 print(f'Error loading {audio_path}: {e}')
                 continue
 
-            for segment in split_into_segments(audio, extractor.expected_sample_rate, segment_seconds):
-                if segment.shape[0] < min_segment_samples:
+            for segment_16k, segment_48k in zip(
+                split_into_segments(audio_16k, 16000, segment_seconds),
+                split_into_segments(audio_48k, 48000, segment_seconds)):
+                if segment_16k.shape[0] < min_segment_samples:
                     continue
-                if segment.sum() == 0:
+                if segment_16k.sum() == 0:
                     print(f'Empty segment in {audio_path}, skipping')
                     continue
 
                 try:
-                    feats = extractor.extract_features_data(segment)
+                    feats = extractor.extract_features_data(segment_16k, segment_48k)
                 except ValueError as e:
                     print(f'Error extracting features for segment of {audio_path}: {e}')
                     continue

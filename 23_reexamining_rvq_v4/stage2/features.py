@@ -21,7 +21,8 @@ class MyFeatures:
         do_normalize=True):
         config = OmegaConf.load(config)
         self.feats_to_extract = feats_to_extract
-        self.expected_sample_rate=16000
+        self.spk_expected_sample_rate=16000
+        self.expected_sample_rate=48000
 
         if 'whisper' in feats_to_extract:
             whisper_model = whisper
@@ -83,56 +84,47 @@ class MyFeatures:
     def extract_speaker_features(self, file : str):
         return self.svc5_spk_model.extract_feature(file)
 
-    def extract_features(self, file : str, no_spk : bool = False):
-        data, _ = librosa.load(file, sr=self.expected_sample_rate)
-        if data.sum() == 0:
-            raise ValueError(f'File {file} is empty')
-        return self.extract_features_data(data)
+    # def extract_features(self, file : str, no_spk : bool = False):
+    #     data, _ = librosa.load(file, sr=self.expected_sample_rate)
+    #     if data.sum() == 0:
+    #         raise ValueError(f'File {file} is empty')
+    #     return self.extract_features_data(data, no_spk)
 
-    def extract_features_data(self, data):
+    def extract_features_data(self, data_16k, data_48k, no_spk = False):
         if self.do_normalize:
-            data = data / (np.abs(data).max()) * 0.99
+            data_16k = data_16k / (np.abs(data_16k).max()) * 0.99
         feat = {}
         if 'whisper' in self.feats_to_extract:
-            feat['whisper'] = self.extract_whisper_features_chunked(data).squeeze(0)
-            if type(data) == io.BytesIO:
-                data.seek(0)
+            feat['whisper'] = self.extract_whisper_features_chunked(data_16k).squeeze(0)
         if 'hubert' in self.feats_to_extract:
-            feat['hubert'] = self.extract_hubert(data)
-            if type(data) == io.BytesIO:
-                data.seek(0)
+            feat['hubert'] = self.extract_hubert(data_16k)
         if 'spk' in self.feats_to_extract and not no_spk:
+            file = io.BytesIO()
+            sf.write(file, data_16k, samplerate=self.spk_expected_sample_rate,
+                        format='WAV', subtype='PCM_16')
+            file.seek(0)
             feat['spk'] = self.extract_speaker_features(file) # spk
-            if type(data) == io.BytesIO:
-                data.seek(0)
         if 'f0' in self.feats_to_extract:
-            f0_extracted, extras = self.rmvpe_model.extract_pitch2(torch.from_numpy(data),
+            f0_extracted, extras = self.rmvpe_model.extract_pitch2(torch.from_numpy(data_16k),
                 return_confidence=True, return_subharmonic_confidence=True, 
                 return_inharmonic_confidence=True)
             feat['f0'] = torch.from_numpy(f0_extracted)  # f0
             feat['f0_confidence'] = torch.from_numpy(extras['confidence'])
             feat['f0_subharmonic'] = torch.from_numpy(extras['subharmonic_confidence'])
             feat['f0_inharmonic'] = torch.from_numpy(extras['inharmonic_confidence'])
-            if type(data) == io.BytesIO:
-                data.seek(0)
         if 'spec' in self.feats_to_extract:
             hps = self.config.data
-            audio = data
+            audio = data_48k
             audio = torch.from_numpy(audio).unsqueeze(0)
             n_fft = hps.filter_length
             sampling_rate = hps.sampling_rate
             hop_size = hps.hop_length
             win_size = hps.win_length
-
             feat['spec'] = spectrogram.spectrogram_torch(
                 audio, n_fft, sampling_rate, hop_size, win_size, center=False).squeeze(0).transpose(0, 1)
-            if type(data) == io.BytesIO:
-                data.seek(0)
         if 'wave' in self.feats_to_extract:
-            data_spec = data
+            data_spec = data_48k
             feat['wave'] = torch.from_numpy(data_spec)
-            if type(data) == io.BytesIO:
-                data.seek(0)
         return feat
 
     def orig_spectrogram(self, file : str):
