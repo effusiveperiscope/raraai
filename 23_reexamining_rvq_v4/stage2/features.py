@@ -93,6 +93,7 @@ class MyFeatures:
     def extract_features_data(self, data_16k, data_48k, no_spk = False):
         if self.do_normalize:
             data_16k = data_16k / (np.abs(data_16k).max()) * 0.99
+            data_48k = data_48k / (np.abs(data_48k).max()) * 0.99
         feat = {}
         if 'whisper' in self.feats_to_extract:
             feat['whisper'] = self.extract_whisper_features_chunked(data_16k).squeeze(0)
