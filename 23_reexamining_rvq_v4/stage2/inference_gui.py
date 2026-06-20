@@ -344,10 +344,10 @@ class MainWindow(QMainWindow):
         out = []
         for file in files:
             filepath = file
-            ppg_zq, ppg_z, f0, ppg_len, pitch_extras = self.per_file_ctx(
-                data, file, prefill_files, prefill_data, transpose, 
-            )
             with torch.no_grad():
+                ppg_zq, ppg_z, f0, ppg_len, pitch_extras = self.per_file_ctx(
+                    data, file, prefill_files, prefill_data, transpose, 
+                )
                 o = self.net_g.infer(
                     ppg_zq=ppg_zq.to(self.dtype).to(self.device),
                     ppg_z=ppg_z.to(self.dtype).to(self.device),
@@ -376,11 +376,11 @@ class MainWindow(QMainWindow):
         out = []
         for file in files:
             filepath = file
-            ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics = self.per_file_ctx(
-                data, file, prefill_files, prefill_data, transpose, do_post=True
-            )
-            sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long()
             with torch.no_grad():
+                ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics = self.per_file_ctx(
+                    data, file, prefill_files, prefill_data, transpose, do_post=True
+                )
+                sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long()
                 fake_audio, z_mask, \
                     (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
                     logs_q, logdet_f, logdet_r, spk_preds) = self.net_g.test(
