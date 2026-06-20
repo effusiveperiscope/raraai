@@ -72,9 +72,8 @@ class MyFeatures:
             encoder_features = encoder_features[:, :feature_len, :]
         return encoder_features
 
-    def extract_whisper_features_chunked(self, audio_16k):
-        CHUNK_LEN = 25 # sec
-        CHUNK_SAMPLE = CHUNK_LEN * 16000 # samples
+    def extract_whisper_features_chunked(self, audio_16k, chunk_len : int = 25):
+        CHUNK_SAMPLE = chunk_len * 16000 # samples
 
         chunks = [audio_16k[i : i + CHUNK_SAMPLE] for i in range(0, len(audio_16k), CHUNK_SAMPLE)]
         chunks_feats = [self.extract_whisper_features(chunk) for chunk in chunks]
@@ -84,19 +83,20 @@ class MyFeatures:
     def extract_speaker_features(self, file : str):
         return self.svc5_spk_model.extract_feature(file)
 
-    # def extract_features(self, file : str, no_spk : bool = False):
-    #     data, _ = librosa.load(file, sr=self.expected_sample_rate)
-    #     if data.sum() == 0:
-    #         raise ValueError(f'File {file} is empty')
-    #     return self.extract_features_data(data, no_spk)
+    def extract_features(self, file : str, no_spk : bool = False, whisper_chunk_len : int = 25):
+        data_16k, _ = librosa.load(file, sr=16000)
+        data_48k, _ = librosa.load(file, sr=48000)
+        if data_16k.sum() == 0:
+            raise ValueError(f'File {file} is empty')
+        return self.extract_features_data(data_16k, data_48k, no_spk, whisper_chunk_len)
 
-    def extract_features_data(self, data_16k, data_48k, no_spk = False):
+    def extract_features_data(self, data_16k, data_48k, no_spk = False, whisper_chunk_len : int = 25):
         if self.do_normalize:
             data_16k = data_16k / (np.abs(data_16k).max()) * 0.99
             data_48k = data_48k / (np.abs(data_48k).max()) * 0.99
         feat = {}
         if 'whisper' in self.feats_to_extract:
-            feat['whisper'] = self.extract_whisper_features_chunked(data_16k).squeeze(0)
+            feat['whisper'] = self.extract_whisper_features_chunked(data_16k, whisper_chunk_len).squeeze(0)
         if 'hubert' in self.feats_to_extract:
             feat['hubert'] = self.extract_hubert(data_16k)
         if 'spk' in self.feats_to_extract and not no_spk:
