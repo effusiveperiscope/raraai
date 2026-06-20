@@ -1,8 +1,8 @@
-exp_name: base_whisper1280_code48_gen_norand
+exp_name: base_whisper1280_code48_gen2
 
 whisper_dim: 1280
 codebook_size: 48
-hidden_dim: 512
+hidden_dim: 768
 code_dim: 1280
 
 train_filelist: data/diverse_100/train.txt
@@ -16,3 +16,4 @@ c_reconloss: 0.1
 batch_size: 16
 
 keep_ckpts: 2
+cosine_anneal_end: 500000

@@ -46,7 +46,13 @@ class TrainingModule(pl.LightningModule):
         return od
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
+        optim=torch.optim.AdamW(self.model.parameters(), lr=self.config.lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optim, 
+            T_max=self.config.get('cosine_anneal_end', 500000),
+            eta_min=1e-5
+        )
+        return [optim], [scheduler]
 
     def training_step(self, batch, batch_idx):
         ret = self.step(batch, batch_idx)
