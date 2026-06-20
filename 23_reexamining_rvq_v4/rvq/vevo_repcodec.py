@@ -585,7 +585,7 @@ class VevoRepCodec(nn.Module):
             code_dim=code_dim, codebook_num=codebook_num, codebook_size=codebook_size
         )
 
-    def forward(self, x):
+    def forward(self, x, do_uq=True):
         """
         Forward pass through the VevoRepCodec.
 
@@ -616,9 +616,12 @@ class VevoRepCodec(nn.Module):
         z = self.projector(x)
         zq, vqloss, perplexity = self.quantizer(z)
         yq = self.decoder(zq)
-        yq = rearrange(yq, "b t c -> b c t")
-        y = self.decoder(z)
-        y = rearrange(y, "b t c -> b c t")
+        yq = rearrange(yq, "b c t -> b t c")
+        if do_uq:
+            y = self.decoder(z)
+            y = rearrange(y, "b c t -> b t c")
+        else:
+            y = torch.zeros_like(zq)
         return yq, y, zq, z, vqloss, perplexity
 
     def forward_encode(self, x):
