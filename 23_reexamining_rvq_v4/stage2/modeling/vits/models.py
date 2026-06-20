@@ -213,9 +213,10 @@ class SynthesizerTrn(nn.Module):
     ):
         super().__init__()
         self.segment_size = segment_size
+        self.code_dim = hp.codec.get('code_dim', hp.codec.whisper_dim)
         self.emb_g = nn.Linear(hp.vits.spk_dim, hp.vits.gin_channels)
         self.enc_p = TextEncoder(
-            hp.codec.get('code_dim', hp.codec.whisper_dim),
+            self.code_dim,
             hp.vits.inter_channels,
             hp.vits.hidden_channels,
             hp.vits.filter_channels,
@@ -293,6 +294,25 @@ class SynthesizerTrn(nn.Module):
         z_r, logdet_r = self.flow(z_p, spec_mask, g=spk, reverse=True)
         return audio, ids_slice, spec_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r, spk_preds)
+
+    def test(self, ppg_zq, ppg_z, pit, spec, spk, ppg_l, spec_l, sid, 
+        ppg_alpha=1.0, # 1.0 = FULLY quantized, 0.0 = not quantized
+        pitch_extras=None):
+        g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
+        ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
+
+        z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
+            ppg_use, ppg_l, f0=f0_to_coarse(pit), pitch_extras=pitch_extras, sid=sid,
+            alpha_scale=ppg_alpha)
+        z_q, m_q, logs_q, spec_mask = self.enc_q(spec, spec_l, g=g)
+        spk_preds = self.speaker_classifier(z_p) 
+
+        audio = self.dec(spk, z_q, pit, pitch_extras=pitch_extras)
+        z_f, logdet_f = self.flow(z_q, spec_mask, g=spk)
+        z_r, logdet_r = self.flow(z_p, spec_mask, g=spk, reverse=True)
+        return audio, spec_mask, \
+            (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, logs_q, logdet_f, logdet_r, spk_preds)
+
 
     def infer(self, ppg_zq, ppg_z, pit, spk, ppg_l, sid, noise_scale=0.3, 
             ppg_alpha=1.0, pitch_extras=None, hub=None):
