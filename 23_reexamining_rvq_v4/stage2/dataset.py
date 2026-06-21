@@ -64,21 +64,18 @@ def dataset(filelist, is_train : bool):
     filelines = filelist
 
     actions = [
+        # minimum size of frame
         dt.PadGroup(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec'], 
         dims = [0, 0, 0, 0, 0, 0, 0], values = [0, 0, 0, 0, 0, 0, 0], to_length=[257, 257, 257, 257, 257, 257, 257]), # fft_size // 2 + 1
         dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
     ]
     if is_train: # Don't truncate test samples
-        trunc_sec = 4
-        actions.extend([
-            dt.Truncate(field='whisper', dims=[0], max_lengths=[48000 // 480 * trunc_sec]),
-            dt.Truncate(field='f0', dims=[0], max_lengths=[48000 // 480 * trunc_sec * 2]),
-            dt.Truncate(field='f0_confidence', dims=[0], max_lengths=[48000 // 480 * trunc_sec * 2]),
-            dt.Truncate(field='f0_subharmonic', dims=[0], max_lengths=[48000 // 480 * trunc_sec * 2]),
-            dt.Truncate(field='f0_inharmonic', dims=[0], max_lengths=[48000 // 480 * trunc_sec * 2]),
-            dt.Truncate(field='spec', dims=[0], max_lengths=[48000 // 480 * trunc_sec * 2]),
-            dt.Truncate(field='wave', dims=[0], max_lengths=[48000 * trunc_sec]),
-        ])
+        actions.append(
+            dt.RandomSubsample(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
+            # whisper is at half-resolution pre-interpolation
+            int(48000 / 480 * 2), # 4 seconds at half-resolution
+            frame_multiples=[1, 2, 2, 2, 2, 2, 960],
+            dims=[0, 0, 0, 0, 0, 0, 0, 0],)),
     return dt.Dataset(
         filelist=filelines,
         field_specs=[
