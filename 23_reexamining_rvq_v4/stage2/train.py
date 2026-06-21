@@ -82,6 +82,7 @@ class TrainingModule(L.LightningModule):
         self.net_g = net_g
         self.net_d = net_d
         self.codec = codec
+        del self.codec.decoder
         self.config = config
         self.automatic_optimization = False
 
@@ -122,7 +123,7 @@ class TrainingModule(L.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
-                _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
+                ppg_zq, ppg_z = self.codec.forward_encode(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
                 ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
@@ -228,7 +229,7 @@ class TrainingModule(L.LightningModule):
         ppg_len = batch['whisper_length'] * 2
 
         with torch.no_grad():
-            _, _, ppg_zq, ppg_z, _, _ = self.codec(ppg_interp)
+            ppg_zq, ppg_z = self.codec.forward_encode(ppg_interp)
             ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
             ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
