@@ -1,9 +1,9 @@
-exp_name: mlp_base_longtune9
+exp_name: mlp_base_longtune13
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
   code_dim: 1280
-  hidden_dim: 512
+  hidden_dim: 1280
   codebook_size: 48
 data:
   filter_length: 1536
@@ -44,7 +44,7 @@ mrd:
   use_spectral_norm: false
 train:
   batch_size: 12
-  freeze_dec: True
+  freeze_dec: False
 
   weight_decay: 1e-4
   cosine_anneal_steps: 500000
@@ -68,9 +68,9 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/mlp_base/train.txt
-  val_filelist: ./data/mlp_base/val.txt
-  spk_index: ./data/mlp_base/sid_avgs.pt
+  train_filelist: ./data/train_plus.txt
+  val_filelist: ./data/val_plus.txt
+  spk_index: ./data/sid_avgs.pt
   test_filelist: ./data/test/train.txt
   test_noise_scale: 0.34
   test_interval: 1

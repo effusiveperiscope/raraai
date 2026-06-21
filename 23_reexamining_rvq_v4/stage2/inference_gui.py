@@ -39,7 +39,7 @@ logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
 CONFIG = 'configs/mlp_base.yaml' # ~! remember to update this
 
-TEST_MODE = True
+TEST_MODE = False
 
 SAMPLES_PER_WHISPER_FRAME = 480  # see per_file_ctx: this is the wave/whisper-frame ratio
 
