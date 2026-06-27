@@ -39,7 +39,7 @@ logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
 CONFIG = 'configs/mlp_base.yaml' # ~! remember to update this
 
-TEST_MODE = False
+TEST_MODE = True
 
 SAMPLES_PER_WHISPER_FRAME = 480  # see per_file_ctx: this is the wave/whisper-frame ratio
 
@@ -97,7 +97,6 @@ class MainWindow(QMainWindow):
         self.prefill_input = AudioFileInput(id='prefill', label="Prefill")
         gui.addFileInput(self.prefill_input)
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
-        gui.addParam(IntParam(label="Prior Transpose", id='coarse', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.34))
         gui.addParam(DoubleParam(label="Alpha Scale", id='alpha_scale', min=0, max=1, default=0.0))
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=20000, default=0))
@@ -294,6 +293,15 @@ class MainWindow(QMainWindow):
 
         # Truncate
         ppg_dim = min(ppg_zq.shape[1], f0.shape[0])
+
+        if do_post:
+            spec = feats['spec'].to(self.dtype).to(self.device)
+            wave = feats['wave'].to(self.dtype).to(self.device)
+            ppg_dim = min(ppg_dim, spec.shape[0])
+            spec = spec[:ppg_dim, :]
+
+        ppg_zq = ppg_zq[:, :ppg_dim, :]
+        ppg_z = ppg_z[:, :ppg_dim, :]
         f0 = f0[:ppg_dim]
 
         f0_confidence = feats['f0_confidence'].to(ppg.dtype).to(self.device)
@@ -303,11 +311,6 @@ class MainWindow(QMainWindow):
         f0_confidence = f0_confidence[:ppg_dim].unsqueeze(0)
         f0_subharmonic = f0_subharmonic[:ppg_dim].unsqueeze(0)
         f0_inharmonic = f0_inharmonic[:ppg_dim].unsqueeze(0)
-
-        if do_post:
-            spec = feats['spec'].to(self.dtype).to(self.device)
-            wave = feats['wave'].to(self.dtype).to(self.device)
-            spec = spec[:ppg_dim, :]
 
         pitch_extras = {
             'confidence': f0_confidence,
