@@ -244,7 +244,7 @@ class SynthesizerTrn(nn.Module):
             1,
             4,
             gin_channels=hp.vits.spk_dim,
-            p_dropout=0.2
+            p_dropout=0.3
         )
         self.dec = MyGeneratorNSF(hp=hp)
         self.speaker_classifier = SpeakerClassifier(
