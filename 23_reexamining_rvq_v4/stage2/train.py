@@ -195,15 +195,17 @@ class TrainingModule(L.LightningModule):
 
     def configure_optimizers(self):
 
-        dec = self.net_g.dec
-        dec_ids = list(map(id, dec.parameters()))
-        base_params = [p for p in self.net_g.parameters() if id(p) not in dec_ids]
-        dec_params = dec.parameters()
+        flow = self.net_g.flow
+        flow_ids = list(map(id, flow.parameters()))
+        base_params = [p for p in self.net_g.parameters() if id(p) not in flow_ids]
+        flow_params = flow.parameters()
 
         gen_optim = torch.optim.AdamW(
-            params=self.net_g.parameters(),
-            lr=self.config.train.lr, betas=self.config.train.betas,
-            weight_decay=self.config.train.weight_decay)
+            params=[
+                {'params': base_params, 'weight_decay': self.config.train.weight_decay},
+                {'params': flow_params, 'weight_decay': 1e-2}, # apply stronger regularization to normalizing flow
+            ],
+            lr=self.config.train.lr, betas=self.config.train.betas)
         disc_optim = torch.optim.AdamW(
             itertools.chain(
                 self.net_d.parameters()), lr=
