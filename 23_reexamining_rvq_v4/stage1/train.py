@@ -30,13 +30,12 @@ class TrainingModule(pl.LightningModule):
 
         # Apply mask and compute mean over valid positions only
         q_recon_loss = (F.mse_loss(yq, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
-        recon_loss = (F.mse_loss(y, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
+        # recon_loss = (F.mse_loss(y, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
 
-        loss = q_recon_loss + vqloss * self.config.c_vqloss + recon_loss * self.config.c_reconloss
+        loss = q_recon_loss + vqloss * self.config.c_vqloss 
         od = {
             'loss': loss,
             'q_recon_loss': q_recon_loss,
-            'recon_loss': recon_loss,
             'vqloss': vqloss,
             'perplexity': perplexity
         }

@@ -1,8 +1,8 @@
-exp_name: base_whisper1280_yuuge
+exp_name: base_whisper1280_btb
 
 whisper_dim: 1280
-codebook_size: 48
-hidden_dim: 1280
+codebook_size: 64
+hidden_dim: 512
 code_dim: 1280
 
 train_filelist: data/diverse_100/train.txt
