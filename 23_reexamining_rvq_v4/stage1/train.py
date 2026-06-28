@@ -21,7 +21,7 @@ class TrainingModule(pl.LightningModule):
     def step(self, batch, batch_idx, is_test=False):
         whisper = batch['whisper']
         whisper_len = batch['whisper_length']
-        yq, y, zq, z, vqloss, perplexity = self.model(whisper)
+        yq, y, zq, z, vqloss, perplexity = self.model(whisper, do_uq=False)
 
         # Create a mask based on lengths [B, T, 1]
         B, T, C = whisper.shape
