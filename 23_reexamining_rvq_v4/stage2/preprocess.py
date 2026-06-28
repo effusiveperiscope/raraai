@@ -149,22 +149,26 @@ def process_filelist(filelist_path: str,
     segment_counter = 0
     already_processed = set()
     resumed = False
+    new_lines: List[str] = []
+    new_f0_lines: List[str] = []
     if skip_exists and os.path.exists(manifest_path):
         with open(manifest_path, 'r', encoding='utf-8') as f:
             for row in f:
                 row = row.strip()
                 if not row:
                     continue
-                segment_id, _sid, source_path = row.split('\t')
+                segment_id, sid, source_path = row.split('\t')
                 already_processed.add(source_path)
                 segment_counter = max(segment_counter, int(segment_id) + 1)
+
+                savepaths = segment_savepaths(output_dir, segment_id)
+                new_lines.append(format_line(savepaths, sid))
+                new_f0_lines.append(savepaths['f0'])
         if already_processed:
             resumed = True
             print(f'Resuming: {len(already_processed)} source file(s) already processed; '
                   f'continuing from segment id {segment_counter}.')
 
-    new_lines: List[str] = []
-    new_f0_lines: List[str] = []
     sid_avgs = {}
     sid_sums = {}
     is_multispk = False

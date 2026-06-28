@@ -71,7 +71,8 @@ def dataset(filelist, is_train : bool):
     ]
     if is_train: # Don't truncate test samples
         actions.append(
-            dt.RandomSubsample(fields=['whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
+            dt.RandomSubsample(fields=[
+                'whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
             # whisper is at half-resolution pre-interpolation
             int(48000 / 480 * 2), # 4 seconds at half-resolution
             frame_multiples=[1, 2, 2, 2, 2, 2, 960],

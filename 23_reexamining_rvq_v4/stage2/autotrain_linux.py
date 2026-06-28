@@ -24,7 +24,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/mlp_base_gen.ckpt'
+    BASE_MODEL = 'pretrain/mlp_base_6.ckpt'
     SRC_CONFIG = 'configs/mlp_base.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -36,11 +36,11 @@ def main():
             abs_path, val_fraction=0.00,
             output_dir=data_dir, skip_exists=True,
             filepath_regex_pattern=r"D:\\",
-            filepath_regex_rep="/mnt/data/") 
+            filepath_regex_rep="/mnt/data/",
+            do_normalize=False) 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_mlpbase_gen'
-        config.train.test_filelist = 'data/test/val.txt'
+        config.exp_name = basename + '_base6'
         config.train.lr = config.train.lr / 2
         config.train.c_unvoiced = 0.2
         #config.train.disable_spk = True # Disable speaker classifier based tuning
