@@ -92,7 +92,7 @@ class TrainingModule(L.LightningModule):
     def setup(self, stage=None):
         hp = self.config
         # Goal is to sample mostly quantized 
-        self.alpha_dist = Beta(torch.tensor([1.5]), torch.tensor([1.0]))
+        self.alpha_dist = Beta(torch.tensor([2.0]), torch.tensor([1.0]))
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -123,14 +123,13 @@ class TrainingModule(L.LightningModule):
                 ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
                 ppg_len = batch['whisper_length'] * 2
 
-                ppg_zq, ppg_z = self.codec.forward_encode(ppg_interp)
+                ppg_zq, _ = self.codec.forward_encode(ppg_interp)
                 ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
-                ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
                 f0 = batch['f0'].to(self.dtype).to(self.device)
                 ppg_interp = ppg_interp[:,:f0.shape[1],:]
                 ppg_zq = ppg_zq[:,:f0.shape[1],:]
-                ppg_z = ppg_z[:,:f0.shape[1],:]
+                ppg = ppg[:,:f0.shape[1],:]
                 f0 = f0 * (2 ** (self.config.train.get('test_transpose', 0) / 12))
 
                 f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype).to(self.device)
@@ -152,9 +151,9 @@ class TrainingModule(L.LightningModule):
 
                 ppg_mask = commons.sequence_mask(ppg_len, max_length=f0.shape[1]).to(self.device)
 
-                out_audio = self.net_g.infer(ppg_zq, ppg_z, f0, spk, ppg_len, sid=sid, noise_scale = 
+                out_audio = self.net_g.infer(ppg_zq, ppg, f0, spk, ppg_len, sid=sid, noise_scale = 
                     self.config.train.get('test_noise_scale', 0.34), pitch_extras=pitch_extras,
-                    ppg_alpha=self.config.train.get('test_alpha', 0.2))
+                    ppg_alpha=1.0) # codec only for now
 
             for i, audio in enumerate(out_audio):
                 audio = audio.squeeze(0).cpu().numpy()
@@ -194,10 +193,11 @@ class TrainingModule(L.LightningModule):
         pass
 
     def configure_optimizers(self):
-
         flow = self.net_g.flow
         flow_ids = list(map(id, flow.parameters()))
         base_params = [p for p in self.net_g.parameters() if id(p) not in flow_ids]
+        if self.config.train.get('train_codec', False):
+            base_params.extend([p for p in self.codec.parameters()])
         flow_params = flow.parameters()
 
         gen_optim = torch.optim.AdamW(
@@ -231,14 +231,13 @@ class TrainingModule(L.LightningModule):
         ppg_len = batch['whisper_length'] * 2
 
         with torch.no_grad():
-            ppg_zq, ppg_z = self.codec.forward_encode(ppg_interp)
+            ppg_zq, _ = self.codec.forward_encode(ppg_interp)
             ppg_zq = rearrange(ppg_zq, "b c t -> b t c")
-            ppg_z = rearrange(ppg_z, "b c t -> b t c")
 
         f0 = batch['f0'].to(ppg_interp.dtype)
         ppg_zq = ppg_zq[:,:f0.shape[1],:]
+        ppg = ppg[:,:f0.shape[1],:]
         ppg_interp = ppg_interp[:,:f0.shape[1],:]
-        ppg_z = ppg_z[:,:f0.shape[1],:]
         f0_confidence = batch['f0_confidence'].to(ppg_interp.dtype)
         f0_subharmonic = batch['f0_subharmonic'].to(ppg_interp.dtype)
         f0_inharmonic = batch['f0_inharmonic'].to(ppg_interp.dtype)
@@ -266,8 +265,8 @@ class TrainingModule(L.LightningModule):
         fake_audio, ids_slice, z_mask, \
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r, spk_preds) = self.net_g(
-                ppg_zq, ppg_z, f0, spec, spk, ppg_len, spec_len, sid=sid,
-                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha)
+                ppg_zq, ppg, f0, spec, spk, ppg_len, spec_len, sid=sid,
+                pitch_extras=pitch_extras, ppg_alpha=1.0) # codec only training for now
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
