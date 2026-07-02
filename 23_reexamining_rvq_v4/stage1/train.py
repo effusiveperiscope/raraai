@@ -20,6 +20,7 @@ class TrainingModule(pl.LightningModule):
 
     def step(self, batch, batch_idx, is_test=False):
         whisper = batch['whisper']
+        whisper2 = batch['whisper2']
         whisper_len = batch['whisper_length']
         yq, y, zq, z, vqloss, perplexity = self.model(whisper, do_uq=False)
 
@@ -29,7 +30,7 @@ class TrainingModule(pl.LightningModule):
         mask = mask.unsqueeze(-1).float()  # [B, T, 1]
 
         # Apply mask and compute mean over valid positions only
-        q_recon_loss = (F.mse_loss(yq, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
+        q_recon_loss = (F.mse_loss(yq, whisper2, reduction='none') * mask).sum() / (mask.sum() * C)
         # recon_loss = (F.mse_loss(y, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
 
         loss = q_recon_loss + vqloss * self.config.c_vqloss 
@@ -126,8 +127,8 @@ if __name__ == '__main__':
 
     config = OmegaConf.load(args.config)
     model = VevoRepCodec(
-        input_channels=config.whisper_dim,
-        output_channels=config.whisper_dim,
+        input_channels=config.in_dim,
+        output_channels=config.out_dim,
         encode_channels=config.hidden_dim,
         decode_channels=config.hidden_dim,
         code_dim=config.code_dim,

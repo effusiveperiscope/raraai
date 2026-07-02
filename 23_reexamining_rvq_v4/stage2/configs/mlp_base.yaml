@@ -1,7 +1,8 @@
-exp_name: mlp_base_longtune14_cont
+exp_name: mlp_base_exp18
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
+  out_dim: 512
   code_dim: 1280
   hidden_dim: 512
   codebook_size: 48
@@ -44,10 +45,11 @@ mrd:
   use_spectral_norm: false
 train:
   batch_size: 12
+  train_codec: False
   freeze_dec: False
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 500000
+  cosine_anneal_steps: 5000000
   warmup_steps: 10000
   # test05_warmup: 10000
   betas:

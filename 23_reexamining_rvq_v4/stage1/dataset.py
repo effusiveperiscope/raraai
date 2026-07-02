@@ -15,6 +15,7 @@ def interp2(tensor):
 
 def interp_row(row):
     row['whisper'] = interp2(row['whisper'])
+    row['whisper2'] = interp2(row['whisper2'])
     return row
 
 def dataset(filelist, is_train: bool):
@@ -23,33 +24,39 @@ def dataset(filelist, is_train: bool):
     with open(filelist) as f:
         filelines = f.readlines()
 
-    def relpath(fileline):
-        # Assume the filelist path is correct, and the data is in the parent of the filelist
-        fileline = fileline.strip()
-        parent = Path(filelist).parent 
-        name = Path(fileline).name
-        return str(parent / name)
+    # Disable this for now while we have 2 whisper features
+    # def relpath(fileline):
+    #     # Assume the filelist path is correct, and the data is in the parent of the filelist
+    #     fileline = fileline.strip()
+    #     parent = Path(filelist).parent 
+    #     name = Path(fileline).name
+    #     return str(parent / name)
         
-    if len(filelines) > 0 and not os.path.exists(filelines[0]):
-        print(f"Checking for relative path resolution of data @ {Path(filelist).parent} ...")
-        # Check for relative paths
-        if os.path.exists(relpath(filelines[0])):
-            print("Found")
-            filelines = [relpath(x) for x in filelines]
-        else:
-            raise ValueError(f"Could not find data files @ {Path(filelist).parent}")
+    # if len(filelines) > 0 and not os.path.exists(filelines[0]):
+    #     print(f"Checking for relative path resolution of data @ {Path(filelist).parent} ...")
+    #     # Check for relative paths
+    #     if os.path.exists(relpath(filelines[0])):
+    #         print("Found")
+    #         filelines = [relpath(x) for x in filelines]
+    #     else:
+    #         raise ValueError(f"Could not find data files @ {Path(filelist).parent}")
 
     return dt.Dataset(
         filelist=filelines,
         field_specs=[
             dt.FieldSpec(name='whisper', datatype=torch.Tensor,
-                dim=torch.Size([-1, 1024]), keep_in_memory=False, provide_length=True)
+                dim=torch.Size([-1, 1024]), keep_in_memory=False, provide_length=True),
+            dt.FieldSpec(name='whisper2', datatype=torch.Tensor,
+                dim=torch.Size([-1, 1024]), keep_in_memory=False, provide_length=True),
         ],
         actions=[
             # dt.Truncate(field='whisper', dims=[1], max_lengths=[800]),
             dt.LiveMapRow(operation=interp_row),
-            dt.RandomSubsample(fields=['whisper'], dims=[0], length=800), # I change my mind!
-            dt.PadGroup(fields=['whisper'], dims=[0], values=[0])
+            dt.RandomSubsample(
+                fields=['whisper', 'whisper2'],
+                dims=[0, 0], length=800), # I change my mind!
+            dt.PadGroup(fields=['whisper', 'whisper2'],
+                dims=[0, 0], values=[0, 0])
         ]
     )
 

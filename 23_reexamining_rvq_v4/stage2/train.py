@@ -92,7 +92,7 @@ class TrainingModule(L.LightningModule):
     def setup(self, stage=None):
         hp = self.config
         # Goal is to sample mostly quantized 
-        self.alpha_dist = Beta(torch.tensor([2.0]), torch.tensor([1.0]))
+        self.alpha_dist = Beta(torch.tensor([1.5]), torch.tensor([1.0]))
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -266,7 +266,7 @@ class TrainingModule(L.LightningModule):
             (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
             logs_q, logdet_f, logdet_r, spk_preds) = self.net_g(
                 ppg_zq, ppg, f0, spec, spk, ppg_len, spec_len, sid=sid,
-                pitch_extras=pitch_extras, ppg_alpha=1.0) # codec only training for now
+                pitch_extras=pitch_extras, ppg_alpha=ppg_alpha) 
 
         audio = slice_segments_general(
             wave.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
@@ -474,7 +474,7 @@ def train(args):
     net_d = Discriminator(hp=hp)
     codec = VevoRepCodec(
         input_channels=hp.codec.whisper_dim,
-        output_channels=hp.codec.whisper_dim,
+        output_channels=hp.codec.get('out_dim', hp.codec.whisper_dim),
         encode_channels=hp.codec.hidden_dim,
         decode_channels=hp.codec.hidden_dim,
         code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),

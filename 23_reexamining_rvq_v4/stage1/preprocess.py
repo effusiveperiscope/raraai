@@ -39,12 +39,14 @@ def process_filelist(
             print(f'File not found: {line}')
             continue
 
-        feats = extractor.extract_features(line)
+        feats1, feats2 = extractor.extract_features(line)
 
         out_filepath = os.path.join(output_dir, f'{os.path.basename(line)}.whisper')
-        torch.save(feats, out_filepath)
+        torch.save(feats1, out_filepath)
+        out_filepath2 = os.path.join(output_dir, f'{os.path.basename(line)}.whisper2')
+        torch.save(feats2, out_filepath2)
 
-        out_lines.append(out_filepath)
+        out_lines.append(f'{out_filepath}|{out_filepath2}')
 
     if val_fraction > 0:
         val_size = max(int(len(lines) * val_fraction), 1)

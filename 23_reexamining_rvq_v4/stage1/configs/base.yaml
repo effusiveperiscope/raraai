@@ -1,7 +1,8 @@
-exp_name: base_whisper1280_btb
+exp_name: large2base_48
 
-whisper_dim: 1280
-codebook_size: 64
+in_dim: 1280
+out_dim: 512
+codebook_size: 48
 hidden_dim: 512
 code_dim: 1280
 
