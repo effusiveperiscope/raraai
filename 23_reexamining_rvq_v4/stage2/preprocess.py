@@ -140,9 +140,10 @@ def process_filelist(filelist_path: str,
     lines = load_filelist(filelist_path, shuffle_seed, filepath_regex_pattern, filepath_regex_rep)
 
     if feats_to_extract is None:
-        extractor = MyFeatures(config=config, do_normalize=do_normalize)
+        # Do not perform normalization inside the feature extraction (i.e. clip by clip basis)
+        extractor = MyFeatures(config=config, do_normalize=False)
     else:
-        extractor = MyFeatures(config=config, feats_to_extract=feats_to_extract, do_normalize=do_normalize)
+        extractor = MyFeatures(config=config, feats_to_extract=feats_to_extract, do_normalize=False)
 
     # Resume support: skip source files already recorded in the manifest
     # and continue segment numbering where the previous run left off.
@@ -198,6 +199,9 @@ def process_filelist(filelist_path: str,
             try:
                 audio_16k, _ = librosa.load(audio_path, sr=16000)
                 audio_48k, _ = librosa.load(audio_path, sr=48000)
+                if do_normalize:
+                    audio_16k = audio_16k / (np.abs(audio_16k).max()) * 0.99
+                    audio_48k = audio_48k / (np.abs(audio_48k).max()) * 0.99
             except Exception as e:
                 print(f'Error loading {audio_path}: {e}')
                 continue
