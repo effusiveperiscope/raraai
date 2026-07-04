@@ -202,8 +202,7 @@ class TrainingModule(L.LightningModule):
 
         gen_optim = torch.optim.AdamW(
             params=[
-                {'params': base_params, 'weight_decay': self.config.train.weight_decay},
-                {'params': flow_params, 'weight_decay': 1e-2}, # apply stronger regularization to normalizing flow
+                {'params': self.net_g.parameters(), 'weight_decay': self.config.train.weight_decay},
             ],
             lr=self.config.train.lr, betas=self.config.train.betas)
         disc_optim = torch.optim.AdamW(
