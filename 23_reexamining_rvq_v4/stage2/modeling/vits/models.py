@@ -228,7 +228,6 @@ class SynthesizerTrn(nn.Module):
             vec_channels=hp.vits.get('vec_dim', None),
             spk_dim=hp.vits.spk_dim
         )
-        self.ppg_bypass = nn.Linear(hp.codec.whisper_dim, hp.codec.code_dim)
         self.enc_q = PosteriorEncoder(
             spec_channels,
             hp.vits.inter_channels,
@@ -252,7 +251,6 @@ class SynthesizerTrn(nn.Module):
             hp.vits.hidden_channels,
             hp.vits.spk_dim,
         )
-        self.hp=hp
 
     def freeze_layers(self,
         enc_p_n=0,
@@ -264,19 +262,14 @@ class SynthesizerTrn(nn.Module):
         self.flow.freeze_layers(flow_n)
         self.dec.freeze_layers(dec_n)
 
-    def forward(self, ppg_zq, ppg, pit, spec, spk, ppg_l, spec_l, sid, 
+    def forward(self, ppg_zq, ppg_z, pit, spec, spk, ppg_l, spec_l, sid, 
         ppg_alpha=1.0, # 1.0 = FULLY quantized, 0.0 = not quantized
         pitch_extras=None,
         hub=None):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
-
-        ppg = ppg + torch.randn_like(ppg) * 0.3 # perturbation
-
-        ppg_z = self.ppg_bypass(ppg)
-        ppg_z = F.layer_norm(ppg, (self.hp.codec.code_dim,))
-        ppg_zq = F.layer_norm(ppg_zq, (self.hp.codec.code_dim,))
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
 
+        ppg_use = ppg_use + torch.randn_like(ppg_z) * 0.3 # perturbation
         if hub is not None:
             hub = hub + torch.randn_like(hub) * 1 # perturbation
 
