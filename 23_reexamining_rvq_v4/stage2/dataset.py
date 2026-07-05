@@ -41,7 +41,7 @@ def drop_len_check(row):
     if row['whisper'].shape[1] < 16:
         return True
 
-def dataset(filelist, is_train : bool):
+def dataset(filelist, is_test : bool):
 
     # filelines = []
     # with open(filelist) as f:
@@ -69,7 +69,7 @@ def dataset(filelist, is_train : bool):
         dims = [0, 0, 0, 0, 0, 0, 0], values = [0, 0, 0, 0, 0, 0, 0], to_length=[257, 257, 257, 257, 257, 257, 257]), # fft_size // 2 + 1
         dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
     ]
-    if is_train: # Don't truncate test samples
+    if not is_test: # Don't truncate test samples
         actions.append(
             dt.RandomSubsample(fields=[
                 'whisper', 'f0', 'f0_confidence', 'f0_subharmonic', 'f0_inharmonic', 'spec', 'wave'], length=
@@ -91,14 +91,14 @@ def dataset(filelist, is_train : bool):
             dt.FieldSpec(name='sid', datatype=int),
         ],
         actions = actions,
-        is_train=is_train
+        is_train=is_test
     )
 
 if __name__ == '__main__':
     dummy_filelist = [
         'data/test/test_2_01.wav.whisper|data/test/test_2_01.wav.f0|data/test/test_2_01.wav.spec|data/test/test_2_01.wav.spk|data/test/test_2_01.wav.wave|0',
     ]
-    ds = dataset(dummy_filelist, is_train=True)
+    ds = dataset(dummy_filelist, is_test=True)
     loader = ds.loader()
 
     for batch in loader:

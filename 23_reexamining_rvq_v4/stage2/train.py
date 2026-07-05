@@ -105,7 +105,7 @@ class TrainingModule(L.LightningModule):
         self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions),
             unvoiced_weight = self.config.train.get('c_unvoiced', 0.8))
         self.spkc_criterion = nn.CosineEmbeddingLoss()
-        self.test_dataset = dataset(self.config.train.test_filelist, is_train=False)
+        self.test_dataset = dataset(self.config.train.test_filelist, is_test=True)
         self.test_dataloader = self.test_dataset.loader()
 
     def test(self):
@@ -538,11 +538,11 @@ def train(args):
         version=config.get('tensorboard_version', 0)
     )
     print("Loading data...")
-    train_dataset = dataset(config.train.train_filelist, is_train=True)
-    val_dataset = dataset(config.train.val_filelist, is_train=False)
+    train_dataset = dataset(config.train.train_filelist, is_test=False)
+    val_dataset = dataset(config.train.val_filelist, is_test=False)
     print("Creating dataloaders...")
-    # num_workers = config.train.get('num_workers', 4)
-    num_workers = 4
+    num_workers = config.train.get('num_workers', 4)
+    # num_workers = 0
     train_dataloader = train_dataset.loader(
         batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
             persistent_workers=num_workers > 0)

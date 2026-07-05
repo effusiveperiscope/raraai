@@ -75,7 +75,7 @@ class TrainingModule(pl.LightningModule):
         self.f0_stft = STFTLoss(self.device, 
             fft_size=512, shift_size=50, win_length=200, window="hann_window")
         self.spkc_criterion = nn.CosineEmbeddingLoss()
-        self.test_dataset = dataset(self.config.train.test_filelist, is_train=False)
+        self.test_dataset = dataset(self.config.train.test_filelist, is_test=False)
         self.test_dataloader = self.test_dataset.loader()
 
     def test(self):
@@ -488,10 +488,10 @@ if __name__ == '__main__':
         version=config.get('tensorboard_version', 0)
     )
     print("Loading data...")
-    train_dataset = dataset(config.train.train_filelist, is_train=True)
-    anchor_dataset = dataset(config.train.anchor_filelist, is_train=True)
+    train_dataset = dataset(config.train.train_filelist, is_test=True)
+    anchor_dataset = dataset(config.train.anchor_filelist, is_test=True)
 
-    val_dataset = dataset(config.train.val_filelist, is_train=False)
+    val_dataset = dataset(config.train.val_filelist, is_test=False)
     print("Creating dataloaders...")
     num_workers = config.train.get('num_workers', 4)
     train_dataloader = train_dataset.loader(

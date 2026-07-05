@@ -2,6 +2,7 @@ exp_name: debug
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
+  out_dim: 512
   code_dim: 1280
   hidden_dim: 512
   codebook_size: 48
@@ -44,10 +45,11 @@ mrd:
   use_spectral_norm: false
 train:
   batch_size: 12
-  freeze_dec: True
+  train_codec: False
+  freeze_dec: False
 
   weight_decay: 1e-4
-  cosine_anneal_steps: 500000
+  cosine_anneal_steps: 5000000
   warmup_steps: 10000
   # test05_warmup: 10000
   betas:
@@ -55,8 +57,8 @@ train:
   - 0.99
 
   c_kl: 0.2
-  c_mel: 1.0
-  c_stft: 9
+  c_mel: 0.8
+  c_stft: 6
   c_score: 4
   epochs: 602
   eps: 1e-9
@@ -70,7 +72,7 @@ train:
 
   train_filelist: ./data/train_plus.txt
   val_filelist: ./data/val_plus.txt
-  spk_index: ./data/mlp_base/sid_avgs.pt
+  spk_index: ./data/sid_avgs.pt
   test_filelist: ./data/test/train.txt
   test_noise_scale: 0.34
   test_interval: 1
@@ -82,8 +84,6 @@ train:
 
   disc_label: 0.9
   f0_gen_interval: 3
-  c_f0: 0.5
-  c_f0_adv: 0.5
   train_f0_only: False
   reset_f0_weights: False
 

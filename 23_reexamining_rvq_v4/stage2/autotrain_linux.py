@@ -77,7 +77,7 @@ def main():
         config.train.test_interval = int(4200 * 2 / len_dataset)
 
         print("Loading data...")
-        train_dataset = dataset(config.train.train_filelist, is_train=True)
+        train_dataset = dataset(config.train.train_filelist, is_test=True)
         print("Creating dataloaders...")
         if len_dataset < 100:
             num_workers = 0 # Short datasets will incur too much overhead with num_workers > 0

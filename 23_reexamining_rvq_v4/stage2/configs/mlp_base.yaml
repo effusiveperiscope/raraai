@@ -1,10 +1,10 @@
-exp_name: mlp_base_exp19
+exp_name: mlp_base_exp21
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
-  out_dim: 512
+  out_dim: 1280
   code_dim: 1280
-  hidden_dim: 512
+  hidden_dim: 1280
   codebook_size: 48
 data:
   filter_length: 1536
@@ -14,7 +14,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 12000
+  segment_size: 8000
   win_length: 1536
 dist_config:
   dist_backend: nccl
