@@ -11,6 +11,7 @@ from modeling.vits import commons
 from logging import getLogger
 import logging
 import warnings
+from contextlib import nullcontext
 warnings.filterwarnings('error', category=RuntimeWarning)
 warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
 logging.getLogger('numba').setLevel(logging.WARNING)
@@ -40,6 +41,7 @@ CHECKPOINTS_ROOT = 'models'
 CONFIG = 'configs/mlp_base.yaml' # ~! remember to update this
 
 TEST_MODE = True
+PROFILE_MEM = False
 
 SAMPLES_PER_WHISPER_FRAME = 480  # see per_file_ctx: this is the wave/whisper-frame ratio
 
@@ -341,6 +343,22 @@ class MainWindow(QMainWindow):
             return ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics
 
     def inferAction(self, data: dict):
+        profile_ctx = nullcontext()
+        if PROFILE_MEM:
+            profile_ctx = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU, 
+                    torch.profiler.ProfilerActivity.CUDA],
+                profile_memory=True,
+                record_shapes=True
+            )
+        with profile_ctx as prof:
+            ret = self.profileWrappedInferAction(data)
+        if PROFILE_MEM:
+            print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
+        return ret
+
+    def profileWrappedInferAction(self, data: dict):
         transpose, files, spk_feats, prefill_files, prefill_data, \
             prefill_len_16k = self.setup_infer_ctx(data)
 
@@ -351,6 +369,7 @@ class MainWindow(QMainWindow):
                 ppg_zq, ppg_z, f0, ppg_len, pitch_extras = self.per_file_ctx(
                     data, file, prefill_files, prefill_data, transpose, 
                 )
+                
                 o = self.net_g.infer(
                     ppg_zq=ppg_zq.to(self.dtype).to(self.device),
                     ppg_z=ppg_z.to(self.dtype).to(self.device),
@@ -368,7 +387,6 @@ class MainWindow(QMainWindow):
                     label=os.path.basename(filepath)+data['model_labels'][0],
                     audio=o_np))
         logger.info(f'Finished infering {len(files)} files')
-
 
         return InferenceResult(audios=out)
 
