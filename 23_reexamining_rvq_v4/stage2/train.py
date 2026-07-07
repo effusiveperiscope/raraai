@@ -162,7 +162,7 @@ class TrainingModule(L.LightningModule):
                 audio = audio.squeeze(0).cpu().numpy()
                 audio = audio[:int(ppg_len[i] * self.config.data.hop_length)]
                 self.logger.experiment.add_audio(
-                    tag=f'test_prior_{i}_{j}_{ppg_alpha}',
+                    tag=f'test_prior_{i}_{j}',
                     snd_tensor=audio,
                     global_step=self.global_step,
                     sample_rate=self.config.data.sampling_rate
