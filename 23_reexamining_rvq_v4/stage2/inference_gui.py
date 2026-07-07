@@ -350,12 +350,15 @@ class MainWindow(QMainWindow):
                     torch.profiler.ProfilerActivity.CPU, 
                     torch.profiler.ProfilerActivity.CUDA],
                 profile_memory=True,
-                record_shapes=True
+                record_shapes=True,
+                with_stack=True
             )
         with profile_ctx as prof:
             ret = self.profileWrappedInferAction(data)
         if PROFILE_MEM:
-            print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
+            dump = prof.key_averages(group_by_stack_n=2).table(sort_by="cuda_memory_usage")
+            with open('profile.dump', 'w') as f:
+                f.write(dump)
         return ret
 
     def profileWrappedInferAction(self, data: dict):
