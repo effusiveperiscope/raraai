@@ -360,7 +360,12 @@ class MainWindow(QMainWindow):
                     data, file, prefill_files, prefill_data, transpose, 
                 )
                 
-                with LineProfiler(self.net_g.infer) as prof:
+                if PROFILE_MEM:
+                    ctx = LineProfiler(self.net_g.infer)
+                else:
+                    ctx = nullcontext()
+
+                with ctx as prof:
                     o = self.net_g.infer(
                         ppg_zq=ppg_zq.to(self.dtype).to(self.device),
                         ppg_z=ppg_z.to(self.dtype).to(self.device),
@@ -371,7 +376,9 @@ class MainWindow(QMainWindow):
                         noise_scale=data['noise'],
                         pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
                         ppg_alpha=data['alpha_scale'])
-                prof.print_stats()
+                
+                if PROFILE_MEM:
+                    prof.print_stats()
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]
