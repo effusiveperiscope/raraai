@@ -97,8 +97,11 @@ class MainWindow(QMainWindow):
         gui.addCheckpoint(Checkpoint(
             get_checkpoints=self.getCheckpoints, load_checkpoint=self.loadCheckpoint))
         gui.addFileInput(AudioFileInput())
-        gui.addFileInput(AudioFileInput(id='spk_files', label="Speaker Embedding Source"))
+        x = AudioFileInput(id='spk_files', label="Speaker Embedding Source")
+        x.file_button.setText('Speaker Embedding File')
+        gui.addFileInput(x)
         self.prefill_input = AudioFileInput(id='prefill', label="Prefill")
+        self.prefill_input.file_button.setText('Prefill File')
         gui.addFileInput(self.prefill_input)
         gui.addParam(IntParam(label="Transpose", id='transpose', min=-24, max=24, default=0))
         gui.addParam(DoubleParam(label="Noise Scale", id='noise', min=0, max=3, default=0.34))
