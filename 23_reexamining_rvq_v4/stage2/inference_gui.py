@@ -109,6 +109,8 @@ class MainWindow(QMainWindow):
         gui.addParam(IntParam(label="Speaker", id='sid', min=0, max=20000, default=0))
         gui.addParam(BoolParam(label="Use pitch smoothing", id='use_smooth_pitch', default=True))
         gui.addParam(BoolParam(label="Send pitch extras", id='use_pitch_extras', default=True))
+        gui.addParam(IntParam(label="Chunk Length (s, 0=off)", id='chunk_length', min=0, max=600, default=8))
+        gui.addParam(DoubleParam(label="Chunk Overlap (s)", id='chunk_overlap', min=0, max=60, default=0.2))
         gui.addInference(Inference(
             info=InferenceInfo(sr=48000, extension='flac'),
             infer_action=self.inferAction
@@ -270,20 +272,55 @@ class MainWindow(QMainWindow):
 
         return transpose, files, spk_feats, prefill_files, prefill_data, prefill_len_16k
 
-    def per_file_ctx(self, data, file, prefill_files, prefill_data, transpose,
-            do_post=False):
-        if len(prefill_files) > 0:
-            # Read file
-            wav_data, _ = librosa.load(file, sr=self.my_feats.expected_sample_rate)
-            # Concatenate
-            wav_data = np.concatenate((prefill_data, wav_data))
-            # Write to file in memory
-            file = io.BytesIO()
-            sf.write(file, wav_data, samplerate=self.my_feats.expected_sample_rate,
-                        format='WAV', subtype='PCM_16')
-            file.seek(0)
+    def _compute_chunk_bounds(self, num_samples, chunk_samples, overlap_samples):
+        """Returns a list of (start, end) sample index tuples covering
+        [0, num_samples) using overlapping windows of length chunk_samples,
+        hopping by (chunk_samples - overlap_samples) each time. If
+        chunk_samples is <= 0 or covers the whole signal, returns a single
+        (0, num_samples) bound (i.e. chunking is effectively disabled)."""
+        if num_samples <= 0:
+            return [(0, 0)]
+        if chunk_samples <= 0 or chunk_samples >= num_samples:
+            return [(0, num_samples)]
+        hop = max(chunk_samples - overlap_samples, 1)
+        bounds = []
+        start = 0
+        while start < num_samples:
+            end = min(start + chunk_samples, num_samples)
+            bounds.append((start, end))
+            if end >= num_samples:
+                break
+            start += hop
+        return bounds
 
-        feats = self.my_feats.extract_features(file, no_spk=True,
+    def _crossfade_audio(self, acc, new_audio, overlap_samples):
+        """Overlap-add stitch of `new_audio` onto the end of `acc`, linearly
+        crossfading over the last `overlap_samples` of acc / first
+        `overlap_samples` of new_audio. If acc is None, new_audio is
+        returned as-is (first chunk)."""
+        if acc is None:
+            return new_audio
+        if overlap_samples <= 0:
+            return np.concatenate([acc, new_audio])
+
+        overlap_samples = min(overlap_samples, len(acc), len(new_audio))
+        if overlap_samples <= 0:
+            return np.concatenate([acc, new_audio])
+
+        fade_out = np.linspace(1, 0, overlap_samples, dtype=acc.dtype)
+        fade_in = 1 - fade_out
+
+        acc_head, acc_tail = acc[:-overlap_samples], acc[-overlap_samples:]
+        new_head, new_rest = new_audio[:overlap_samples], new_audio[overlap_samples:]
+        blended = acc_tail * fade_out + new_head * fade_in
+        return np.concatenate([acc_head, blended, new_rest])
+
+    def _extract_single_chunk(self, data, clip_source, transpose, do_post=False):
+        """Runs the whisper -> codec -> f0 feature extraction pipeline on a
+        single, already-prepared audio clip (a file path or an in-memory WAV
+        buffer). This is the per-chunk unit of work; per_file_ctx calls this
+        once per (prefill + windowed slice) chunk."""
+        feats = self.my_feats.extract_features(clip_source, no_spk=True,
             whisper_chunk_len=8) # No need to extract spk here
 
         ppg = feats['whisper'].to(self.dtype).to(self.device).unsqueeze(0)
@@ -299,7 +336,7 @@ class MainWindow(QMainWindow):
         # Transpose
         f0 = feats['f0'] * (2 ** (transpose / 12))
 
-        if data['use_smooth_pitch']:
+        if data.get('use_smooth_pitch'):
             f0 = torch.from_numpy(smooth_pitch(f0.cpu().numpy()))
 
         # Truncate
@@ -351,6 +388,76 @@ class MainWindow(QMainWindow):
         else:
             return ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics
 
+    def per_file_ctx(self, data, file, prefill_files, prefill_data, transpose,
+            do_post=False):
+        """Splits `file` into (optionally overlapping) chunks along the time
+        axis and runs feature extraction on each one independently. The
+        (fixed) prefill audio, if any, is prepended to *every* chunk, so the
+        audio actually pushed through the whole whisper -> codec -> net_g
+        pipeline for any single chunk never exceeds
+        chunk_length + prefill_length seconds -- e.g. a 2s prefill with a 10s
+        chunk length means every pass through the pipeline sees at most 12s
+        of audio, regardless of how long the input file is.
+
+        Returns (chunks, overlap_out_samples):
+          - chunks: a list of per-chunk context tuples, each in the same
+            shape the old, non-chunked per_file_ctx used to return a single
+            one of (ppg_zq, ppg_z, f0, ppg_len, pitch_extras[, spec, wave,
+            codec_metrics] if do_post).
+          - overlap_out_samples: how many samples of overlap (at the model's
+            *output* sample rate) consecutive chunks share, for the caller to
+            crossfade the resulting audio segments with. 0 when chunking is
+            effectively disabled (a single chunk covers the whole file).
+        """
+        has_prefill = len(prefill_files) > 0 and prefill_data is not None
+        sr = self.my_feats.expected_sample_rate
+
+        chunk_length_s = data.get('chunk_length', 0) or 0
+        chunk_overlap_s = data.get('chunk_overlap', 0) or 0
+
+        if chunk_length_s <= 0 and not has_prefill:
+            # Fast path: nothing to slice or prepend, hand the file straight
+            # to feature extraction exactly like the old implementation did.
+            bounds = [None]
+            wav_data = None
+            overlap_samples = 0
+        else:
+            wav_data, _ = librosa.load(file, sr=sr)
+            chunk_samples = int(chunk_length_s * sr) if chunk_length_s > 0 else len(wav_data)
+            overlap_samples = int(chunk_overlap_s * sr) if chunk_overlap_s > 0 else 0
+            if overlap_samples >= chunk_samples:
+                logger.warning('Chunk overlap >= chunk length; clamping overlap')
+                overlap_samples = max(chunk_samples - 1, 0)
+            bounds = self._compute_chunk_bounds(len(wav_data), chunk_samples, overlap_samples)
+
+        overlap_out_samples = 0
+        if wav_data is not None and len(bounds) > 1:
+            overlap_out_samples = int(round(overlap_samples * (48000 / sr)))
+
+        chunks = []
+        for bound in bounds:
+            if bound is None:
+                clip_source = file
+            else:
+                start, end = bound
+                clip = wav_data[start:end]
+                if has_prefill:
+                    clip = np.concatenate((prefill_data, clip))
+
+                # Normalize
+                wav_max = np.abs(clip).max() + 1e-5
+                clip = clip / wav_max * 0.99
+
+                # Write to file in memory
+                clip_source = io.BytesIO()
+                sf.write(clip_source, clip, samplerate=sr, format='WAV', subtype='PCM_16')
+                clip_source.seek(0)
+
+            chunks.append(self._extract_single_chunk(
+                data, clip_source, transpose, do_post=do_post))
+
+        return chunks, overlap_out_samples
+
     def inferAction(self, data: dict):
         transpose, files, spk_feats, prefill_files, prefill_data, \
             prefill_len_16k = self.setup_infer_ctx(data)
@@ -358,36 +465,40 @@ class MainWindow(QMainWindow):
         out = []
         for file in files:
             filepath = file
-            with torch.no_grad():
-                ppg_zq, ppg_z, f0, ppg_len, pitch_extras = self.per_file_ctx(
-                    data, file, prefill_files, prefill_data, transpose, 
-                )
-                
-                if PROFILE_MEM:
-                    ctx = LineProfiler(self.net_g.infer)
-                else:
-                    ctx = nullcontext()
+            chunks, overlap_out_samples = self.per_file_ctx(
+                data, file, prefill_files, prefill_data, transpose,
+            )
 
-                with ctx as prof:
-                    o = self.net_g.infer(
-                        ppg_zq=ppg_zq.to(self.dtype).to(self.device),
-                        ppg_z=ppg_z.to(self.dtype).to(self.device),
-                        pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
-                        spk=spk_feats,
-                        ppg_l=ppg_len,
-                        sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
-                        noise_scale=data['noise'],
-                        pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
-                        ppg_alpha=data['alpha_scale'])
-                
-                if PROFILE_MEM:
-                    prof.print_stats()
+            stitched = None
+            for ppg_zq, ppg_z, f0, ppg_len, pitch_extras in chunks:
+                with torch.no_grad():
+                    if PROFILE_MEM:
+                        ctx = LineProfiler(self.net_g.infer)
+                    else:
+                        ctx = nullcontext()
+
+                    with ctx as prof:
+                        o = self.net_g.infer(
+                            ppg_zq=ppg_zq.to(self.dtype).to(self.device),
+                            ppg_z=ppg_z.to(self.dtype).to(self.device),
+                            pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
+                            spk=spk_feats,
+                            ppg_l=ppg_len,
+                            sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
+                            noise_scale=data['noise'],
+                            pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
+                            ppg_alpha=data['alpha_scale'])
+
+                    if PROFILE_MEM:
+                        prof.print_stats()
                 o_np = o.squeeze().cpu().float().numpy()
-                # Remove prefill
+                # Remove prefill (prepended to every chunk)
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]
-                out.append(AudioResult(
-                    label=os.path.basename(filepath)+data['model_labels'][0],
-                    audio=o_np))
+                stitched = self._crossfade_audio(stitched, o_np, overlap_out_samples)
+
+            out.append(AudioResult(
+                label=os.path.basename(filepath)+data['model_labels'][0],
+                audio=stitched))
         logger.info(f'Finished infering {len(files)} files')
 
         return InferenceResult(audios=out)
@@ -399,29 +510,30 @@ class MainWindow(QMainWindow):
         out = []
         for file in files:
             filepath = file
-            with torch.no_grad():
-                ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics = self.per_file_ctx(
-                    data, file, prefill_files, prefill_data, transpose, do_post=True
-                )
-                sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long()
-                fake_audio, z_mask, \
-                    (z_f, z_r, z_p, m_p, logs_p, z_q, m_q, 
-                    logs_q, logdet_f, logdet_r, spk_preds) = self.net_g.test(
-                        ppg_zq.to(self.dtype).to(self.device), 
-                        ppg_z.to(self.dtype).to(self.device), 
-                        f0.to(self.dtype).to(self.device).unsqueeze(0), 
-                        rearrange(spec.to(self.dtype).to(self.device).unsqueeze(0),
-                            'b t c -> b c t'), 
-                        spk_feats, ppg_len, spec_l=ppg_len, sid=sid,
-                        pitch_extras=pitch_extras, ppg_alpha=data['alpha_scale'])
+            chunks, overlap_out_samples = self.per_file_ctx(
+                data, file, prefill_files, prefill_data, transpose, do_post=True
+            )
+
+            stitched = None
+            for ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics in chunks:
+                with torch.no_grad():
+                    sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long()
+                    fake_audio, z_mask, \
+                        (z_f, z_r, z_p, m_p, logs_p, z_q, m_q,
+                        logs_q, logdet_f, logdet_r, spk_preds) = self.net_g.test(
+                            ppg_zq.to(self.dtype).to(self.device),
+                            ppg_z.to(self.dtype).to(self.device),
+                            f0.to(self.dtype).to(self.device).unsqueeze(0),
+                            rearrange(spec.to(self.dtype).to(self.device).unsqueeze(0),
+                                'b t c -> b c t'),
+                            spk_feats, ppg_len, spec_l=ppg_len, sid=sid,
+                            pitch_extras=pitch_extras, ppg_alpha=data['alpha_scale'])
 
                 # In this case fake_audio comes from posterior encoder
                 o_np = fake_audio.squeeze().cpu().float().numpy()
-                # Remove prefill
+                # Remove prefill (prepended to every chunk)
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]
-                out.append(AudioResult(
-                    label=os.path.basename(filepath)+data['model_labels'][0],
-                    audio=o_np))
+                stitched = self._crossfade_audio(stitched, o_np, overlap_out_samples)
 
                 # KL loss
                 kl_trend_f = kl_trend(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) # [1, C, T]
@@ -441,6 +553,10 @@ class MainWindow(QMainWindow):
                 )
                 loss_window.show()
                 self.loss_windows.append(loss_window)
+
+            out.append(AudioResult(
+                label=os.path.basename(filepath)+data['model_labels'][0],
+                audio=stitched))
         return InferenceResult(audios=out)
 
 

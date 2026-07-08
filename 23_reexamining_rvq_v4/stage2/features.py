@@ -92,26 +92,28 @@ class MyFeatures:
 
     def extract_features(self, file : str, no_spk : bool = False, whisper_chunk_len : int = 25):
         data_16k, _ = librosa.load(file, sr=16000)
+        if type(file) is io.BytesIO:
+            file.seek(0)
         data_48k, _ = librosa.load(file, sr=48000)
-        if data_16k.sum() == 0:
-            raise ValueError(f'File {file} is empty')
+        # if np.abs(data_16k).sum() == 0:
+        #     raise ValueError(f'File {file} is empty') # Remove this check as some chunks can be empty?
         return self.extract_features_data(data_16k, data_48k, no_spk, whisper_chunk_len)
 
     def extract_features_data(self, data_16k, data_48k, no_spk = False, whisper_chunk_len : int = 25):
         if self.do_normalize:
-            data_16k = data_16k / (np.abs(data_16k).max()) * 0.99
-            data_48k = data_48k / (np.abs(data_48k).max()) * 0.99
+            data_16k = data_16k / (np.abs(data_16k).max() + 1e-4) * 0.99
+            data_48k = data_48k / (np.abs(data_48k).max() + 1e-4) * 0.99
         feat = {}
         if 'whisper' in self.feats_to_extract:
             feat['whisper'] = self.extract_whisper_features_chunked(data_16k, whisper_chunk_len).squeeze(0)
         if 'hubert' in self.feats_to_extract:
             feat['hubert'] = self.extract_hubert(data_16k)
         if 'spk' in self.feats_to_extract and not no_spk:
-            file = io.BytesIO()
-            sf.write(file, data_16k, samplerate=self.spk_expected_sample_rate,
+            spk_file = io.BytesIO()
+            sf.write(spk_file, data_16k, samplerate=self.spk_expected_sample_rate,
                         format='WAV', subtype='PCM_16')
-            file.seek(0)
-            feat['spk'] = self.extract_speaker_features(file) # spk
+            spk_file.seek(0)
+            feat['spk'] = self.extract_speaker_features(spk_file) # spk
         if 'f0' in self.feats_to_extract:
             f0_extracted, extras = self.rmvpe_model.extract_pitch2(torch.from_numpy(data_16k),
                 return_confidence=True, return_subharmonic_confidence=True, 
