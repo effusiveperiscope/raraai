@@ -1,3 +1,4 @@
+import gc
 from einops import rearrange
 from modeling.vits.losses import kl_trend
 import ultimate_xc
@@ -35,6 +36,7 @@ import io
 from PyQt5.QtWidgets import QApplication, QMainWindow, QDialog, QVBoxLayout
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from pytorch_memlab import LineProfiler
 
 logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
@@ -195,12 +197,16 @@ class MainWindow(QMainWindow):
         if len(self.spk_index) > 0:
             if type(list(self.spk_index.keys())[0]) == str:
                 self.spk_index = {int(k): v for k, v in self.spk_index.items()}
-        load_submodule_prefix(self.net_g, 'net_g.', state, quiet=True)
-        load_submodule_prefix(self.codec, 'codec.', state, quiet=False)
 
         if not TEST_MODE:
             del self.codec.decoder
             del self.net_g.enc_q 
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        load_submodule_prefix(self.net_g, 'net_g.', state, quiet=True)
+        load_submodule_prefix(self.codec, 'codec.', state, quiet=True)
 
         self.net_g.to('cuda')
         self.net_g.eval()
@@ -343,25 +349,6 @@ class MainWindow(QMainWindow):
             return ppg_zq, ppg_z, f0, ppg_len, pitch_extras, spec, wave, codec_metrics
 
     def inferAction(self, data: dict):
-        profile_ctx = nullcontext()
-        if PROFILE_MEM:
-            profile_ctx = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU, 
-                    torch.profiler.ProfilerActivity.CUDA],
-                profile_memory=True,
-                record_shapes=True,
-                with_stack=True
-            )
-        with profile_ctx as prof:
-            ret = self.profileWrappedInferAction(data)
-        if PROFILE_MEM:
-            dump = prof.key_averages(group_by_stack_n=2).table(sort_by="cuda_memory_usage")
-            with open('profile.dump', 'w') as f:
-                f.write(dump)
-        return ret
-
-    def profileWrappedInferAction(self, data: dict):
         transpose, files, spk_feats, prefill_files, prefill_data, \
             prefill_len_16k = self.setup_infer_ctx(data)
 
@@ -373,16 +360,18 @@ class MainWindow(QMainWindow):
                     data, file, prefill_files, prefill_data, transpose, 
                 )
                 
-                o = self.net_g.infer(
-                    ppg_zq=ppg_zq.to(self.dtype).to(self.device),
-                    ppg_z=ppg_z.to(self.dtype).to(self.device),
-                    pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
-                    spk=spk_feats,
-                    ppg_l=ppg_len,
-                    sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
-                    noise_scale=data['noise'],
-                    pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
-                    ppg_alpha=data['alpha_scale'])
+                with LineProfiler(self.net_g.infer) as prof:
+                    o = self.net_g.infer(
+                        ppg_zq=ppg_zq.to(self.dtype).to(self.device),
+                        ppg_z=ppg_z.to(self.dtype).to(self.device),
+                        pit=f0.to(self.dtype).to(self.device).unsqueeze(0),
+                        spk=spk_feats,
+                        ppg_l=ppg_len,
+                        sid=torch.Tensor([data.get('sid', 0)]).to(self.device).long(),
+                        noise_scale=data['noise'],
+                        pitch_extras=pitch_extras if data['use_pitch_extras'] else None,
+                        ppg_alpha=data['alpha_scale'])
+                prof.print_stats()
                 o_np = o.squeeze().cpu().float().numpy()
                 # Remove prefill
                 o_np = o_np[int(prefill_len_16k * (48000/16000)):]

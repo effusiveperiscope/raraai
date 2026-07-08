@@ -1,4 +1,5 @@
 import numpy as np
+import gc
 from svc_helper.speaker.models import SVC5SpeakerEncoder
 from svc_helper.pitch.rmvpe import RMVPEModel
 from svc5hubert import hubert_model
@@ -30,6 +31,12 @@ class MyFeatures:
             self.device = 'cuda'
             self.model = WhisperModel.from_pretrained(whisper_model).to(self.device).half()
             del self.model.decoder
+
+            # Force freeing memory
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             self.model.eval()
         if 'hubert' in feats_to_extract:
             self.load_hubert()
