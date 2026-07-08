@@ -42,7 +42,7 @@ logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
 CONFIG = 'configs/mlp_base.yaml' # ~! remember to update this
 
-TEST_MODE = True
+TEST_MODE = False
 PROFILE_MEM = False
 
 SAMPLES_PER_WHISPER_FRAME = 480  # see per_file_ctx: this is the wave/whisper-frame ratio
@@ -443,7 +443,10 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
-    app = QApplication([])
+    import qdarktheme
+
+    app = QApplication(sys.argv)
+    qdarktheme.setup_theme()
     config = OmegaConf.load(CONFIG)
     window = MainWindow(config)
     window.show()

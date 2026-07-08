@@ -1,0 +1,13 @@
+datatia==0.4.7
+einops==0.8.1
+librosa==0.11.0
+matplotlib==3.10.7
+numpy==2.3.4
+omegaconf==2.3.0
+Pillow==12.0.0
+PyQt5==5.15.11
+pytorch_lightning==2.5.5
+scipy==1.16.2
+soundfile==0.13.1
+tqdm==4.67.1
+transformers==4.57.1

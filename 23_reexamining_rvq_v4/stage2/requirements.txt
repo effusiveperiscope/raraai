@@ -1,0 +1,17 @@
+--ignore-requires-python
+datatia==0.4.7
+einops==0.8.2
+librosa==0.11.0
+matplotlib==3.10.8
+numpy==2.4.4
+omegaconf==2.3.0
+Pillow==12.2.0
+ppp_svc_helper==0.3.14
+PyQt5==5.15.11
+pyqt5_sip==12.17.1
+lightning==2.6.1
+scipy==1.17.1
+soundfile==0.13.1
+tqdm==4.67.1
+transformers==4.57.1
+pyqtdarktheme==2.1.0
