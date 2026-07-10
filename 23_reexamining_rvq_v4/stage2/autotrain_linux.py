@@ -24,7 +24,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/mlp_base_6.ckpt'
+    BASE_MODEL = 'pretrain/mlp_base_21.ckpt'
     SRC_CONFIG = 'configs/mlp_base.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -34,13 +34,13 @@ def main():
         print(f'Processing {filelist}')
         process_filelist(
             abs_path, val_fraction=0.00,
-            output_dir=data_dir, skip_exists=True,
+            output_dir=data_dir, skip_exists=False, # XXX
             filepath_regex_pattern=r"D:\\",
             filepath_regex_rep="/mnt/data/",
-            do_normalize=False) 
+            do_normalize=True) 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_base6'
+        config.exp_name = basename + '_base21'
         config.train.lr = config.train.lr / 2
         config.train.c_unvoiced = 0.2
         #config.train.disable_spk = True # Disable speaker classifier based tuning
@@ -77,7 +77,7 @@ def main():
         config.train.test_interval = int(4200 * 2 / len_dataset)
 
         print("Loading data...")
-        train_dataset = dataset(config.train.train_filelist, is_test=True)
+        train_dataset = dataset(config.train.train_filelist, is_test=False)
         print("Creating dataloaders...")
         if len_dataset < 100:
             num_workers = 0 # Short datasets will incur too much overhead with num_workers > 0
