@@ -10,12 +10,13 @@ RUN apt-get update && \
 # 2. Setup workspace and requirements
 WORKDIR /workspace
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt --ignore-requires-python
 
 # 3. Perform Sparse Clone
 RUN git clone --filter=blob:none --sparse https://github.com/effusiveperiscope/raraai.git && \
     cd raraai && \
-    git sparse-checkout set 23_reexamining_rvq_v4/stage2/
+    git sparse-checkout set 23_reexamining_rvq_v4/stage2/ && \
+    git checkout sem-codec
 
 # 4. Set final working directory to the code location
 WORKDIR /workspace/raraai/23_reexamining_rvq_v4/stage2/

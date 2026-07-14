@@ -1,4 +1,3 @@
---ignore-requires-python
 datatia==0.4.7
 einops==0.8.2
 librosa==0.11.0
