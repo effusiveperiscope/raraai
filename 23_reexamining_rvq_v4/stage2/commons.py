@@ -271,3 +271,17 @@ def matplotlib_to_tensorboard(fig):
     img = np.transpose(img, (2, 0, 1))  # HWC → CHW
     img = torch.tensor(img)
     return img
+
+import hashlib
+
+def get_model_checksum(model, hash_algo="md5"):
+    hash_obj = hashlib.new(hash_algo)
+    
+    # Ensure deterministic ordering of layers
+    state_dict = model.state_dict()
+    for key in sorted(state_dict.keys()):
+        tensor = state_dict[key].cpu()
+        # Convert tensor to numpy and then to bytes
+        hash_obj.update(tensor.numpy().tobytes())
+        
+    return hash_obj.hexdigest()
