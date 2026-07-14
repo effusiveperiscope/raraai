@@ -7,11 +7,12 @@ from modeling.vits.models import SynthesizerTrn
 from modeling.vits_decoder.discriminator import Discriminator
 from modeling.intensity import IntensityModel
 import sys
+
+from train import TrainingModule
 sys.path.append('..')
 from rvq.vevo_repcodec import VevoRepCodec
 from commons import load_submodule_prefix
 from dataset import dataset
-from train import TrainingModule
 import lightning as L
 
 import logging
@@ -24,7 +25,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'pretrain/mlp_base_21.ckpt'
+    BASE_MODEL = 'checkpoints/mlp_singbase_exp22/last.ckpt'
     SRC_CONFIG = 'configs/mlp_base.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -34,24 +35,21 @@ def main():
         print(f'Processing {filelist}')
         process_filelist(
             abs_path, val_fraction=0.00,
-            output_dir=data_dir, skip_exists=False, # XXX
+            output_dir=data_dir, skip_exists=True,
             filepath_regex_pattern=r"D:\\",
             filepath_regex_rep="/mnt/data/",
             do_normalize=True) 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_base21'
-        config.train.lr = config.train.lr / 2
+        config.exp_name = basename + '_base22_nospk'
         config.train.c_unvoiced = 0.2
-        #config.train.disable_spk = True # Disable speaker classifier based tuning
+        config.train.disable_spk = True # Disable speaker classifier based tuning
         print(f"using lr {config.train.lr}")
         hp = config
 
         config.train.train_filelist = os.path.join(data_dir, 'train.txt')
         config.train.val_filelist = os.path.join(data_dir, 'val.txt')
         config.train.spk_index = os.path.join(data_dir, 'sid_avgs.pt')
-
-        config.train.use_ema = True
 
         net_g = SynthesizerTrn(
             spec_channels=hp.data.filter_length // 2 + 1,
@@ -61,15 +59,13 @@ def main():
         net_d = Discriminator(hp=hp)
         codec = VevoRepCodec(
             input_channels=hp.codec.whisper_dim,
-            output_channels=hp.codec.whisper_dim,
+            output_channels=hp.codec.get('out_dim', hp.codec.whisper_dim),
             encode_channels=hp.codec.hidden_dim,
             decode_channels=hp.codec.hidden_dim,
             code_dim=hp.codec.get('code_dim', hp.codec.whisper_dim),
             codebook_num=1,
             codebook_size=hp.codec.codebook_size
         )
-
-        resume_ckpt = os.path.join('checkpoints', config.exp_name, 'last.ckpt')
 
         with open(config.train.train_filelist) as f:
             line_count = len(f.readlines())
@@ -82,7 +78,8 @@ def main():
         if len_dataset < 100:
             num_workers = 0 # Short datasets will incur too much overhead with num_workers > 0
         else:
-            num_workers = config.train.get('num_workers', 4)
+            # num_workers = config.train.get('num_workers', 4)
+            num_workers = 0
         train_dataloader = train_dataset.loader(
             batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
                 persistent_workers=num_workers > 0)
@@ -92,8 +89,9 @@ def main():
         # max_steps = min(
             # len_dataset * 2000 / config.train.batch_size * 2,  # not sure why need x2
             # 250000) # 2000 epochs or 250k steps whichever is fewer
-        est_epochs = max_steps / len_dataset
+        est_epochs = max_steps / (len_dataset / config.train.batch_size)
 
+        resume_ckpt = os.path.join('checkpoints', config.exp_name, 'last.ckpt')
         if not os.path.exists(resume_ckpt):
             print('Found no checkpoint, transfering from base')
             # transfer learn from base
