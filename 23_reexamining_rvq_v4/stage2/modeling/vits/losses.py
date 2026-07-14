@@ -58,6 +58,12 @@ def kl_loss(z_p, logs_q, m_p, logs_p, total_logdet, z_mask):
     # add total_logdet (Negative LL)
     kl -= torch.sum(total_logdet)
     l = kl / torch.sum(z_mask)
+
+    if torch.isinf(l) or torch.isnan(l) or l.item() > 1000.0:
+        print(f"💥 Exploding KL Loss detected!")
+        print(f"logs_p min/max: {logs_p.min().item()}, {logs_p.max().item()}")
+        print(f"total_logdet min/max: {total_logdet.min().item()}, {total_logdet.max().item()}")
+        print(f"z_mask sum: {torch.sum(z_mask).item()}")
     return l
 
 def kl_trend(z_p, logs_q, m_p, logs_p, total_logdet, z_mask):

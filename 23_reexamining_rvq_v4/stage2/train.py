@@ -54,6 +54,14 @@ import logging
 warnings.filterwarnings('error', category=RuntimeWarning)
 logging.getLogger('numba').setLevel(logging.WARNING)
 
+def check_grad_norm(name):
+    def hook(grad):
+        grad_norm = grad.norm().item()
+        if grad_norm > 1000.0:  # Set your threshold based on typical baseline
+            print(f"⚠️ High gradient norm in {name}: {grad_norm:.4f}")
+        return grad
+    return hook
+
 def weighted_mel_loss(mel_pred, mel_target, voiced_mask, unvoiced_weight=0.1):
     """
     mel_pred, mel_target: (B, n_mels, T)
@@ -107,6 +115,12 @@ class TrainingModule(L.LightningModule):
         self.spkc_criterion = nn.CosineEmbeddingLoss()
         self.test_dataset = dataset(self.config.train.test_filelist, is_test=True)
         self.test_dataloader = self.test_dataset.loader()
+
+        # Grad check
+        for name, param in self.net_g.named_parameters():
+            if param.requires_grad:
+                param.register_hook(check_grad_norm(name))
+
 
     def test(self):
         if self.current_epoch % self.config.train.get('test_interval', 1):
@@ -349,6 +363,8 @@ class TrainingModule(L.LightningModule):
         # Kl Loss
         loss_kl_f = kl_loss(z_f, logs_q, m_p, logs_p, logdet_f, z_mask) * hp.train.c_kl
         loss_kl_r = kl_loss(z_r, logs_p, m_q, logs_q, logdet_r, z_mask) * hp.train.c_kl
+
+
 
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + loss_kl_f + \
