@@ -29,6 +29,7 @@ class TextEncoder(nn.Module):
                  spk_dim=None):
         super().__init__()
         self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
         self.pre = nn.Conv1d(in_channels, hidden_channels, kernel_size=5, padding=2)
 
         if vec_channels is not None:
@@ -93,7 +94,9 @@ class TextEncoder(nn.Module):
         if pitch_extras is None:
             pitch_extras = {}
 
-        pit_cond = self.pit(f0, **pitch_extras, use_dtype=x.dtype).transpose(1, 2)
+        pit_cond = F.layer_norm(
+            self.pit(f0, **pitch_extras, use_dtype=x.dtype),
+            (self.hidden_channels,)).transpose(1, 2)
         x = x + pit_cond
 
         spk = self.spk_emb(sid)
