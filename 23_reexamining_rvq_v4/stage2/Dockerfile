@@ -11,6 +11,7 @@ RUN apt-get update && \
 WORKDIR /workspace
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt --ignore-requires-python
+RUN pip install tensorboardX
 
 # 3. Perform Sparse Clone
 RUN git clone --filter=blob:none --sparse https://github.com/effusiveperiscope/raraai.git && \
