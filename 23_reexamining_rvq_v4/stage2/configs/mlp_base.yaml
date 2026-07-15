@@ -93,7 +93,7 @@ train:
   num_workers: 4
 
   stage2_epoch: 0 # start training using gen/disc losses
-  save_interval: 50
+  # save_interval: 50
   disc_only: 0
 vits:
   filter_channels: 640
