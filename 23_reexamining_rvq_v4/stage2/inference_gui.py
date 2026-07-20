@@ -36,13 +36,14 @@ import io
 from PyQt5.QtWidgets import QApplication, QMainWindow, QDialog, QVBoxLayout
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from pytorch_memlab import LineProfiler
 
 logger = getLogger(__name__)
 CHECKPOINTS_ROOT = 'models'
 CONFIG = 'configs/mlp_base.yaml' # ~! remember to update this
 
 TEST_MODE = False
+if TEST_MODE:
+    from pytorch_memlab import LineProfiler
 PROFILE_MEM = False
 
 SAMPLES_PER_WHISPER_FRAME = 480  # see per_file_ctx: this is the wave/whisper-frame ratio
