@@ -1,4 +1,4 @@
-exp_name: mlp_mixed_24
+exp_name: mlp_mixed_25
 tensorboard_version: 0
 codec:
   whisper_dim: 1280

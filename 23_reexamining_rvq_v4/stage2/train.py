@@ -90,6 +90,7 @@ class TrainingModule(L.LightningModule):
         self.net_g = net_g
         self.net_d = net_d
         self.codec = codec
+        self.codec.eval()
         del self.codec.decoder
         self.config = config
         self.automatic_optimization = False
@@ -100,7 +101,7 @@ class TrainingModule(L.LightningModule):
     def setup(self, stage=None):
         hp = self.config
         # Goal is to sample mostly quantized 
-        self.alpha_dist = Beta(torch.tensor([1.5]), torch.tensor([1.0]))
+        self.alpha_dist = Beta(torch.tensor([self.config.train.get('c_sample_alpha', 1.5)]), torch.tensor([1.0]))
         self.stft = TacotronSTFT(filter_length=hp.data.filter_length,
                             hop_length=hp.data.hop_length,
                             win_length=hp.data.win_length,
@@ -183,6 +184,8 @@ class TrainingModule(L.LightningModule):
                 )
             self.logger.experiment.flush()
 
+        print(f"test step={self.global_step} epoch={self.current_epoch} net_g.training={self.net_g.training} net_d.training={self.net_d.training}")
+
     def on_train_start(self):
         self.test()
 
@@ -241,6 +244,12 @@ class TrainingModule(L.LightningModule):
         return [gen_optim, disc_optim], [gen_scheduler, disc_scheduler]
 
     def step(self, batch, batch_idx, is_train=True):
+        if is_train:
+            assert self.net_g.training
+            assert self.net_d.training
+        else:
+            assert not self.net_g.training
+            assert not self.net_d.training
         ppg = batch['whisper']
         ppg_interp = F.interpolate(rearrange(ppg, 'b t d -> b d t'), scale_factor=2)
         ppg_interp = rearrange(ppg_interp, 'b d t -> b t d')
@@ -407,6 +416,9 @@ class TrainingModule(L.LightningModule):
                 }
 
     def training_step(self, batch, batch_idx):
+        torch.set_grad_enabled(True)
+        self.net_g.train()
+        self.net_d.train()
         ret = self.step(batch, batch_idx, is_train=True)
         if ret is None:
             return None
@@ -419,6 +431,8 @@ class TrainingModule(L.LightningModule):
         return ret
 
     def validation_step(self, batch, batch_idx):
+        self.net_g.eval()
+        self.net_d.eval()
         ret = self.step(batch, batch_idx, is_train=False)
         if ret is None:
             return None

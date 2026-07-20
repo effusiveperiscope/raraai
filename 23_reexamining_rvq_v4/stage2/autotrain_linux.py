@@ -25,7 +25,7 @@ import torch.multiprocessing as mp
 
 def main():
     SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'checkpoints/mlp_singbase_exp22/last.ckpt'
+    BASE_MODEL = 'checkpoints/mlp_mixed_24/last.ckpt'
     SRC_CONFIG = 'configs/mlp_base.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -41,8 +41,9 @@ def main():
             do_normalize=True) 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_base22_nospk'
+        config.exp_name = basename + '_base24'
         config.train.c_unvoiced = 0.2
+        config.train.c_sample_alpha = 1.8 # More quantized
         config.train.disable_spk = True # Disable speaker classifier based tuning
         print(f"using lr {config.train.lr}")
         hp = config
@@ -125,7 +126,7 @@ def main():
         ]
 
         interval_checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
-            every_n_epochs=est_epochs // 4,
+            every_n_epochs=int(est_epochs // 4),
             dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
         )
