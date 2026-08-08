@@ -1,51 +1,177 @@
-# file: preprocess.py
-
 import argparse
 import os
 import random
-import torch
-from tqdm import tqdm
-from features import MyFeatures
-import ultimate_xc
 import re
 
+import torch
+from tqdm import tqdm
+
+from features import MyFeatures
+
+EXPECTED_KEYS = [
+    'whisper', 'f0',
+    'f0_confidence', 'f0_subharmonic', 'f0_inharmonic',
+    'spec', 'spk', 'wave',
+]
+
+
+# --------------------------------------------------------------------------- #
+# Path helpers
+# --------------------------------------------------------------------------- #
+
 def win_longpath(path):
+    """Prefix a path with \\\\?\\ on Windows so long paths are handled correctly."""
     if os.name != 'nt':
         return path
     if path.startswith('\\\\?\\'):
         return path
     return '\\\\?\\' + os.path.abspath(path)
 
-def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fraction=0.05,
-                     output_dir='output', shuffle_seed=42, 
-                     feats_to_extract=None,
-                     regen_filelist=False,
-                     skip_exists=False,
-                     filepath_regex_pattern=None,
-                     filepath_regex_rep=None,
-                     do_normalize=True):
+
+def build_savepaths(output_dir, base_line):
+    """Return {feature_key: save_path} for a given source line, Windows-safe."""
+    savepaths = {}
+    for key in EXPECTED_KEYS:
+        savepath = os.path.join(output_dir, os.path.basename(base_line) + '.' + key)
+        savepaths[key] = win_longpath(savepath)
+    return savepaths
+
+
+def savepaths_to_line(savepaths, sid):
+    """Join a savepaths dict + speaker id into the pipe-delimited filelist line."""
+    return '|'.join([savepaths[key] for key in EXPECTED_KEYS] + [str(sid)])
+
+
+# --------------------------------------------------------------------------- #
+# Filelist loading / cleanup
+# --------------------------------------------------------------------------- #
+
+def load_filelist(filelist_path, shuffle_seed, filepath_regex_pattern, filepath_regex_rep):
+    """Read, shuffle, optionally regex-rewrite, and de-duplicate the filelist."""
     with open(filelist_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
-
-    os.makedirs(output_dir, exist_ok=True)
 
     random.seed(shuffle_seed)
     random.shuffle(lines)
 
     if filepath_regex_pattern is not None:
-        lines = [re.sub(
-            filepath_regex_pattern, filepath_regex_rep, line).replace(
-                '\\', '/') for line in lines]
-    lines = list(set(lines)) # cull potential duplicate lines created by regex/replacement
+        lines = [
+            re.sub(filepath_regex_pattern, filepath_regex_rep, line).replace('\\', '/')
+            for line in lines
+        ]
 
+    # cull potential duplicate lines created by regex/replacement
+    return list(set(lines))
+
+
+def parse_line(line):
+    """Split a raw filelist line into (audio_path, speaker_id)."""
+    if '|' in line:
+        path, sid = line.split('|')[0], line.split('|')[1]
+        return path, sid, True
+    return line, 0, False
+
+
+# --------------------------------------------------------------------------- #
+# Per-file processing
+# --------------------------------------------------------------------------- #
+
+def try_reuse_existing(output_dir, base_line, sid):
+    """If all feature files for this line already exist, build the line from them."""
+    savepaths = build_savepaths(output_dir, base_line)
+    if not all(os.path.exists(p) for p in savepaths.values()):
+        return None
+    print("skip_flag triggered on line ", base_line)
+    return savepaths_to_line(savepaths, sid), savepaths['f0']
+
+
+def extract_and_save(extractor, output_dir, line, base_line, sid, sid_avgs, sid_sums, feats_to_extract):
+    """Extract features for one file, save them to disk, and update speaker averages."""
+    try:
+        feats = extractor.extract_features(line)
+        if feats['whisper'].shape[0] < 16:
+            print(f'File too short: {line}')
+            return None
+    except ValueError as e:
+        print(f'Error extracting features for {line}: {e}')
+        return None
+
+    for key in EXPECTED_KEYS:
+        feats.setdefault(key, None)
+
+    savepaths = build_savepaths(output_dir, base_line)
+    for key, value in feats.items():
+        if value is not None:
+            torch.save(value, savepaths[key])
+
+    if feats_to_extract is None or 'spk' in feats_to_extract:
+        if sid not in sid_avgs:
+            sid_avgs[sid] = torch.zeros_like(feats['spk'])
+            sid_sums[sid] = 0
+        sid_avgs[sid] += feats['spk']
+        sid_sums[sid] += 1
+
+    return savepaths_to_line(savepaths, sid), savepaths['f0']
+
+
+def build_regen_line(output_dir, line, sid):
+    """Build a filelist line pointing at feature paths without doing any extraction."""
+    savepaths = {
+        key: os.path.join(output_dir, os.path.basename(line) + '.' + key)
+        for key in EXPECTED_KEYS
+    }
+    return savepaths_to_line(savepaths, sid), savepaths['f0']
+
+
+# --------------------------------------------------------------------------- #
+# Train/val split + output writing
+# --------------------------------------------------------------------------- #
+
+def split_train_val(lines, f0_lines, val_fraction):
+    if val_fraction > 0:
+        val_size = int(len(lines) * val_fraction)
+        return (
+            lines[:-val_size], lines[-val_size:],
+            f0_lines[:-val_size], f0_lines[-val_size:],
+        )
+    # Ensure at least one val sample even if it's not really a val sample
+    return lines, [lines[0]], f0_lines, [f0_lines[0]]
+
+
+def write_lines(path, lines):
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+
+def save_sid_avgs(output_dir, sid_avgs, sid_sums):
+    print('Saving sid_avgs...')
+    for sid in sid_avgs:
+        sid_avgs[sid] = sid_avgs[sid] / sid_sums[sid]
+    torch.save(sid_avgs, os.path.join(output_dir, 'sid_avgs.pt'))
+
+
+# --------------------------------------------------------------------------- #
+# Main entry point
+# --------------------------------------------------------------------------- #
+
+def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fraction=0.05,
+                      output_dir='output', shuffle_seed=42,
+                      feats_to_extract=None,
+                      regen_filelist=False,
+                      skip_exists=False,
+                      filepath_regex_pattern=None,
+                      filepath_regex_rep=None,
+                      do_normalize=True):
+    os.makedirs(output_dir, exist_ok=True)
+
+    lines = load_filelist(filelist_path, shuffle_seed, filepath_regex_pattern, filepath_regex_rep)
+
+    extractor = None
     if not regen_filelist:
-        if feats_to_extract is None:
-            extractor = MyFeatures(config=config, do_normalize=do_normalize)
-        else:
-            extractor = MyFeatures(
-                config=config,
-                feats_to_extract=feats_to_extract, do_normalize=do_normalize
-            )
+        extractor_kwargs = {'config': config, 'do_normalize': do_normalize}
+        if feats_to_extract is not None:
+            extractor_kwargs['feats_to_extract'] = feats_to_extract
+        extractor = MyFeatures(**extractor_kwargs)
 
     is_multispk = False
     new_lines = []
@@ -54,151 +180,66 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
     sid_sums = {}
     skip_flag = False
 
-    for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
-        if 'longform' in line:
+    for raw_line in tqdm(lines, total=len(lines), desc='Preprocessing'):
+        if 'longform' in raw_line:
             continue
 
-        if '|' in line:
-            if not is_multispk:
-                print('=== Multispeaker filelist detected! ===')
-            is_multispk = True
-            split = line.split('|')
-            line = split[0]
-            sid = split[1]
-        else:
-            sid = 0
+        base_line, sid, line_is_multispk = parse_line(raw_line)
+        if line_is_multispk and not is_multispk:
+            print('=== Multispeaker filelist detected! ===')
+        is_multispk = is_multispk or line_is_multispk
 
-        base_line = line
-        line = win_longpath(line)
+        line = win_longpath(base_line)
         if not os.path.exists(line):
             print(f'File not found: {line}')
             continue
 
-        expected_keys = [
-            'whisper', 'f0',
-            'f0_confidence', 'f0_subharmonic', 'f0_inharmonic',
-            'spec', 'spk', 'wave']
-        if not regen_filelist:
-            savepaths = {}
-            for key in expected_keys:
-                savepath = os.path.join(output_dir, os.path.basename(base_line) + '.' + key)
-                savepath = win_longpath(savepath)
-                savepaths[key] = savepath
-            if all(os.path.exists(savepath) for key, savepath in savepaths.items()) and skip_exists:
-                skip_flag = True
-                print("skip_flag triggered on line ", line)
-                newline = '|'.join(
-                    [savepaths['whisper'],
-                    savepaths['f0'],
-                    savepaths['f0_confidence'],
-                    savepaths['f0_subharmonic'],
-                    savepaths['f0_inharmonic'],
-                    savepaths['spec'],
-                    savepaths['spk'],
-                        savepaths['wave'], 
-                        str(sid)])
-                new_lines.append(newline)
-                new_f0_lines.append(savepaths['f0'])
-                continue
-
-            try:
-                feats = extractor.extract_features(line)
-                if feats['whisper'].shape[0] < 16:
-                    print(f'File too short: {line}')
-                    continue
-            except ValueError as e:
-                print(f'Error extracting features for {line}: {e}')
-                continue
-
-            for key in expected_keys:
-                if key not in feats:
-                    feats[key] = None
-
-            for key, value in feats.items():
-                savepath = os.path.join(output_dir, os.path.basename(line) + '.' + key)
-                savepath = win_longpath(savepath)
-                if value is not None:
-                    torch.save(value, savepath)
-
-            newline = '|'.join([
-                savepaths['whisper'],
-                savepaths['f0'],
-                savepaths['f0_confidence'],
-                savepaths['f0_subharmonic'],
-                savepaths['f0_inharmonic'],
-                savepaths['spec'],
-                savepaths['spk'],
-                savepaths['wave'],
-                str(sid)
-            ])
-            new_f0_lines.append(savepaths['f0'])
-            new_lines.append(newline)
-            if feats_to_extract is None or 'spk' in feats_to_extract:
-                if sid not in sid_avgs:
-                    sid_avgs[sid] = torch.zeros_like(feats['spk'])
-                    sid_sums[sid] = 0
-                sid_avgs[sid] += feats['spk']
-                sid_sums[sid] += 1
-        else:
-            savepaths = {}
-            for key in expected_keys:
-                savepaths[key] = os.path.join(output_dir, os.path.basename(line) + '.' + key)
-            newline = '|'.join(
-                [savepaths['whisper'],
-                 savepaths['f0'],
-                  savepaths['f0_confidence'],
-                  savepaths['f0_subharmonic'],
-                  savepaths['f0_inharmonic'],
-                  savepaths['spec'],
-                   savepaths['spk'],
-                    savepaths['wave'], 
-                    str(sid)])
-            new_f0_lines.append(savepaths['f0'])
-            new_lines.append(newline)
-
-
-    if val_fraction > 0:
-        val_size = int(len(lines) * val_fraction)
-        val_lines = new_lines[-val_size:]
-        train_lines = new_lines[:-val_size]
-        val_f0_lines = new_f0_lines[-val_size:]
-        train_f0_lines = new_f0_lines[:-val_size]
-    else:
-        train_lines = new_lines
-        val_lines = [train_lines[0]] # Ensure at least one val sample even if it's not really a val sample
-        train_f0_lines = new_f0_lines
-        val_f0_lines = [train_f0_lines[0]]
-
-    if not regen_filelist and not skip_flag: # can't regen sid_avgs if skipped any
-        if feats_to_extract is None or 'sid' in feats_to_extract:
-            print('Saving sid_avgs...')
-            for sid, avg in sid_avgs.items():
-                sid_avgs[sid] = sid_avgs[sid] / sid_sums[sid]
-            torch.save(sid_avgs, os.path.join(output_dir, 'sid_avgs.pt'))
-    else:
         if regen_filelist:
-            print('Skipped saving sid_avgs because regen_filelist was True')
-        elif skip_flag:
-            print('Skipped saving sid_avgs because skip_flag was triggered')
+            result = build_regen_line(output_dir, base_line, sid)
+        else:
+            result = None
+            if skip_exists:
+                result = try_reuse_existing(output_dir, base_line, sid)
+                if result is not None:
+                    skip_flag = True
+            if result is None:
+                result = extract_and_save(
+                    extractor, output_dir, line, base_line, sid,
+                    sid_avgs, sid_sums, feats_to_extract,
+                )
 
-    with open(os.path.join(output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(train_lines))
-    with open(os.path.join(output_dir, 'val.txt'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(val_lines))
-    with open(os.path.join(output_dir, 'train_f0.txt'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(train_f0_lines))
-    with open(os.path.join(output_dir, 'val_f0.txt'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(val_f0_lines))
+        if result is None:
+            continue
 
-    if not regen_filelist:
-        del extractor
+        newline, f0_line = result
+        new_lines.append(newline)
+        new_f0_lines.append(f0_line)
+
+    train_lines, val_lines, train_f0_lines, val_f0_lines = split_train_val(
+        new_lines, new_f0_lines, val_fraction,
+    )
+
+    if regen_filelist:
+        print('Skipped saving sid_avgs because regen_filelist was True')
+    elif skip_flag:
+        print('Skipped saving sid_avgs because skip_flag was triggered')  # can't regen sid_avgs if any lines were skipped
+    elif feats_to_extract is None or 'sid' in feats_to_extract:
+        save_sid_avgs(output_dir, sid_avgs, sid_sums)
+
+    write_lines(os.path.join(output_dir, 'train.txt'), train_lines)
+    write_lines(os.path.join(output_dir, 'val.txt'), val_lines)
+    write_lines(os.path.join(output_dir, 'train_f0.txt'), train_f0_lines)
+    write_lines(os.path.join(output_dir, 'val_f0.txt'), val_f0_lines)
+
+    del extractor
+
 
 def regen_spk_index(output_dir):
     lines = []
-    with open(os.path.join(output_dir, 'train.txt'), 'r', encoding='utf-8') as f:
-        lines.extend([line.strip() for line in f.readlines()])
-    with open(os.path.join(output_dir, 'val.txt'), 'r', encoding='utf-8') as f:
-        lines.extend([line.strip() for line in f.readlines()])
+    for filename in ('train.txt', 'val.txt'):
+        with open(os.path.join(output_dir, filename), 'r', encoding='utf-8') as f:
+            lines.extend([line.strip() for line in f.readlines()])
+
     sid_avgs = {}
     sid_sums = {}
     for line in tqdm(lines, total=len(lines), desc='Regenerating speaker index'):
@@ -210,10 +251,12 @@ def regen_spk_index(output_dir):
             sid_sums[sid] = 0
         sid_avgs[sid] += spk
         sid_sums[sid] += 1
+
     sid_avgs = {sid: avg / sid_sums[sid] for sid, avg in sid_avgs.items()}
     torch.save(sid_avgs, os.path.join(output_dir, 'sid_avgs.pt'))
 
-if __name__ == '__main__':
+
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--filelist', type=str, help='path to filelist')
     parser.add_argument('--config', type=str, default='configs/base_linux.yaml')
@@ -223,12 +266,16 @@ if __name__ == '__main__':
     parser.add_argument('--regen_filelist', action='store_true')
     parser.add_argument('--regen_spk_index', action='store_true')
     parser.add_argument('--no_normalize', action='store_true')
+    return parser.parse_args()
 
-    args = parser.parse_args()
+
+if __name__ == '__main__':
+    args = parse_args()
 
     if args.regen_spk_index:
         regen_spk_index(args.output_dir)
         exit(0)
+
     process_filelist(
         filelist_path=args.filelist,
         config=args.config,
@@ -237,6 +284,6 @@ if __name__ == '__main__':
         shuffle_seed=args.shuffle_seed,
         regen_filelist=args.regen_filelist,
         feats_to_extract=None,
-        do_normalize=not args.no_normalize
-        #skip_exists=True
+        do_normalize=not args.no_normalize,
+        # skip_exists=True,
     )
