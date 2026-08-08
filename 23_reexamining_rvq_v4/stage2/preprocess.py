@@ -28,11 +28,19 @@ def win_longpath(path):
     return '\\\\?\\' + os.path.abspath(path)
 
 
-def build_savepaths(output_dir, base_line):
-    """Return {feature_key: save_path} for a given source line, Windows-safe."""
+def build_savepaths(output_dir, base_line, aug_idx=None):
+    """Return {feature_key: save_path} for a given source line, Windows-safe.
+
+    aug_idx=None -> original (unaugmented) files, same naming as before.
+    aug_idx=<int> -> augmented pass N, files get a distinct suffix so they
+    never collide with the original or with other augmentation passes.
+    """
     savepaths = {}
+    suffix = '' if aug_idx is None else f'.aug{aug_idx}'
     for key in EXPECTED_KEYS:
-        savepath = os.path.join(output_dir, os.path.basename(base_line) + '.' + key)
+        savepath = os.path.join(
+            output_dir, os.path.basename(base_line) + suffix + '.' + key,
+        )
         savepaths[key] = win_longpath(savepath)
     return savepaths
 
@@ -76,19 +84,41 @@ def parse_line(line):
 # Per-file processing
 # --------------------------------------------------------------------------- #
 
-def try_reuse_existing(output_dir, base_line, sid):
+def try_reuse_existing(output_dir, base_line, sid, aug_idx=None):
     """If all feature files for this line already exist, build the line from them."""
-    savepaths = build_savepaths(output_dir, base_line)
+    savepaths = build_savepaths(output_dir, base_line, aug_idx=aug_idx)
     if not all(os.path.exists(p) for p in savepaths.values()):
         return None
-    print("skip_flag triggered on line ", base_line)
+    print("skip_flag triggered on line ", base_line, '' if aug_idx is None else f'(aug{aug_idx})')
     return savepaths_to_line(savepaths, sid), savepaths['f0']
 
 
-def extract_and_save(extractor, output_dir, line, base_line, sid, sid_avgs, sid_sums, feats_to_extract):
-    """Extract features for one file, save them to disk, and update speaker averages."""
+def _update_sid_avg(sid, feats, sid_avgs, sid_sums):
+    if sid not in sid_avgs:
+        sid_avgs[sid] = torch.zeros_like(feats['spk'])
+        sid_sums[sid] = 0
+    sid_avgs[sid] += feats['spk']
+    sid_sums[sid] += 1
+
+
+def extract_and_save(extractor, output_dir, line, base_line, sid, sid_avgs, sid_sums,
+                      feats_to_extract, aug_idx=None, aug_seed=None,
+                      augment_silence=True, augment_gain=True):
+    """Extract features for one file, save them to disk, and update speaker averages.
+
+    If aug_idx is not None, the waveform is augmented (random silence
+    insertion + random gain) prior to extraction, using aug_seed for
+    reproducibility, and outputs are saved under augmentation-specific
+    paths so they don't clobber the original features.
+    """
     try:
-        feats = extractor.extract_features(line)
+        if aug_idx is None:
+            feats = extractor.extract_features(line)
+        else:
+            feats = extractor.extract_features_augmented(
+                line, seed=aug_seed,
+                insert_silence=augment_silence, gain=augment_gain,
+            )
         if feats['whisper'].shape[0] < 16:
             print(f'File too short: {line}')
             return None
@@ -99,27 +129,20 @@ def extract_and_save(extractor, output_dir, line, base_line, sid, sid_avgs, sid_
     for key in EXPECTED_KEYS:
         feats.setdefault(key, None)
 
-    savepaths = build_savepaths(output_dir, base_line)
+    savepaths = build_savepaths(output_dir, base_line, aug_idx=aug_idx)
     for key, value in feats.items():
         if value is not None:
             torch.save(value, savepaths[key])
 
     if feats_to_extract is None or 'spk' in feats_to_extract:
-        if sid not in sid_avgs:
-            sid_avgs[sid] = torch.zeros_like(feats['spk'])
-            sid_sums[sid] = 0
-        sid_avgs[sid] += feats['spk']
-        sid_sums[sid] += 1
+        _update_sid_avg(sid, feats, sid_avgs, sid_sums)
 
     return savepaths_to_line(savepaths, sid), savepaths['f0']
 
 
-def build_regen_line(output_dir, line, sid):
+def build_regen_line(output_dir, line, sid, aug_idx=None):
     """Build a filelist line pointing at feature paths without doing any extraction."""
-    savepaths = {
-        key: os.path.join(output_dir, os.path.basename(line) + '.' + key)
-        for key in EXPECTED_KEYS
-    }
+    savepaths = build_savepaths(output_dir, line, aug_idx=aug_idx)
     return savepaths_to_line(savepaths, sid), savepaths['f0']
 
 
@@ -161,7 +184,18 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
                       skip_exists=False,
                       filepath_regex_pattern=None,
                       filepath_regex_rep=None,
-                      do_normalize=True):
+                      do_normalize=True,
+                      n_augment=0,
+                      augment_silence=True,
+                      augment_gain=True):
+    """
+    n_augment: how many additional augmented copies to generate per source
+    file, on top of the original (unaugmented) extraction. Each augmented
+    copy gets its own set of feature files (suffixed .aug{i}) and its own
+    line in train.txt/val.txt, so the training set effectively grows by
+    (1 + n_augment)x. Augmentation is precomputed here (not applied live
+    at train time) since it's expensive to redo per-epoch.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     lines = load_filelist(filelist_path, shuffle_seed, filepath_regex_pattern, filepath_regex_rep)
@@ -180,6 +214,10 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
     sid_sums = {}
     skip_flag = False
 
+    # aug_idx=None means "the original, unaugmented pass". Passes 0..n_augment-1
+    # are the augmented copies.
+    aug_passes = [None] + list(range(n_augment))
+
     for raw_line in tqdm(lines, total=len(lines), desc='Preprocessing'):
         if 'longform' in raw_line:
             continue
@@ -194,26 +232,35 @@ def process_filelist(filelist_path, config='configs/base_linux.yaml', val_fracti
             print(f'File not found: {line}')
             continue
 
-        if regen_filelist:
-            result = build_regen_line(output_dir, base_line, sid)
-        else:
-            result = None
-            if skip_exists:
-                result = try_reuse_existing(output_dir, base_line, sid)
-                if result is not None:
-                    skip_flag = True
+        for aug_idx in aug_passes:
+            # Seed derived from the (shuffle_seed, file, pass) so re-runs are
+            # reproducible but different files/passes get different augmentation.
+            aug_seed = None
+            if aug_idx is not None:
+                aug_seed = (hash((shuffle_seed, base_line, aug_idx)) & 0xFFFFFFFF)
+
+            if regen_filelist:
+                result = build_regen_line(output_dir, base_line, sid, aug_idx=aug_idx)
+            else:
+                result = None
+                if skip_exists:
+                    result = try_reuse_existing(output_dir, base_line, sid, aug_idx=aug_idx)
+                    if result is not None:
+                        skip_flag = True
+                if result is None:
+                    result = extract_and_save(
+                        extractor, output_dir, line, base_line, sid,
+                        sid_avgs, sid_sums, feats_to_extract,
+                        aug_idx=aug_idx, aug_seed=aug_seed,
+                        augment_silence=augment_silence, augment_gain=augment_gain,
+                    )
+
             if result is None:
-                result = extract_and_save(
-                    extractor, output_dir, line, base_line, sid,
-                    sid_avgs, sid_sums, feats_to_extract,
-                )
+                continue
 
-        if result is None:
-            continue
-
-        newline, f0_line = result
-        new_lines.append(newline)
-        new_f0_lines.append(f0_line)
+            newline, f0_line = result
+            new_lines.append(newline)
+            new_f0_lines.append(f0_line)
 
     train_lines, val_lines, train_f0_lines, val_f0_lines = split_train_val(
         new_lines, new_f0_lines, val_fraction,
@@ -266,6 +313,12 @@ def parse_args():
     parser.add_argument('--regen_filelist', action='store_true')
     parser.add_argument('--regen_spk_index', action='store_true')
     parser.add_argument('--no_normalize', action='store_true')
+    parser.add_argument('--n_augment', type=int, default=0,
+                         help='number of additional augmented copies to generate per file')
+    parser.add_argument('--no_augment_silence', action='store_true',
+                         help='disable random silence insertion in augmented passes')
+    parser.add_argument('--no_augment_gain', action='store_true',
+                         help='disable random gain modification in augmented passes')
     return parser.parse_args()
 
 
@@ -285,5 +338,8 @@ if __name__ == '__main__':
         regen_filelist=args.regen_filelist,
         feats_to_extract=None,
         do_normalize=not args.no_normalize,
+        n_augment=args.n_augment,
+        augment_silence=not args.no_augment_silence,
+        augment_gain=not args.no_augment_gain,
         # skip_exists=True,
     )
