@@ -184,13 +184,17 @@ class TrainingModule(L.LightningModule):
                 )
             self.logger.experiment.flush()
 
-        print(f"test step={self.global_step} epoch={self.current_epoch} net_g.training={self.net_g.training} net_d.training={self.net_d.training}")
+        # print(f"test step={self.global_step} epoch={self.current_epoch} net_g.training={self.net_g.training} net_d.training={self.net_d.training}")
 
     def on_train_start(self):
         self.test()
 
     def on_train_epoch_start(self):
         self.update_stage()
+        prior_freeze = self.config.train.get('prior_freeze') # freeze first n
+        if prior_freeze is not None:
+            self.net_g.enc_p.enc.freeze_layers(prior_freeze)
+
         if self.current_epoch < self.config.train.get('disc_only', 0):
             for param in self.net_d.parameters():
                 param.requires_grad = False
@@ -616,7 +620,7 @@ def train(args):
         accelerator='gpu',
         precision='bf16-mixed',
         max_steps=config.train.get('max_steps', 160000),
-        max_epochs=10000000,
+        max_epochs=config.train.get('max_epochs', 10000000),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
         #val_check_interval=2,
