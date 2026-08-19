@@ -5,7 +5,7 @@ matplotlib==3.10.8
 numpy==2.4.4
 omegaconf==2.3.0
 Pillow==12.2.0
-ppp_svc_helper==0.3.14
+ppp_svc_helper==0.3.15
 PyQt5==5.15.11
 pyqt5_sip==12.17.1
 lightning==2.6.1
