@@ -24,6 +24,24 @@ import torch.nn.functional as F
 from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
 import ultimate_xc
 
+def weighted_mel_loss(mel_pred, mel_target, voiced_mask, unvoiced_weight=0.1):
+    """
+    mel_pred, mel_target: (B, n_mels, T)
+    voiced_mask: (B, T) — 1 for voiced, 0 for unvoiced
+    """
+
+    # Expand mask to mel bins
+    w = voiced_mask.unsqueeze(1)  # (B, 1, T)
+    w = voiced_mask_to_weight(w, unvoiced_weight)
+    
+    loss = F.l1_loss(mel_pred, mel_target, reduction='none')  # (B, n_mels, T)
+    weighted = (loss * w).sum() / (w.sum() * mel_pred.shape[1] + 1e-8)
+    return weighted
+
+def voiced_mask_to_weight(voiced_mask, unvoiced_weight=0.1):
+    # voiced=1.0, unvoiced=unvoiced_weight
+    return voiced_mask + (1.0 - voiced_mask) * unvoiced_weight
+
 class TrainModule(pl.LightningModule):
     def __init__(self,
         net_g : SynthesizerTrn,
@@ -155,6 +173,12 @@ class TrainModule(pl.LightningModule):
             self.logger.experiment.flush()
 
     def step(self, batch, batch_idx, is_train=True):
+        if is_train:
+            assert self.net_g.training
+            assert self.net_d.training
+        else:
+            assert not self.net_g.training
+            assert not self.net_d.training
         for k, x in batch.items():
             if k in {'whisper', 'hubert', 'f0',
                 'f0_inharm', 'f0_subharm', 'f0_confidence', 'spec', 'spk'}:
@@ -187,6 +211,22 @@ class TrainModule(pl.LightningModule):
                 ppg, vec, pit, spec, spk, ppg_len, spec_len, pitch_extras=pitch_extras)
         audio = commons.slice_segments(
             audio.unsqueeze(1), ids_slice * hp.data.hop_length, hp.data.segment_size)  # slice
+
+        # Sometimes these have slightly different lengths. Should still be aligned
+        min_dim = min(fake_audio.shape[2], audio.shape[2])
+        fake_audio = fake_audio[:, :, :min_dim]
+        audio = audio[:, :, :min_dim]
+
+        # f0 shape: (B, T) — 0 or NaN on unvoiced frames
+        f0_sliced = slice_segments_general(pit, ids_slice, hp.data.segment_size // hp.data.hop_length)
+        voiced_mask = (f0_sliced > 0).float()  # (B, T), 1=voiced, 0=unvoiced
+
+        # Smooth the mask slightly to avoid hard discontinuities at transitions
+        # (optional but helps — unvoiced/voiced boundaries are ambiguous)
+        voiced_mask_smooth = F.max_pool1d(
+            voiced_mask.unsqueeze(1), kernel_size=5, stride=1, padding=2
+        ).squeeze(1)
+        
         # Spk Loss
         spk_loss = self.spkc_criterion(spk, spk_preds, torch.Tensor(spk_preds.size(0))
             .to(self.device).fill_(1.0))
@@ -198,10 +238,12 @@ class TrainModule(pl.LightningModule):
         except AssertionError:
             print("mel_real error, skip") # some audio triggers this for some reason, but not most
             return None
-        mel_loss = F.l1_loss(mel_fake, mel_real) * hp.train.c_mel
+        mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth,
+            unvoiced_weight = self.config.train.get('c_unvoiced', 0.8)) * hp.train.c_mel
 
         # multi-resolution stft loss
-        sc_loss, mag_loss = self.stft_criterion(fake_audio.squeeze(1), audio.squeeze(1))
+        sc_loss, mag_loss = self.stft_criterion(
+            fake_audio.squeeze(1), audio.squeeze(1), voiced_mask_mel=voiced_mask_smooth)
         stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
         # Generator Loss
@@ -253,6 +295,9 @@ class TrainModule(pl.LightningModule):
                   'feat_loss': feat_loss, 'loss_kl_f': loss_kl_f, 'loss_kl_r': loss_kl_r}
 
     def training_step(self, batch, batch_idx):
+        torch.set_grad_enabled(True)
+        self.net_g.train()
+        self.net_d.train()
         ret = self.step(batch, batch_idx, is_train=True)
         if ret is None:
             return None
@@ -265,6 +310,8 @@ class TrainModule(pl.LightningModule):
         return ret
 
     def validation_step(self, batch, batch_idx):
+        self.net_g.eval()
+        self.net_d.eval()
         ret = self.step(batch, batch_idx, is_train=False)
         if ret is None:
             return None
