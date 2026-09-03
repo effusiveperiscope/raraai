@@ -12,6 +12,71 @@ from ..rvc.commons import FiLMGenerator, PitchConditioner2
 from modeling.vits.modules_grl import SpeakerClassifier
 from einops import rearrange
 
+def mask_contiguous_blocks(
+    x: torch.Tensor, 
+    max_frames: int = 15, 
+    num_frame_masks: int = 2,
+    max_channels: int = 32, 
+    num_channel_masks: int = 2
+) -> torch.Tensor:
+    """
+    Applies SpecAugment-style contiguous block zeroing along Time and Channel dimensions.
+    
+    Args:
+        x: Tensor of shape [Batch, Time, Channel]
+        max_frames: Maximum length of a contiguous frame mask block.
+        num_frame_masks: Number of frame mask blocks to apply.
+        max_channels: Maximum length of a contiguous channel mask block.
+        num_channel_masks: Number of channel mask blocks to apply.
+    """
+    out = x.clone()
+    B, T, C = out.shape
+
+    for b in range(B):
+        # Time / Frame Masking
+        for _ in range(num_frame_masks):
+            t_len = int(torch.randint(0, max_frames + 1, (1,)).item())
+            if t_len > 0 and T > t_len:
+                t0 = int(torch.randint(0, T - t_len, (1,)).item())
+                out[b, t0 : t0 + t_len, :] = 0.0
+
+        # Channel / Feature Masking
+        for _ in range(num_channel_masks):
+            c_len = int(torch.randint(0, max_channels + 1, (1,)).item())
+            if c_len > 0 and C > c_len:
+                c0 = int(torch.randint(0, C - c_len, (1,)).item())
+                out[b, :, c0 : c0 + c_len] = 0.0
+
+    return out
+
+
+def mask_independent_bernoulli(
+    x: torch.Tensor, 
+    p_frame: float = 0.1, 
+    p_channel: float = 0.1
+) -> torch.Tensor:
+    """
+    Independently zeros out entire frames or entire channels across [Batch, Time, Channel].
+    
+    Args:
+        x: Tensor of shape [Batch, Time, Channel]
+        p_frame: Probability of dropping an entire frame [B, T, 1].
+        p_channel: Probability of dropping an entire channel [B, 1, C].
+    """
+    out = x.clone()
+    B, T, C = out.shape
+
+    if p_frame > 0.0:
+        # Generate [B, T, 1] mask broadcasting across Channels
+        frame_mask = (torch.rand(B, T, 1, device=x.device) >= p_frame).to(x.dtype)
+        out = out * frame_mask
+
+    if p_channel > 0.0:
+        # Generate [B, 1, C] mask broadcasting across Time
+        channel_mask = (torch.rand(B, 1, C, device=x.device) >= p_channel).to(x.dtype)
+        out = out * channel_mask
+
+    return out
 
 class TextEncoder(nn.Module):
     def __init__(self,
@@ -272,7 +337,11 @@ class SynthesizerTrn(nn.Module):
         g = self.emb_g(F.normalize(spk)).unsqueeze(-1)
         ppg_use = (ppg_alpha * ppg_zq) + ((1.0 - ppg_alpha) * ppg_z)
 
+        # Regularizations
         ppg_use = ppg_use + torch.randn_like(ppg_z) * 0.3 # perturbation
+        ppg_use = mask_contiguous_blocks(ppg_use, num_frame_masks=1)
+        ppg_use = mask_independent_bernoulli(ppg_use)
+
         if hub is not None:
             hub = hub + torch.randn_like(hub) * 1 # perturbation
 

@@ -20,7 +20,7 @@ class TrainingModule(pl.LightningModule):
 
     def step(self, batch, batch_idx, is_test=False):
         whisper = batch['whisper']
-        whisper2 = batch['whisper2']
+        # whisper2 = batch['whisper2']
         whisper_len = batch['whisper_length']
         yq, y, zq, z, vqloss, perplexity = self.model(whisper, do_uq=False)
 
@@ -30,8 +30,8 @@ class TrainingModule(pl.LightningModule):
         mask = mask.unsqueeze(-1).float()  # [B, T, 1]
 
         # Apply mask and compute mean over valid positions only
-        q_recon_loss = (F.mse_loss(yq, whisper2, reduction='none') * mask).sum() / (mask.sum() * C)
-        # recon_loss = (F.mse_loss(y, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
+        # q_recon_loss = (F.mse_loss(yq, whisper2, reduction='none') * mask).sum() / (mask.sum() * C)
+        q_recon_loss = (F.mse_loss(yq, whisper, reduction='none') * mask).sum() / (mask.sum() * C)
 
         loss = q_recon_loss + vqloss * self.config.c_vqloss 
         od = {
@@ -162,9 +162,14 @@ if __name__ == '__main__':
         filename='best-checkpoint',
         save_top_k=config.keep_ckpts,
         mode='min',
+    )
+    # I don't know why this is needed but it doesn't save without it
+    last_callback = pl.callbacks.ModelCheckpoint( # just save last
+        dirpath=f'checkpoints/{config.exp_name}',
+        filename='last',
         save_last=True
     )
-    callbacks = [val_checkpoint_callback]
+    callbacks = [val_checkpoint_callback, last_callback]
     logger = pl.loggers.TensorBoardLogger(
         config.get('log_dir', 'logs'), name=config.exp_name,
         version=0
@@ -174,6 +179,7 @@ if __name__ == '__main__':
         accelerator='gpu',
         precision='bf16-mixed',
         callbacks=callbacks,
+        max_epochs=1000000,
         check_val_every_n_epoch=config.get('val_interval', 1),
     )
     trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=args.resume_from)

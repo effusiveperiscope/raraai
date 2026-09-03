@@ -385,6 +385,7 @@ class Encoder(nn.Module):
         bias=True,
         block_dilations=(1, 1),
         unit_kernel_size=3,
+        dropout=0.1
     ):
         super().__init__()
         assert len(channel_ratios) == len(strides)
@@ -411,6 +412,7 @@ class Encoder(nn.Module):
                 )
             ]
             in_channels = out_channels
+        self.dropout = nn.Dropout(dropout)
         self.num_blocks = len(self.conv_blocks)
         self.out_channels = out_channels
 
@@ -418,6 +420,7 @@ class Encoder(nn.Module):
         x = self.conv(x)
         for i in range(self.num_blocks):
             x = self.conv_blocks[i](x)
+            x = self.dropout(x)
         return x
 
 
@@ -545,6 +548,7 @@ class VevoRepCodec(nn.Module):
         enc_block_kernel_size=3,
         dec_block_dilations=(1, 1),
         dec_block_kernel_size=3,
+        dropout=0.1,
     ):
         super().__init__()
 
@@ -559,6 +563,7 @@ class VevoRepCodec(nn.Module):
             bias=bias,
             block_dilations=enc_block_dilations,
             unit_kernel_size=enc_block_kernel_size,
+            dropout=0.1,
         )
 
         self.decoder = Decoder(

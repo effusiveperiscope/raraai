@@ -1,10 +1,10 @@
-exp_name: mlp_mixed_29
+exp_name: titan_28
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
   out_dim: 1280
   code_dim: 1280
-  hidden_dim: 512
+  hidden_dim: 1280
   codebook_size: 48
 data:
   filter_length: 1536
@@ -70,13 +70,13 @@ train:
   seed: 1234
   max_steps: -1
 
-  train_filelist: ./data/train_asf3.txt
-  val_filelist: ./data/val_asf3.txt
-  spk_index: ./data/sid_avgs_asf3.pt
+  train_filelist: ./data/titan_plus/train.txt
+  val_filelist: ./data/titan_plus/val.txt
+  spk_index: ./data/titan_plus/sid_avgs.pt
   test_filelist: ./data/test/train.txt
   test_noise_scale: 0.34
   test_interval: 1
-  test_transpose: 12
+  test_transpose: 0
   test_sid: 0
   max_perturb: 3
   val_interval: 1

@@ -1,7 +1,7 @@
-exp_name: large2base_48
+exp_name: large_48_original_target
 
 in_dim: 1280
-out_dim: 512
+out_dim: 1280
 codebook_size: 48
 hidden_dim: 512
 code_dim: 1280

@@ -1,10 +1,10 @@
-exp_name: mlp_mixed_29
+exp_name: mlp_mixed_25
 tensorboard_version: 0
 codec:
   whisper_dim: 1280
   out_dim: 1280
   code_dim: 1280
-  hidden_dim: 512
+  hidden_dim: 1280
   codebook_size: 48
 data:
   filter_length: 1536

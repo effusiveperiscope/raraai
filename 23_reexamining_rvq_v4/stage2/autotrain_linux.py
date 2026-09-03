@@ -24,8 +24,8 @@ logging.getLogger('pytorch_lightning').setLevel(logging.WARNING)
 import torch.multiprocessing as mp
 
 def main():
-    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp'
-    BASE_MODEL = 'checkpoints/mlp_mixed_24/last.ckpt'
+    SOURCE_FILELISTS_DIR = '/mnt/data/Code/MasterDataset/temp2'
+    BASE_MODEL = 'checkpoints/mlp_mixed_27/last.ckpt'
     SRC_CONFIG = 'configs/mlp_base.yaml'
     for filelist in os.listdir(SOURCE_FILELISTS_DIR):
         abs_path = os.path.join(os.path.abspath(SOURCE_FILELISTS_DIR), filelist)
@@ -41,10 +41,10 @@ def main():
             do_normalize=True) 
 
         config = OmegaConf.load(SRC_CONFIG)
-        config.exp_name = basename + '_base24'
+        config.exp_name = basename + '_base27_v2'
         config.train.c_unvoiced = 0.2
-        config.train.c_sample_alpha = 1.8 # More quantized
-        config.train.disable_spk = True # Disable speaker classifier based tuning
+        config.train.lr = config.train.lr * 0.7
+        config.train.prior_freeze = 3 # Mitigate pronunciation drift?
         print(f"using lr {config.train.lr}")
         hp = config
 
@@ -86,7 +86,7 @@ def main():
                 persistent_workers=num_workers > 0)
         print("Done")
         
-        max_steps = 250000
+        max_steps = 300000
         # max_steps = min(
             # len_dataset * 2000 / config.train.batch_size * 2,  # not sure why need x2
             # 250000) # 2000 epochs or 250k steps whichever is fewer
@@ -126,7 +126,7 @@ def main():
         ]
 
         interval_checkpoint_callback = L.pytorch.callbacks.ModelCheckpoint(
-            every_n_epochs=int(est_epochs // 4),
+            every_n_epochs=int(est_epochs // 5),
             dirpath=f'checkpoints/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}', save_top_k=-1
         )
