@@ -3,11 +3,11 @@ import torch
 
 from torch import nn
 from torch.nn import functional as F
+from modeling.rvc.my_nsf import MyGeneratorNSF
 from modeling.vits import attentions
 from modeling.vits import commons
 from modeling.vits import modules
 from modeling.vits.utils import f0_to_coarse
-from modeling.vits_decoder.generator import Generator
 from modeling.vits.modules_grl import SpeakerClassifier
 
 
@@ -178,7 +178,7 @@ class SynthesizerTrn(nn.Module):
             4,
             gin_channels=hp.vits.spk_dim
         )
-        self.dec = Generator(hp=hp)
+        self.dec = MyGeneratorNSF(hp=hp)
 
     def forward(self, ppg, vec, pit, spec, spk, ppg_l, spec_l, pitch_extras=None):
         ppg = ppg + torch.randn_like(ppg) * 1  # Perturbation
@@ -241,7 +241,7 @@ class SynthesizerInfer(nn.Module):
             4,
             gin_channels=hp.vits.spk_dim
         )
-        self.dec = Generator(hp=hp)
+        self.dec = MyGeneratorNSF(hp=hp)
 
     def remove_weight_norm(self):
         self.flow.remove_weight_norm()
