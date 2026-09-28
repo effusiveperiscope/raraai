@@ -1,3 +1,4 @@
+import os
 import warnings
 import librosa
 import logging
@@ -332,6 +333,7 @@ def parse_args():
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--svc5_ckpt', type=str, default=None)
     parser.add_argument('--prior_ckpt', type=str, default=None)
+    parser.add_argument('--dec_ckpt', type=str, default=None)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
 
@@ -343,7 +345,8 @@ def train(config,
     resume_from=None,
     transfer_from=None,
     svc5_ckpt=None,
-    prior_ckpt=None):
+    prior_ckpt=None,
+    dec_ckpt=None):
     hp = config
     net_g = SynthesizerTrn(
         spec_channels=hp.data.filter_length // 2 + 1,
@@ -352,6 +355,9 @@ def train(config,
     )
     net_d = Discriminator(hp=hp)
 
+    if os.path.exists(f'checkpoints/{config.exp_name}/last.ckpt'):
+        print('Detected interrupted training - resuming from last.ckpt')
+        resume_from = f'checkpoints/{config.exp_name}/last.ckpt'
     if resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(resume_from))
         d = torch.load(resume_from, map_location='cpu', weights_only=False)
@@ -374,8 +380,12 @@ def train(config,
         load_state_dict_mismatch(net_d, state_dict['model_d'])
     if prior_ckpt is not None:
         print("Loading prior checkpoint: {}".format(prior_ckpt))
-        state_dict = torch.load(prior_ckpt, map_location='cpu', weights_only=False)['state_dict']
-        load_submodule_prefix(net_g.enc_p, 'net_g.enc_p.', state_dict)
+        state_dict = torch.load(prior_ckpt, map_location='cpu', weights_only=False)['model_g']
+        load_submodule_prefix(net_g.enc_p, 'enc_p.', state_dict)
+    if dec_ckpt is not None:
+        print("Loading dec checkpoint: {}".format(dec_ckpt))
+        state = torch.load(dec_ckpt, map_location='cpu', weights_only=False)['state_dict']
+        load_submodule_prefix(net_g.dec, 'net_g.dec.', state_dict)
 
     training_module = TrainModule(
         net_g=net_g, net_d=net_d, config=config)
@@ -437,7 +447,7 @@ def train(config,
         #val_check_interval=2,
         log_every_n_steps=config.train.get('log_interval', 50),
     )
-    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=resume_from)
+    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=resume_from, weights_only=False)
 
 if __name__ == '__main__':
     import torch.multiprocessing as mp
@@ -448,4 +458,5 @@ if __name__ == '__main__':
         resume_from=args.resume_from,
         transfer_from=args.transfer_from,
         svc5_ckpt=args.svc5_ckpt,
-        prior_ckpt=args.prior_ckpt)
+        prior_ckpt=args.prior_ckpt,
+        dec_ckpt=args.dec_ckpt)

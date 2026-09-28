@@ -1,6 +1,6 @@
 import os
 import re
-from train_anchor import train
+from train import train
 from preprocess import process_filelist
 from omegaconf import OmegaConf
 
@@ -15,8 +15,8 @@ logging.getLogger('fsspec').setLevel(logging.WARNING)
 
 SOURCE_FILELIST_PATH = "/mnt/data/Code/MasterDataset/pony_enhanced/"
 TMP_FILELIST = "filelists/tmp.txt"
-CONFIG = "configs/char_anchor.yaml"
-TRANSFER_FROM = "pretrain/base_v3.ckpt"
+CONFIG = "configs/char.yaml"
+TRANSFER_FROM = "pretrain/base_4_1.ckpt"
 
 def linux_filelist_line(line):
     if os.name == 'nt': return line
@@ -31,7 +31,7 @@ if __name__ == '__main__':
     mp.set_start_method('spawn', force=True) # This is needed on Linux
 
     for filelist in os.listdir(SOURCE_FILELIST_PATH):
-        exp_name = os.path.basename(filelist).split('.')[0] + '_v2'
+        exp_name = os.path.basename(filelist).split('.')[0] + '_v4.1'
 
         with open(SOURCE_FILELIST_PATH+filelist, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f.readlines()]
@@ -71,8 +71,8 @@ if __name__ == '__main__':
                 resume_from=None,
                 transfer_from=TRANSFER_FROM,
                 svc5_ckpt=None,
-                rvc_disc_ckpt=None,
-                prior_ckpt=None)
+                prior_ckpt=None,
+                dec_ckpt=None)
         else:
             print("Resuming", exp_name)
             last_ckpt_files = [f'checkpoints/{exp_name}/last.ckpt', f'checkpoints/{exp_name}/last-v1.ckpt']
