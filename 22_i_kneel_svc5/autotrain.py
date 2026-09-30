@@ -50,7 +50,8 @@ if __name__ == '__main__':
 
         len_dataset = line_count
         steps_factor = 30
-        max_steps = 280000
+        #max_steps = 280000
+        max_epochs = 300 # for now, short trains
 
         config = OmegaConf.load(CONFIG)
         OmegaConf.set_struct(config, True)
@@ -58,7 +59,7 @@ if __name__ == '__main__':
         config.train.train_filelist = os.path.join('data', exp_name, 'train.txt')
         config.train.val_filelist = os.path.join('data', exp_name, 'val.txt')
         config.train.spk_index = os.path.join('data', exp_name, 'sid_avgs.pt')
-        config.train.max_steps = max_steps
+        #config.train.max_steps = max_steps
         config.train.c_unvoiced = 0.2
         config.train.lr = config.train.lr * 0.7
         config.train.enc_p_freeze_n = 3
@@ -68,7 +69,7 @@ if __name__ == '__main__':
         else:
             config.train.val_interval = 2
             config.train.test_interval = 2
-        print("Training", exp_name, "for", max_steps, "steps")
+        #print("Training", exp_name, "for", max_steps, "steps")
         if not os.path.exists(f'logs/{exp_name}'): 
             train(config,
                 resume_from=None,
@@ -84,5 +85,5 @@ if __name__ == '__main__':
                 resume_from=last_ckpt if os.path.exists(last_ckpt) else None,
                 transfer_from=None,
                 svc5_ckpt=None,
-                rvc_disc_ckpt=None,
-                prior_ckpt=None)
+                prior_ckpt=None,
+                dec_ckpt=None)

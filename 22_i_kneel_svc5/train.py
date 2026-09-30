@@ -441,13 +441,15 @@ def train(config,
         logger=logger,
         accelerator='gpu',
         precision='bf16-mixed',
-        max_steps=config.train.get('max_steps', 3000000),
+        max_steps=config.train.get('max_steps', -1),
+        max_epochs=config.train.get('max_epochs', -1),
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get('val_interval', 1),
         #val_check_interval=2,
         log_every_n_steps=config.train.get('log_interval', 50),
     )
-    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=resume_from, weights_only=False)
+    trainer.fit(training_module, train_dataloader, val_dataloader, ckpt_path=resume_from,
+        weights_only=False)
 
 if __name__ == '__main__':
     import torch.multiprocessing as mp

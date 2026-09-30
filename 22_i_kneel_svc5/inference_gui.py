@@ -8,6 +8,12 @@ import librosa
 import numpy as np
 from modeling.vits.models import SynthesizerTrn
 from modeling.vits import commons
+from contextlib import nullcontext
+import warnings
+import logging
+warnings.filterwarnings('error', category=RuntimeWarning)
+warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
+logging.getLogger('numba').setLevel(logging.WARNING)
 from logging import getLogger
 from svc_helper.gui import *
 from omegaconf import OmegaConf

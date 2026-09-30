@@ -46,7 +46,8 @@ train:
   c_mel: 1.0
   c_stft: 9
   c_anchor: 0.3
-  epochs: 602
+  c_unvoiced: 0.8
+  max_epochs: -1
   eps: 1e-7
   lr: 1e-4
   lr_decay: 0.999875

@@ -1,4 +1,4 @@
-FROM vastai/pytorch:cuda-13.0.3-auto
+FROM vastai/pytorch:cuda-13.2.1-auto
 
 # 1. Install system dependencies
 RUN apt-get update && \

@@ -209,6 +209,7 @@ class SynthesizerTrn(nn.Module):
         z_p, m_p, logs_p, ppg_mask, x = self.enc_p(
             ppg, ppg_l, vec, f0=f0_to_coarse(pit), noise_scale=noise_scale)
         z, _ = self.flow(z_p, ppg_mask, g=spk, reverse=True)
+        print(z.shape, pit.shape)
         o = self.dec(spk, z * ppg_mask, f0=pit, pitch_extras=pitch_extras)
         return o
 
