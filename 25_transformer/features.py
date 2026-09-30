@@ -5,6 +5,7 @@ from svc_helper.pitch.rmvpe import RMVPEModel
 from horsephonemizer import HorsePhonemizer
 from transformers import AutoTokenizer 
 from modeling.vits import spectrogram, utils
+import librosa
 
 class FeatureExtractor:
     def __init__(self, hp, device="cuda:0",
@@ -181,7 +182,6 @@ class FeatureExtractor:
 if __name__ == '__main__':
     from commons import elapsed_timer
     from omegaconf import OmegaConf
-    import librosa
     data_16k, _ = librosa.load("test.wav", sr=16000)
     with elapsed_timer() as elapsed:
         fe = FeatureExtractor(hp=OmegaConf.load("configs/base.yaml"))

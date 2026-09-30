@@ -1,4 +1,5 @@
 import librosa
+from omegaconf import OmegaConf
 import torch
 from features import FeatureExtractor
 from utils import win_longpath
@@ -20,7 +21,8 @@ def process_filelist(filelist_path,
     random.seed(shuffle_seed)
     random.shuffle(lines)
 
-    fe = FeatureExtractor()
+    hp = OmegaConf.load("configs/base.yaml")
+    fe = FeatureExtractor(hp=hp)
 
     is_multispk = False
     new_lines = []
@@ -46,17 +48,17 @@ def process_filelist(filelist_path,
             print(f'File not found: {line}')
             continue
 
-        wav, sr = librosa.load(line, sr=48000)
+        wav, _ = librosa.load(line, sr=48000)
         savepaths = []
         try:
 
-            expected_keys = fe.expected_keys()
+            expected_keys = ['wave', 'spec', 'f0']
             if all(os.path.exists(os.path.join(output_dir,
                 os.path.basename(base_line) + '.' + key)) for key in expected_keys) and skip_if_one_exists:
                 print('File already exists, skipping...')
                 return
 
-            feats = fe.extract_features_ac(wav, sr)
+            feats = fe.extract_features_ac(wav)
             for key, value in feats.items():
                 savepath = os.path.join(output_dir,
                     os.path.basename(base_line) + '.' + key)
