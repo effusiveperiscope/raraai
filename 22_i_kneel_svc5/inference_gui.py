@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
             noise_aug = data['noise_aug']
             ppg_interp = ppg_interp + torch.randn_like(ppg_interp) * noise_aug
 
-            vec = feats['whisper_base'].to(self.dtype).to(self.device).unsqueeze(0)
+            vec = feats['hubert'].to(self.dtype).to(self.device).unsqueeze(0)
             vec_interp = F.interpolate(rearrange(vec, 'b t d -> b d t'), scale_factor=2)
             vec_interp = rearrange(vec_interp, 'b d t -> b t d')
             vec_interp = vec_interp[:,:ppg_interp.shape[1],:]
