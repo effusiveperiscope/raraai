@@ -4,12 +4,14 @@ import torch
 from svc_helper.pitch.rmvpe import RMVPEModel
 from horsephonemizer import HorsePhonemizer
 from transformers import AutoTokenizer 
+from modeling.vits import spectrogram, utils
 
 class FeatureExtractor:
-    def __init__(self, device="cuda:0",
+    def __init__(self, hp, device="cuda:0",
         load_qwen=True):
         self.dtype = torch.bfloat16
         self.device = device
+        self.hp = hp
 
         if load_qwen:
             from qwen_asr import Qwen3ASRModel
@@ -42,6 +44,17 @@ class FeatureExtractor:
         }
         self.tokenizer_g2p = AutoTokenizer.from_pretrained(
             tokenizer_g2p, **g2p_special)
+
+    def extract_spec(self, data_16k):
+        data_16k = torch.from_numpy(data_16k).unsqueeze(0)
+        n_fft = self.hp.data.filter_length
+        sampling_rate = self.hp.data.sampling_rate
+        hop_size = self.hp.data.sampling_rate // 100
+        win_size = self.hp.data.win_length
+        spec = spectrogram.spectrogram_torch(
+            data_16k, n_fft, sampling_rate, hop_size, win_size, center=False)
+        spec = torch.squeeze(spec, 0)
+        return spec
 
     def extract_pitch(self, data_16k):
         f0_extracted, _ = self.rmvpe_model.extract_pitch2(torch.from_numpy(data_16k))
@@ -152,14 +165,32 @@ class FeatureExtractor:
             })
         return out, f0
 
+    def extract_features_ac(self, data_48k):
+        data_16k = librosa.resample(data_48k, orig_sr=48000, target_sr=16000)
+        ret = {
+            'wave': torch.from_numpy(data_48k),
+            'spec': self.extract_spec(data_48k),
+            'f0': torch.from_numpy(self.extract_pitch(data_16k))
+        }
+        d = min(ret['spec'].shape[1], ret['f0'].shape[0])
+        ret['spec'] = ret['spec'][:,:d]
+        ret['f0'] = ret['f0'][:d]
+        return ret
+
 
 if __name__ == '__main__':
     from commons import elapsed_timer
+    from omegaconf import OmegaConf
     import librosa
     data_16k, _ = librosa.load("test.wav", sr=16000)
     with elapsed_timer() as elapsed:
-        fe = FeatureExtractor()
+        fe = FeatureExtractor(hp=OmegaConf.load("configs/base.yaml"))
         print("Loaded extractor %.2fs" % elapsed())
         out, f0 = fe.extract(data_16k)
         print(out)
         print("Finished combined extraction %.2fs" % elapsed())
+
+        data_48k, _ = librosa.load("test.wav", sr=48000)
+        feats = fe.extract_features_ac(data_48k)
+        for k,v in feats.items():
+            print(k, v.shape)
