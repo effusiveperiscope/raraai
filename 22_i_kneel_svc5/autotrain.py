@@ -13,7 +13,7 @@ logging.getLogger('numba').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('fsspec').setLevel(logging.WARNING)
 
-SOURCE_FILELIST_PATH = "/mnt/data/Code/MasterDataset/pony_enhanced/"
+SOURCE_FILELIST_PATH = "/mnt/data/Code/MasterDataset/temp4/"
 TMP_FILELIST = "filelists/tmp.txt"
 CONFIG = "configs/char.yaml"
 TRANSFER_FROM = "pretrain/base_4_1.ckpt"
@@ -31,7 +31,7 @@ if __name__ == '__main__':
     mp.set_start_method('spawn', force=True) # This is needed on Linux
 
     for filelist in os.listdir(SOURCE_FILELIST_PATH):
-        exp_name = os.path.basename(filelist).split('.')[0] + '_v4.1'
+        exp_name = os.path.basename(filelist).split('.')[0] + '_v4.2'
 
         with open(SOURCE_FILELIST_PATH+filelist, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f.readlines()]
@@ -59,6 +59,9 @@ if __name__ == '__main__':
         config.train.val_filelist = os.path.join('data', exp_name, 'val.txt')
         config.train.spk_index = os.path.join('data', exp_name, 'sid_avgs.pt')
         config.train.max_steps = max_steps
+        config.train.c_unvoiced = 0.2
+        config.train.lr = config.train.lr * 0.7
+        config.train.enc_p_freeze_n = 3
         if line_count < 1000:
             config.train.val_interval = 2000 // line_count
             config.train.test_interval = 2000 // line_count
