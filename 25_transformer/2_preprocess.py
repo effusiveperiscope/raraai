@@ -85,7 +85,7 @@ def process_filelist(filelist_path,
             # Encode raw spec/f0 into discrete RVQ codes with the 1_training
             # Generator checkpoint (channel-first spec, frame-rate f0).
             spec = feats_ac['spec']  # [T, C]
-            f0 = feats_ac['f0']  # [T]
+            f0 = feats_ac['f0'].float()  # [T]
             spec_b = spec.transpose(0, 1).unsqueeze(0).to(device)  # [1, C, T]
             spec_l = torch.tensor([spec.shape[0]], device=device)
             f0_b = f0.unsqueeze(0).to(device)  # [1, T]
