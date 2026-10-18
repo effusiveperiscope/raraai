@@ -224,6 +224,135 @@ class Decoder(nn.Module):
         audio = self.dec(g, yq, f0)
         return audio
 
+    @staticmethod
+    def _normalize_code_indices(indices, codebook_num, name):
+        """Accept int codes as (Q, B, T) or (B, T, Q); return (Q, B, T)."""
+        idx = indices if torch.is_tensor(indices) else torch.tensor(indices)
+        if idx.dim() != 3:
+            raise ValueError(
+                f"{name} must be 3D (Q, B, T) or (B, T, Q), "
+                f"got shape {tuple(idx.shape)}")
+        if idx.shape[0] == codebook_num:
+            return idx.long()
+        if idx.shape[-1] == codebook_num:
+            return idx.permute(2, 0, 1).long()
+        raise ValueError(
+            f"{name} must have codebook dim {codebook_num} first or last, "
+            f"got shape {tuple(idx.shape)}")
+
+    @staticmethod
+    def _residual_lookup(quantizer, indices_qbt):
+        """Sum per-layer codebook embeddings for RVQ indices (Q, B, T)."""
+        layers = quantizer.codebook.layers
+        if indices_qbt.shape[0] != len(layers):
+            raise ValueError(
+                f"Expected {len(layers)} codebooks, got {indices_qbt.shape[0]}")
+        out = None
+        for q, layer in enumerate(layers):
+            v = F.embedding(indices_qbt[q], layer.codebook)  # (B, T, D)
+            out = v if out is None else out + v
+        return out.transpose(1, 2)  # (B, D, T)
+
+    def encode_codes(self, spec, spec_l, f0, sid):
+        """Encode spec + f0 into integer codes at the shared code rate.
+
+        Returns (spec_codes, pitch_codes) as (Q, B, T_ds) int tensors.
+        """
+        g = self.spk_emb(sid)
+        x, _ = self.enc_q(spec, spec_l)
+        t_pad = (-x.shape[-1]) % self.down_factor
+        if t_pad > 0:
+            x = F.pad(x, (0, t_pad))
+        x_ds = self.downsample(x)  # (B, C, T_ds)
+        z = self.codec.projector(x_ds)
+        _, spec_codes = self.codec.quantizer.inference(z)
+
+        t_frames = x.shape[-1] - t_pad
+        if f0.shape[-1] < t_frames:
+            f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
+        else:
+            f0_aligned = f0[..., :t_frames]
+        f0_target = (torch.log1p(torch.clamp(
+            f0_aligned, min=0.0)) / PITCH_LOG_SCALE).unsqueeze(1)
+        if t_pad > 0:
+            f0_target = F.pad(f0_target, (0, t_pad))
+        px = self.pitch_downsample(f0_target)
+        pz = self.pitch_codec.projector(px)
+        _, pitch_codes = self.pitch_codec.quantizer.inference(pz)
+        return spec_codes, pitch_codes
+
+    def infer_from_codes(self, spec_codes, pitch_codes, sid,
+                         out_len=None, voiced=None):
+        """Synthesize audio directly from integer spec + pitch codes.
+
+        Args:
+            spec_codes: (Q_spec, B, T) or (B, T, Q_spec) int codes.
+            pitch_codes: (Q_pitch, B, T) or (B, T, Q_pitch) int codes at
+                the same rate/length as spec_codes.
+            sid: (B,) speaker ids.
+            out_len: optional frame length at the decoder rate to trim to.
+            voiced: optional voicing mask, (B, T_frames) or (B, T_codes).
+                Unvoiced frames render as 0 Hz. Defaults to all voiced.
+        Returns:
+            audio: (B, 1, T_audio) waveform.
+        """
+        g = self.spk_emb(sid)
+        spec_idx = self._normalize_code_indices(
+            spec_codes, len(self.codec.quantizer.codebook.layers),
+            "spec_codes").to(g.device)
+        pitch_idx = self._normalize_code_indices(
+            pitch_codes, len(self.pitch_codec.quantizer.codebook.layers),
+            "pitch_codes").to(g.device)
+        if spec_idx.shape[1] != pitch_idx.shape[1]:
+            raise ValueError(
+                "spec/pitch batch mismatch: "
+                f"{spec_idx.shape[1]} vs {pitch_idx.shape[1]}")
+        if spec_idx.shape[2] != pitch_idx.shape[2]:
+            raise ValueError(
+                "spec/pitch code lengths must match (same rate): "
+                f"{spec_idx.shape[2]} vs {pitch_idx.shape[2]}")
+        if sid.shape[0] != spec_idx.shape[1]:
+            raise ValueError(
+                f"sid batch {sid.shape[0]} != codes batch {spec_idx.shape[1]}")
+
+        # Spec path: indices -> quantized latent -> codec decoder -> upsample.
+        zq = self._residual_lookup(self.codec.quantizer, spec_idx)
+        y = self.codec.decoder(zq, self.codec.g_proj(g))  # (B, C, T)
+        yq = self.upsample(y)  # (B, C, T * down_factor)
+        t_full = yq.shape[-1]
+        if out_len is not None:
+            yq = yq[..., :out_len]
+            t_full = yq.shape[-1]
+
+        # Pitch path: indices -> quantized latent -> codec decoder ->
+        # upsample -> 1-channel log-norm pitch -> Hz.
+        pzq = self._residual_lookup(self.pitch_codec.quantizer, pitch_idx)
+        py = self.pitch_codec.decoder(pzq, self.pitch_codec.g_proj(g))
+        py_up = self.pitch_upsample(py)[..., :t_full]
+        f0_norm = self.pitch_out_proj(py_up).squeeze(1)  # (B, T_full)
+
+        if voiced is None:
+            v = torch.ones_like(f0_norm)
+        else:
+            vt = (voiced if torch.is_tensor(voiced)
+                  else torch.tensor(voiced, device=f0_norm.device))
+            vt = vt.float().to(f0_norm.device)
+            if vt.dim() != 2 or vt.shape[0] != f0_norm.shape[0]:
+                raise ValueError(
+                    "voiced must be (B, T_frames) or (B, T_codes), got "
+                    f"{tuple(vt.shape)}")
+            if vt.shape[1] == spec_idx.shape[2]:
+                # Code-rate mask: expand by the downsampling factor.
+                vt = vt.repeat_interleave(self.down_factor, dim=1)
+            v = vt[..., :t_full]
+            if v.shape[1] < t_full:
+                v = F.pad(v, (0, t_full - v.shape[1]), value=1.0)
+        f0 = (torch.expm1(torch.clamp(
+            f0_norm, min=0.0) * PITCH_LOG_SCALE) * v)
+
+        audio = self.dec(g, yq, f0)
+        return audio
+
     def infer_pitch(self, f0, sid):
         """Encode/decode a raw f0 contour through the pitch codec only.
 
