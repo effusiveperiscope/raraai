@@ -28,6 +28,8 @@ class Decoder(nn.Module):
             decode_channels=hp.vits.inter_channels,
             code_dim=hp.codec.code_dim,
             codebook_size=hp.codec.codebook_size,
+            codebook_num=hp.codec.codebook_num,
+            gin_channels=hp.vits.gin_channels
         )
         self.dec = MyGeneratorNSF(hp=hp)
         self.spk_emb = nn.Embedding(hp.vits.max_spk_count, hp.vits.gin_channels)
@@ -64,7 +66,9 @@ class Decoder(nn.Module):
         # VevoRepCodec.forward expects (B, T, C).
         x_ds = rearrange(x_ds, "b c t -> b t c")
 
-        yq, _, _, _, vqloss, perplexity = self.codec(x_ds, do_uq=False)
+        yq, _, _, _, vqloss, perplexity = self.codec(
+            x_ds, do_uq=False, g=g)
+        yq_ds = yq
 
         # Upsample codec output back to decoder frame rate.
         # Codec returns yq as (B, T', C).
@@ -73,9 +77,37 @@ class Decoder(nn.Module):
         if t_pad > 0:
             yq = yq[..., : yq.shape[-1] - t_pad]
         y_slice, f0_slice, ids_slice = rand_slice_segments_with_pitch(
-            yq, f0, spec_l, self.hp.data.segment_size)
+            yq, f0, spec_l, self.hp.data.segment_size // self.hp.data.hop_length)
         audio = self.dec(g, y_slice, f0_slice)
+        return audio, ids_slice, yq_ds, x_ds, vqloss, perplexity
+
+    def infer(self, spec, spec_l, f0, sid):
+        g = self.spk_emb(sid)
+        # enc_q returns (B, C, T) with T = decoder frame rate.
+        x, x_mask = self.enc_q(spec, spec_l)
+
+        # Downsample encoder frames by down_factor so codec runs at
+        # 1/down_factor of the decoder frame rate (default 1/4).
+        # Pad time so it is divisible by down_factor (pad on the right).
+        t_pad = (-x.shape[-1]) % self.down_factor
+        if t_pad > 0:
+            x = F.pad(x, (0, t_pad))
+        x_ds = self.downsample(x)  # (B, C, T/down_factor)
+        # VevoRepCodec.forward expects (B, T, C).
+        x_ds = rearrange(x_ds, "b c t -> b t c")
+
+        yq, _, _, _, vqloss, perplexity = self.codec(
+            x_ds, do_uq=False, g=g)
+
+        # Upsample codec output back to decoder frame rate.
+        # Codec returns yq as (B, T', C).
+        yq = rearrange(yq, "b t c -> b c t")
+        yq = self.upsample(yq)
+        if t_pad > 0:
+            yq = yq[..., : yq.shape[-1] - t_pad]
+        audio = self.dec(g, yq, f0)
         return audio
+
 
 if __name__ == "__main__":
     from omegaconf import OmegaConf
@@ -87,4 +119,4 @@ if __name__ == "__main__":
     hp = OmegaConf.load("configs/base.yaml")
     decoder = Decoder(hp)
 
-    print(decoder(spec, spec_l, f0, sid).shape)
+    print(decoder.infer(spec, spec_l, f0, sid).shape)

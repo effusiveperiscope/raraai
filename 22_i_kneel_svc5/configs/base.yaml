@@ -62,7 +62,7 @@ train:
   log_dir: logs
   train_filelist: data/base/train.txt
   val_filelist: data/base/val.txt
-  test_filelist: data/test/val.txt
+  test_filelist: data/test/train.txt
   spk_index: data/base/sid_avgs.pt
 
   test_sid: 0

@@ -43,6 +43,7 @@ class FeatureExtractor:
             'eos_token': "[SEP]",
             'mask_token':"[MASK]",
         }
+        self.space_id = 5
         self.tokenizer_g2p = AutoTokenizer.from_pretrained(
             tokenizer_g2p, **g2p_special)
 
@@ -54,8 +55,8 @@ class FeatureExtractor:
         win_size = self.hp.data.win_length
         spec = spectrogram.spectrogram_torch(
             data_16k, n_fft, sampling_rate, hop_size, win_size, center=False)
-        spec = torch.squeeze(spec, 0)
-        return spec
+        spec = torch.squeeze(spec, 0) # [769, -1]
+        return spec.transpose(0, 1) # [-1, 769]
 
     def extract_pitch(self, data_16k):
         f0_extracted, _ = self.rmvpe_model.extract_pitch2(torch.from_numpy(data_16k))
@@ -173,8 +174,8 @@ class FeatureExtractor:
             'spec': self.extract_spec(data_48k),
             'f0': torch.from_numpy(self.extract_pitch(data_16k))
         }
-        d = min(ret['spec'].shape[1], ret['f0'].shape[0])
-        ret['spec'] = ret['spec'][:,:d]
+        d = min(ret['spec'].shape[0], ret['f0'].shape[0])
+        ret['spec'] = ret['spec'][:d,:]
         ret['f0'] = ret['f0'][:d]
         return ret
 

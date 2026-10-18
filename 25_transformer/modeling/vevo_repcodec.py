@@ -519,8 +519,9 @@ class Decoder(nn.Module):
 
         self.conv2 = Conv1d(out_channels, output_channels, kernel_size, 1, bias=False)
 
-    def forward(self, z):
-        x = self.conv1(z)
+    def forward(self, z, g):
+        x = z + g.unsqueeze(-1)
+        x = self.conv1(x)
         for i in range(self.num_blocks):
             x = self.conv_blocks[i](x)
         x = self.conv2(x)
@@ -549,6 +550,7 @@ class VevoRepCodec(nn.Module):
         dec_block_dilations=(1, 1),
         dec_block_kernel_size=3,
         dropout=0.1,
+        gin_channels=256,
     ):
         super().__init__()
 
@@ -590,7 +592,10 @@ class VevoRepCodec(nn.Module):
             code_dim=code_dim, codebook_num=codebook_num, codebook_size=codebook_size
         )
 
-    def forward(self, x, do_uq=True):
+        self.g_proj = nn.Linear(
+            gin_channels, code_dim)
+
+    def forward(self, x, do_uq=True, g=None):
         """
         Forward pass through the VevoRepCodec.
 
@@ -620,10 +625,11 @@ class VevoRepCodec(nn.Module):
         x = self.encoder(x)
         z = self.projector(x)
         zq, vqloss, perplexity = self.quantizer(z)
-        yq = self.decoder(zq)
+        g = self.g_proj(g)
+        yq = self.decoder(zq, g)
         yq = rearrange(yq, "b c t -> b t c")
         if do_uq:
-            y = self.decoder(z)
+            y = self.decoder(z, g)
             y = rearrange(y, "b c t -> b t c")
         else:
             y = torch.zeros_like(zq)

@@ -1,8 +1,11 @@
+import itertools
+
 import librosa
 from omegaconf import OmegaConf
 import torch
 from features import FeatureExtractor
 from utils import win_longpath
+from modeling.vits.utils import f0_to_coarse
 import ultimate_xc
 import random
 import os
@@ -24,7 +27,6 @@ def process_filelist(filelist_path,
     hp = OmegaConf.load("configs/base.yaml")
     fe = FeatureExtractor(hp=hp)
 
-    is_multispk = False
     new_lines = []
 
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
@@ -32,15 +34,10 @@ def process_filelist(filelist_path,
             continue
         if 'longform' in line:
             continue
-        if '|' in line:
-            if not is_multispk:
-                print('=== Multispeaker filelist detected! ===')
-            is_multispk = True
-            split = line.split('|')
-            line = split[0]
-            sid = split[1]
-        else:
-            sid = 0
+        split = line.split('|')
+        line = split[0]
+        sid = split[1]
+        transcr = split[2]
 
         base_line = line
         line = win_longpath(line)
@@ -48,7 +45,8 @@ def process_filelist(filelist_path,
             print(f'File not found: {line}')
             continue
 
-        wav, _ = librosa.load(line, sr=48000)
+        wav_16k, _ = librosa.load(line, sr=16000)
+        wav_48k, _ = librosa.load(line, sr=48000)
         savepaths = []
         try:
 
@@ -58,8 +56,21 @@ def process_filelist(filelist_path,
                 print('File already exists, skipping...')
                 return
 
-            feats = fe.extract_features_ac(wav)
-            for key, value in feats.items():
+            feats, _ = fe.extract(wav_16k, transcription=transcr)
+            feats_ac = fe.extract_features_ac(wav_48k)
+            phone_ids = list(itertools.chain.from_iterable(
+                [f['phone_ids'] for f in feats]))
+
+            feats_n = {
+                'phone_ids': torch.tensor(phone_ids),  
+                'spec': feats_ac['spec'],
+                'f0': f0_to_coarse(feats_ac['f0']), # f0_to_coarse?
+            }
+            # phone_ids [n_phone]
+            # spec [n_spec, channels]
+            # f0 [n_spec]
+            # post_ids [n_spec // 4, n_codes, n_]
+            for key, value in feats_n.items():
                 savepath = os.path.join(output_dir,
                     os.path.basename(base_line) + '.' + key)
                 savepath = win_longpath(savepath)
@@ -68,9 +79,10 @@ def process_filelist(filelist_path,
 
         except Exception as e:
             print(f'Error processing {line}: {e}')
+            raise e
             continue
 
-        newline = '|'.join(savepaths)
+        newline = '|'.join(savepaths)+f'|{sid}'
         new_lines.append(newline)
 
     if val_fraction > 0:

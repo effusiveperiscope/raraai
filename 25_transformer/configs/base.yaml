@@ -1,3 +1,7 @@
+# 0.1 - multiple codebooks, 1024 code dim, 512 codebook size, from scratch
+# 0.2 - spk cond in codebook decoder, switch code params to DAC-esque
+# 0.3 - remove perplexity opt
+exp_name: base_v0.3
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -16,9 +20,27 @@ data:
   sampling_rate: 48000
   segment_size: 8000
   win_length: 1536
+  hop_length: 480
 codec:
-  code_dim: 512
-  codebook_size: 1024
+  code_dim: 1024
+  codebook_size: 64
+  codebook_num: 8
+mpd:
+  kernel_size: 5
+  lReLU_slope: 0.2
+  periods:
+  - 2
+  - 3
+  - 5
+  - 7
+  - 11
+  stride: 3
+  use_spectral_norm: false
+mrd:
+  lReLU_slope: 0.2
+  resolutions: '[(1024, 120, 600), (2048, 240, 1200), (4096, 480, 2400), (512, 50,
+    240)]'
+  use_spectral_norm: false
 gen:
   resblock: '1'
   resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
@@ -27,3 +49,19 @@ gen:
   upsample_kernel_sizes: [24, 20, 4, 4]
   upsample_rates: [12, 10, 2, 2]
   upsample_input: 192
+train:
+  batch_size: 8
+  betas:
+  - 0.8
+  - 0.99
+  c_mel: 1.0
+  c_stft: 9
+  eps: 1e-7
+  lr: 1e-4
+  val_interval: 1
+  test_interval: 1
+  keep_ckpts: 2
+  log_dir: logs
+  train_filelist: data/base/train.txt
+  val_filelist: data/base/val.txt
+  max_steps: 3e7

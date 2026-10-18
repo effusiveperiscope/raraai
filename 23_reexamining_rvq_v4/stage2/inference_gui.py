@@ -16,6 +16,9 @@ from contextlib import nullcontext
 warnings.filterwarnings('error', category=RuntimeWarning)
 warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
 logging.getLogger('numba').setLevel(logging.WARNING)
+logging.getLogger('fsspec').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
 from svc_helper.gui import *
 from omegaconf import OmegaConf
 from features import MyFeatures
@@ -30,6 +33,7 @@ import soundfile as sf
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
+plt.set_loglevel('warning')
 import torch.nn.functional as F
 import soundfile as sf
 import io
@@ -544,6 +548,10 @@ class MainWindow(QMainWindow):
                 kl_trend_r = torch.mean(kl_trend_r, dim=1)
                 q_recon_loss = codec_metrics['q_recon_loss']
                 recon_loss = codec_metrics['recon_loss']
+
+                print('q_recon_loss avg: ', torch.mean(q_recon_loss).item())
+                print('recon_loss avg: ', torch.mean(recon_loss).item())
+
                 loss_window = LossPlotWindow(
                     wave=wave.detach().cpu().float().numpy(),
                     kl_trend_f=kl_trend_f.detach().cpu().float().numpy(),

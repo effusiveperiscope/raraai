@@ -51,8 +51,7 @@ if __name__ == '__main__':
             
 
         len_dataset = line_count
-        steps_factor = 30
-        #max_steps = 280000
+        max_steps = 280000
 
         config = OmegaConf.load(CONFIG)
         OmegaConf.set_struct(config, True)
@@ -60,8 +59,8 @@ if __name__ == '__main__':
         config.train.train_filelist = os.path.join('data', exp_name, 'train.txt')
         config.train.val_filelist = os.path.join('data', exp_name, 'val.txt')
         config.train.spk_index = os.path.join('data', exp_name, 'sid_avgs.pt')
-        #config.train.max_steps = max_steps
-        config.train.max_epochs = 300 # short trains for now
+        config.train.max_steps = max_steps
+        #config.train.max_epochs = 2000 # short trains for now
         config.train.c_unvoiced = 0.2
         config.train.lr = config.train.lr * 0.7
         config.train.enc_p_freeze_n = 3
