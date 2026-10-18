@@ -1,7 +1,8 @@
 # 0.1 - multiple codebooks, 1024 code dim, 512 codebook size, from scratch
 # 0.2 - spk cond in codebook decoder, switch code params to DAC-esque
 # 0.3 - remove perplexity opt
-exp_name: base_v0.3
+# 0.4 - add pitch codes
+exp_name: base_v0.4
 vits:
   filter_channels: 640
   gin_channels: 256
