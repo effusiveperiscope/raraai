@@ -8,10 +8,15 @@ import torch
 from omegaconf import OmegaConf
 from tqdm import tqdm
 
+import speaker_map as speaker_map_lib
 from commons import load_state_dict_mismatch, load_submodule_prefix
 from features import FeatureExtractor
 from modeling.generator import Generator
 from utils import win_longpath
+
+import logging
+# Something above this is setting DEBUG but I don't know what
+logging.getLogger().setLevel(logging.WARNING)
 
 
 def load_generator(checkpoint_path, config, device):
@@ -30,7 +35,7 @@ def load_generator(checkpoint_path, config, device):
 def process_filelist(filelist_path,
     val_fraction=0.05, output_dir='data/preprocessed', shuffle_seed=42,
     skip_if_one_exists=False, checkpoint_path=None, config_path='configs/base.yaml',
-    device=None):
+    device=None, speaker_map_path=None):
     if checkpoint_path is None:
         raise ValueError('--checkpoint is required: path to a 1_training checkpoint')
 
@@ -48,7 +53,16 @@ def process_filelist(filelist_path,
     fe = FeatureExtractor(hp=hp)
     net_g = load_generator(checkpoint_path, hp, device)
 
+    # Optional canonicalisation of speaker ids into the stage-1 space so a
+    # single id works for both the stage-2 transformer and the frozen
+    # Generator's speaker embedding (see speaker_map.py).
+    smap = None
+    if speaker_map_path is not None:
+        smap = speaker_map_lib.load_speaker_map(speaker_map_path)
+        print(f'Using speaker map {speaker_map_path}')
+
     new_lines = []
+    n_skipped_speaker = 0
 
     for line in tqdm(lines, total=len(lines), desc='Preprocessing'):
         if not line:
@@ -65,6 +79,16 @@ def process_filelist(filelist_path,
         if not os.path.exists(line):
             print(f'File not found: {line}')
             continue
+
+        if smap is not None:
+            resolved = speaker_map_lib.resolve_sid(
+                smap, path=base_line, raw_sid=int(sid))
+            if resolved is None:
+                n_skipped_speaker += 1
+                continue
+            sid = resolved
+        else:
+            sid = int(sid)
 
         wav_16k, _ = librosa.load(line, sr=16000)
         wav_48k, _ = librosa.load(line, sr=48000)
@@ -120,6 +144,9 @@ def process_filelist(filelist_path,
         newline = '|'.join(savepaths)+f'|{sid}'
         new_lines.append(newline)
 
+    if smap is not None and n_skipped_speaker:
+        print(f'Skipped {n_skipped_speaker} file(s) with no speaker-map match')
+
     if val_fraction > 0:
         val_size = int(len(lines) * val_fraction)
         val_lines = new_lines[-val_size:]
@@ -143,6 +170,9 @@ if __name__ == '__main__':
         help='path to 1_training (lightning or Generator) checkpoint')
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--speaker_map', type=str, default=None,
+        help='JSON map canonicalising speaker ids to the stage-1 space '
+             '(see speaker_map.py)')
 
     args = parser.parse_args()
 
@@ -154,4 +184,5 @@ if __name__ == '__main__':
         checkpoint_path=args.checkpoint,
         config_path=args.config,
         device=args.device,
+        speaker_map_path=args.speaker_map,
     )

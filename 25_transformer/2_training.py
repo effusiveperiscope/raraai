@@ -22,6 +22,11 @@ from commons import load_state_dict_mismatch, load_submodule_prefix
 from dataset_codes import CodeCollator, CodeDataset
 from modeling.transformer import CodeTransformer
 
+import ultimate_xc
+import logging
+# Something above this is setting DEBUG but I don't know what
+logging.getLogger().setLevel(logging.WARNING)
+
 
 def load_generator(checkpoint_path, config, device):
     from modeling.generator import Generator
@@ -54,6 +59,7 @@ class TrainModule(pl.LightningModule):
             is_train=False,
             max_frames=hp.train.get("max_frames", None),
             max_phone_length=hp.train.get("max_phone_length", None),
+            speaker_map=hp.train.get("speaker_map", None),
         )
         self.test_collator = CodeCollator(config=hp)
         self.test_dataloader = DataLoader(
@@ -209,13 +215,25 @@ def train(config, resume_from=None, transfer_from=None):
         is_train=True,
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
+        speaker_map=config.train.get("speaker_map", None),
     )
     val_dataset = CodeDataset(
         config.train.val_filelist,
         is_train=False,
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
+        speaker_map=config.train.get("speaker_map", None),
     )
+
+    # Guard against speaker ids that fall outside the transformer's speaker
+    # embedding table (and, since ids are canonicalised into the stage-1
+    # space, outside the Generator's table too).
+    all_sids = train_dataset.speaker_ids() + val_dataset.speaker_ids()
+    n_speakers = int(config.transformer.get("n_speakers", 0))
+    if all_sids and (max(all_sids) >= n_speakers or min(all_sids) < 0):
+        print(f"WARNING: speaker ids span [{min(all_sids)}, {max(all_sids)}] but "
+              f"transformer.n_speakers={n_speakers}. Increase n_speakers or fix "
+              f"the speaker map to avoid out-of-range / untrained embeddings.")
     collator = CodeCollator(config=config)
     num_workers = config.train.get("num_workers", 0)
     train_dataloader = DataLoader(

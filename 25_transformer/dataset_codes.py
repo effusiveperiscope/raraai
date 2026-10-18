@@ -25,6 +25,8 @@ from typing import List, Optional
 import torch
 from torch.utils.data import Dataset
 
+import speaker_map as speaker_map_lib
+
 
 class CodeDataset(Dataset):
     def __init__(
@@ -34,11 +36,21 @@ class CodeDataset(Dataset):
         max_frames: Optional[int] = None,
         max_phone_length: Optional[int] = None,
         random_seed: int = 42,
+        speaker_map=None,
     ):
         self.is_train = is_train
         self.max_frames = max_frames
         self.max_phone_length = max_phone_length
         self.rng = random.Random(random_seed)
+
+        # ``speaker_map`` is the same JSON structure used by 2_preprocess
+        # (see speaker_map.py).  Preprocessed filelists no longer contain
+        # the audio path, so only its ``sid_map`` (raw id -> canonical id)
+        # can be applied here; path-based rules must be applied during
+        # preprocessing.  Passed as a path or an already-loaded dict.
+        if isinstance(speaker_map, str):
+            speaker_map = speaker_map_lib.load_speaker_map(speaker_map)
+        self.speaker_map = speaker_map
 
         self.items: List[dict] = []
         with open(filelist, "r", encoding="utf-8") as f:
@@ -49,17 +61,27 @@ class CodeDataset(Dataset):
                 parts = line.split("|")
                 if len(parts) < 4:
                     continue
+                sid = int(parts[3])
+                if self.speaker_map is not None:
+                    resolved = speaker_map_lib.resolve_sid(
+                        self.speaker_map, path=None, raw_sid=sid)
+                    if resolved is None:
+                        continue
+                    sid = resolved
                 self.items.append(
                     {
                         "phone_ids": parts[0],
                         "spec_codes": parts[1],
                         "pitch_codes": parts[2],
-                        "sid": int(parts[3]),
+                        "sid": sid,
                     }
                 )
 
     def __len__(self) -> int:
         return len(self.items)
+
+    def speaker_ids(self) -> List[int]:
+        return [it["sid"] for it in self.items]
 
     def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor):
         n = min(spec.shape[1], pitch.shape[1])
