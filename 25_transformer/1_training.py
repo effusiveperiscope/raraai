@@ -1,7 +1,7 @@
 import itertools
 
 from modeling.vits import commons
-from modeling.model import Decoder
+from modeling.generator import Generator
 from modeling.vits_decoder.discriminator import Discriminator
 from dataset_ac import dataset_ac
 from einops import rearrange
@@ -44,7 +44,7 @@ def voiced_mask_to_weight(voiced_mask, unvoiced_weight=0.1):
 
 class TrainModule(pl.LightningModule):
     def __init__(self,
-        net_g : Decoder,
+        net_g : Generator,
         net_d : Discriminator,
         config : OmegaConf):
         super().__init__()
@@ -115,7 +115,7 @@ class TrainModule(pl.LightningModule):
                     if k in {'spec', 'f0', 'spec_length'}:
                         batch[k] = x.to(self.dtype).to(self.device)
                 batch['sid'] = batch['sid'].to(self.device)
-                self.net_g : Decoder
+                self.net_g : Generator
                 spec = batch['spec']
                 spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
                 out_audio = self.net_g.infer(
@@ -319,7 +319,7 @@ def train(config,
     transfer_from=None,
     r22_ckpt=None):
     hp = config
-    net_g = Decoder(hp=hp)
+    net_g = Generator(hp=hp)
     net_d = Discriminator(hp=hp)
 
     if os.path.exists(f'checkpoints/{config.exp_name}/last.ckpt'):

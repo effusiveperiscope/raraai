@@ -27,7 +27,7 @@ def _get_cfg(cfg, key, default):
     except Exception:
         return default
 
-class Decoder(nn.Module):
+class Generator(nn.Module):
     def __init__(self,
         hp,
         down_factor: int = 4):
@@ -379,6 +379,6 @@ if __name__ == "__main__":
     f0 = torch.randn(1, 356)
 
     hp = OmegaConf.load("configs/base.yaml")
-    decoder = Decoder(hp)
+    decoder = Generator(hp)
 
     print(decoder.infer(spec, spec_l, f0, sid).shape)
