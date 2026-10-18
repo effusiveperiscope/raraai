@@ -1,20 +1,38 @@
+import argparse
 import itertools
+import os
+import random
 
 import librosa
-from omegaconf import OmegaConf
 import torch
-from features import FeatureExtractor
-from utils import win_longpath
-from modeling.vits.utils import f0_to_coarse
-import ultimate_xc
-import random
-import os
-import argparse
+from omegaconf import OmegaConf
 from tqdm import tqdm
+
+from commons import load_state_dict_mismatch, load_submodule_prefix
+from features import FeatureExtractor
+from modeling.generator import Generator
+from utils import win_longpath
+
+
+def load_generator(checkpoint_path, config, device):
+    net_g = Generator(hp=config)
+    state = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    if isinstance(state, dict) and 'state_dict' in state:
+        state = state['state_dict']
+    if any(k.startswith('net_g.') for k in state.keys()):
+        load_submodule_prefix(net_g, 'net_g.', state)
+    else:
+        load_state_dict_mismatch(net_g, state)
+    net_g.to(device)
+    net_g.eval()
+    return net_g
 
 def process_filelist(filelist_path,
     val_fraction=0.05, output_dir='data/preprocessed', shuffle_seed=42,
-    skip_if_one_exists=False):
+    skip_if_one_exists=False, checkpoint_path=None, config_path='configs/base.yaml',
+    device=None):
+    if checkpoint_path is None:
+        raise ValueError('--checkpoint is required: path to a 1_training checkpoint')
 
     with open(filelist_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
@@ -24,8 +42,11 @@ def process_filelist(filelist_path,
     random.seed(shuffle_seed)
     random.shuffle(lines)
 
-    hp = OmegaConf.load("configs/base.yaml")
+    hp = OmegaConf.load(config_path)
+    if device is None:
+        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     fe = FeatureExtractor(hp=hp)
+    net_g = load_generator(checkpoint_path, hp, device)
 
     new_lines = []
 
@@ -50,7 +71,7 @@ def process_filelist(filelist_path,
         savepaths = []
         try:
 
-            expected_keys = ['wave', 'spec', 'f0']
+            expected_keys = ['phone_ids', 'spec_codes', 'pitch_codes']
             if all(os.path.exists(os.path.join(output_dir,
                 os.path.basename(base_line) + '.' + key)) for key in expected_keys) and skip_if_one_exists:
                 print('File already exists, skipping...')
@@ -61,15 +82,29 @@ def process_filelist(filelist_path,
             phone_ids = list(itertools.chain.from_iterable(
                 [f['phone_ids'] for f in feats]))
 
+            # Encode raw spec/f0 into discrete RVQ codes with the 1_training
+            # Generator checkpoint (channel-first spec, frame-rate f0).
+            spec = feats_ac['spec']  # [T, C]
+            f0 = feats_ac['f0']  # [T]
+            spec_b = spec.transpose(0, 1).unsqueeze(0).to(device)  # [1, C, T]
+            spec_l = torch.tensor([spec.shape[0]], device=device)
+            f0_b = f0.unsqueeze(0).to(device)  # [1, T]
+            sid_b = torch.tensor([int(sid)], device=device)
+            with torch.no_grad():
+                spec_codes, pitch_codes = net_g.encode_codes(
+                    spec_b, spec_l, f0_b, sid_b)
+            # encode_codes returns (Q, B, T_ds); drop batch dim -> (Q, T_ds).
+            spec_codes = spec_codes.squeeze(1).cpu()
+            pitch_codes = pitch_codes.squeeze(1).cpu()
+
             feats_n = {
-                'phone_ids': torch.tensor(phone_ids),  
-                'spec': feats_ac['spec'],
-                'f0': f0_to_coarse(feats_ac['f0']), # f0_to_coarse?
+                'phone_ids': torch.tensor(phone_ids),
+                'spec_codes': spec_codes,
+                'pitch_codes': pitch_codes,
             }
             # phone_ids [n_phone]
-            # spec [n_spec, channels]
-            # f0 [n_spec]
-            # post_ids [n_spec // 4, n_codes, n_]
+            # spec_codes [Q_spec, T_codes] (Q_spec = codec.codebook_num)
+            # pitch_codes [Q_pitch, T_codes] (Q_pitch = pitch_codec.codebook_num)
             for key, value in feats_n.items():
                 savepath = os.path.join(output_dir,
                     os.path.basename(base_line) + '.' + key)
@@ -93,9 +128,9 @@ def process_filelist(filelist_path,
         val_lines = [new_lines[0]] # ensure at least one item in val for checkpointing
         train_lines = new_lines
 
-    with open(os.path.join(output_dir, 'train.txt'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(output_dir, 'train_stage2.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(train_lines))
-    with open(os.path.join(output_dir, 'val.txt'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(output_dir, 'val_stage2.txt'), 'w', encoding='utf-8') as f:
         f.write('\n'.join(val_lines))
 
 if __name__ == '__main__':
@@ -104,6 +139,10 @@ if __name__ == '__main__':
     parser.add_argument('--val_fraction', type=float, default=0.05)
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--shuffle_seed', type=int, default=42)
+    parser.add_argument('--checkpoint', type=str, required=True,
+        help='path to 1_training (lightning or Generator) checkpoint')
+    parser.add_argument('--config', type=str, default='configs/base.yaml')
+    parser.add_argument('--device', type=str, default=None)
 
     args = parser.parse_args()
 
@@ -112,4 +151,7 @@ if __name__ == '__main__':
         val_fraction=args.val_fraction,
         output_dir=args.output_dir,
         shuffle_seed=args.shuffle_seed,
+        checkpoint_path=args.checkpoint,
+        config_path=args.config,
+        device=args.device,
     )
