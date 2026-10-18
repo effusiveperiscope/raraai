@@ -1,4 +1,5 @@
 from einops import rearrange
+import math
 import torch
 from modeling.vevo_repcodec import VevoRepCodec
 from modeling.rvc.my_nsf import MyGeneratorNSF
@@ -6,6 +7,25 @@ from modeling.vits.models import PosteriorEncoder
 from modeling.vits.commons import rand_slice_segments_with_pitch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Normalization scale for pitch: log1p(f0) / PITCH_LOG_SCALE maps
+# ~[0, 1000 Hz] to ~[0, 1] for stable codec training.
+PITCH_LOG_SCALE = math.log1p(1000.0)
+
+
+def _get_cfg(cfg, key, default):
+    try:
+        if cfg is None:
+            return default
+        if key in cfg:
+            v = cfg[key]
+            return v if v is not None else default
+    except Exception:
+        pass
+    try:
+        return getattr(cfg, key, default)
+    except Exception:
+        return default
 
 class Decoder(nn.Module):
     def __init__(self,
@@ -51,6 +71,76 @@ class Decoder(nn.Module):
             stride=down_factor,
         )
 
+        # --- Low-parameter pitch codec ---
+        # Same downsampling/upsampling factor as the spectrogram path so
+        # that pitch codes are at the same rate as the spec codes.
+        # Operates on (B, 1, T) f0 contours. Config overridable via
+        # hp.pitch_codec: {hidden_channels, code_dim, codebook_size,
+        # codebook_num}.
+        pitch_codec_cfg = _get_cfg(hp, "pitch_codec", None)
+        p_hidden = int(_get_cfg(pitch_codec_cfg, "hidden_channels", 32))
+        p_code_dim = int(_get_cfg(pitch_codec_cfg, "code_dim", 32))
+        p_codebook_size = int(_get_cfg(pitch_codec_cfg, "codebook_size", 32))
+        p_codebook_num = int(_get_cfg(pitch_codec_cfg, "codebook_num", 2))
+        self.pitch_downsample = nn.Conv1d(
+            1,
+            p_hidden,
+            kernel_size=down_factor,
+            stride=down_factor,
+        )
+        self.pitch_codec = VevoRepCodec(
+            input_channels=p_hidden,
+            output_channels=p_hidden,
+            encode_channels=p_hidden,
+            decode_channels=p_hidden,
+            code_dim=p_code_dim,
+            codebook_size=p_codebook_size,
+            codebook_num=p_codebook_num,
+            gin_channels=hp.vits.gin_channels,
+        )
+        self.pitch_upsample = nn.ConvTranspose1d(
+            p_hidden,
+            p_hidden,
+            kernel_size=down_factor,
+            stride=down_factor,
+        )
+        self.pitch_out_proj = nn.Conv1d(p_hidden, 1, kernel_size=1)
+
+    def _pitch_codec_forward(self, f0, t_pad, g):
+        """Run the low-parameter pitch codec.
+
+        Args:
+            f0: (B, T) f0 contour in Hz, 0 == unvoiced.
+            t_pad: same right-pad used for the spectrogram path so that
+                pitch codes land at exactly the same rate as spec codes.
+            g: speaker embedding.
+        Returns:
+            f0_hat: (B, T_full) reconstructed log-normalized pitch at the
+                decoder frame rate (trimmed of padding).
+            pq_ds: (B, T_ds, H) quantized pitch codes at the code rate.
+            px_ds: (B, T_ds, H) pre-quantization pitch features.
+            p_vqloss, p_perplexity: VQ stats from the pitch codec.
+            f0_target: (B, T_full) log-normalized pitch target.
+        """
+        f0_in = f0.unsqueeze(1)  # (B, 1, T)
+        f0_target = torch.log1p(torch.clamp(f0_in, min=0.0)) / PITCH_LOG_SCALE
+        t_full = f0_target.shape[-1]
+        if t_pad > 0:
+            f0_target = F.pad(f0_target, (0, t_pad))
+        # Same down_factor as the spec path -> same code rate.
+        px = self.pitch_downsample(f0_target)  # (B, H, T_ds)
+        px_ds = rearrange(px, "b c t -> b t c")
+        pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
+            px_ds, do_uq=False, g=g)
+        pq_ds = pq
+        pq_ct = rearrange(pq, "b t c -> b c t")
+        pq_up = self.pitch_upsample(pq_ct)
+        if t_pad > 0:
+            pq_up = pq_up[..., : pq_up.shape[-1] - t_pad]
+        f0_hat = self.pitch_out_proj(pq_up).squeeze(1)  # (B, T_full)
+        return (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
+                f0_target[..., :t_full].squeeze(1))
+
     def forward(self, spec, spec_l, f0, sid):
         g = self.spk_emb(sid)
         # enc_q returns (B, C, T) with T = decoder frame rate.
@@ -76,12 +166,22 @@ class Decoder(nn.Module):
         yq = self.upsample(yq)
         if t_pad > 0:
             yq = yq[..., : yq.shape[-1] - t_pad]
+        # Align f0 length with the (unpadded) encoder frame length so the
+        # pitch branch sees the same T as the spec path.
+        t_frames = x.shape[-1] - t_pad
+        if f0.shape[-1] < t_frames:
+            f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
+        else:
+            f0_aligned = f0[..., :t_frames]
+        (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
+            f0_target) = self._pitch_codec_forward(f0_aligned, t_pad, g)
         y_slice, f0_slice, ids_slice = rand_slice_segments_with_pitch(
             yq, f0, spec_l, self.hp.data.segment_size // self.hp.data.hop_length)
         audio = self.dec(g, y_slice, f0_slice)
-        return audio, ids_slice, yq_ds, x_ds, vqloss, perplexity
+        return (audio, ids_slice, yq_ds, x_ds, vqloss, perplexity,
+                f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity)
 
-    def infer(self, spec, spec_l, f0, sid):
+    def infer(self, spec, spec_l, f0, sid, use_pitch_recon=False):
         g = self.spk_emb(sid)
         # enc_q returns (B, C, T) with T = decoder frame rate.
         x, x_mask = self.enc_q(spec, spec_l)
@@ -105,8 +205,41 @@ class Decoder(nn.Module):
         yq = self.upsample(yq)
         if t_pad > 0:
             yq = yq[..., : yq.shape[-1] - t_pad]
+        if use_pitch_recon:
+            t_frames = x.shape[-1] - t_pad
+            if f0.shape[-1] < t_frames:
+                f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
+            else:
+                f0_aligned = f0[..., :t_frames]
+            (f0_hat_norm, _, _, _, _, _) = self._pitch_codec_forward(
+                f0_aligned, t_pad, g)
+            # Denormalize log1p pitch back to Hz, keep unvoiced at 0.
+            voiced = (f0_aligned > 0).float()
+            f0 = (torch.expm1(torch.clamp(
+                f0_hat_norm, min=0.0) * PITCH_LOG_SCALE) * voiced)
+            if f0.shape[-1] < yq.shape[-1]:
+                f0 = F.pad(f0, (0, yq.shape[-1] - f0.shape[-1]))
+            else:
+                f0 = f0[..., : yq.shape[-1]]
         audio = self.dec(g, yq, f0)
         return audio
+
+    def infer_pitch(self, f0, sid):
+        """Encode/decode a raw f0 contour through the pitch codec only.
+
+        Returns (f0_hat_hz, pq_ds, px_ds) where f0_hat_hz is at the input
+        frame rate and codes are at 1/down_factor of it.
+        """
+        self.eval()
+        with torch.no_grad():
+            g = self.spk_emb(sid)
+            t_pad = (-f0.shape[-1]) % self.down_factor
+            (f0_hat_norm, pq_ds, px_ds, _, _, _) = self._pitch_codec_forward(
+                f0, t_pad, g)
+            voiced = (f0 > 0).float()
+            f0_hat = (torch.expm1(torch.clamp(
+                f0_hat_norm, min=0.0) * PITCH_LOG_SCALE) * voiced)
+        return f0_hat, pq_ds, px_ds
 
 
 if __name__ == "__main__":

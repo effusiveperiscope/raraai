@@ -25,6 +25,11 @@ codec:
   code_dim: 1024
   codebook_size: 64
   codebook_num: 8
+pitch_codec:
+  hidden_channels: 32
+  code_dim: 32
+  codebook_size: 32
+  codebook_num: 2
 mpd:
   kernel_size: 5
   lReLU_slope: 0.2
@@ -56,6 +61,8 @@ train:
   - 0.99
   c_mel: 1.0
   c_stft: 9
+  c_pitch_dec: 1.0
+  c_pitch_q: 0.5
   eps: 1e-7
   lr: 1e-4
   val_interval: 1

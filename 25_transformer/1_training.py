@@ -155,7 +155,8 @@ class TrainModule(pl.LightningModule):
         sid = batch['sid']
         hp = self.hp
 
-        fake_audio, ids_slice, yq_ds, x_ds, vqloss, perplexity = self.net_g(
+        fake_audio, ids_slice, yq_ds, x_ds, vqloss, perplexity, \
+            f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity = self.net_g(
             spec, spec_l, pit, sid
         )
         audio = commons.slice_segments(
@@ -177,6 +178,25 @@ class TrainModule(pl.LightningModule):
         q_recon_loss = (F.mse_loss(yq_ds, x_ds,
             reduction='none') * voiced_mask_ds).sum() / (
                 voiced_mask_ds.sum())
+
+        # Pitch decoding loss: train the low-parameter pitch codec to
+        # reconstruct the (log-normalized) f0 contour. Only voiced frames
+        # carry pitch, so mask the MSE to f0_target > 0.
+        # f0_hat / f0_target: (B, T_full) log-normalized pitch.
+        pitch_voiced = (f0_target > 0).float()
+        pitch_denom = pitch_voiced.sum().clamp_min(1.0)
+        pitch_dec_loss = ((f0_hat - f0_target) ** 2 * pitch_voiced).sum() / pitch_denom
+        # Pitch code-space reconstruction (mirrors q_recon_loss for spec).
+        pitch_voiced_ds = F.interpolate(
+            pitch_voiced.unsqueeze(1),
+            size=pq_ds.shape[1]).transpose(1, 2)  # (B, T_ds, 1)
+        pitch_q_recon_loss = (F.mse_loss(pq_ds, px_ds,
+            reduction='none') * pitch_voiced_ds).sum() / (
+                pitch_voiced_ds.sum().clamp_min(1.0))
+        c_pitch_dec = self.config.train.get('c_pitch_dec', 1.0)
+        c_pitch_q = self.config.train.get('c_pitch_q', 1.0)
+        pitch_dec_loss = pitch_dec_loss * c_pitch_dec
+        pitch_q_recon_loss = pitch_q_recon_loss * c_pitch_q
 
         # Smooth the mask slightly to avoid hard discontinuities at transitions
         # (optional but helps — unvoiced/voiced boundaries are ambiguous)
@@ -216,7 +236,8 @@ class TrainModule(pl.LightningModule):
         feat_loss = feat_loss * 2
 
         # Loss
-        loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss
+        loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss \
+            + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -243,7 +264,11 @@ class TrainModule(pl.LightningModule):
                 'stft_loss': stft_loss, 'score_loss': score_loss, 'feat_loss': feat_loss,
                 'vqloss': vqloss.sum(), 
                 'q_recon_loss': q_recon_loss.sum(), 
-                'perplexity': perplexity.sum()}
+                'p_vqloss': p_vqloss.sum(),
+                'pitch_dec_loss': pitch_dec_loss.sum(),
+                'pitch_q_recon_loss': pitch_q_recon_loss.sum(),
+                'perplexity': perplexity.sum(),
+                'p_perplexity': p_perplexity.sum()}
 
     def training_step(self, batch, batch_idx):
         torch.set_grad_enabled(True)
