@@ -106,6 +106,24 @@ class Generator(nn.Module):
         )
         self.pitch_out_proj = nn.Conv1d(p_hidden, 1, kernel_size=1)
 
+    def freeze_non_pitch(self):
+        """Freeze every parameter except the pitch path components.
+
+        Keeps ``pitch_downsample``, ``pitch_codec``, ``pitch_upsample`` and
+        ``pitch_out_proj`` trainable and freezes everything else (posterior
+        encoder, spectrogram codec, resampling layers, NSF decoder and the
+        speaker table). Used by stage-1 ``--pitch_only`` fine-tuning so only
+        the pitch codec is updated.
+        """
+        pitch_prefixes = (
+            "pitch_downsample.",
+            "pitch_codec.",
+            "pitch_upsample.",
+            "pitch_out_proj.",
+        )
+        for name, param in self.named_parameters():
+            param.requires_grad_(name.startswith(pitch_prefixes))
+
     def _pitch_codec_forward(self, f0, t_pad, g):
         """Run the low-parameter pitch codec.
 

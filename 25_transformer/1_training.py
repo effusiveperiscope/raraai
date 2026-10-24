@@ -56,6 +56,7 @@ class TrainModule(pl.LightningModule):
         self.net_d = net_d
         self.net_dp = net_dp
         self.config = config
+        self.pitch_only = bool(config.train.get('pitch_only', False))
 
     def setup(self, stage=None):
         hp = self.config
@@ -77,7 +78,7 @@ class TrainModule(pl.LightningModule):
 
     def configure_optimizers(self):
         gen_optim = torch.optim.AdamW(
-            self.net_g.parameters(),
+            [p for p in self.net_g.parameters() if p.requires_grad],
             lr=self.config.train.lr,
             betas=self.config.train.betas,
             eps=self.config.train.eps)
@@ -172,6 +173,7 @@ class TrainModule(pl.LightningModule):
         spec_l = batch['spec_length'].squeeze(-1)
         sid = batch['sid']
         hp = self.hp
+        pitch_only = self.pitch_only
 
         fake_audio, ids_slice, yq_ds, x_ds, vqloss, perplexity, \
             f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity = self.net_g(
@@ -222,36 +224,41 @@ class TrainModule(pl.LightningModule):
             voiced_mask_sliced.unsqueeze(1), kernel_size=5, stride=1, padding=2
         ).squeeze(1)
 
-        # Mel Loss
-        mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
-        try:
-            mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
-        except AssertionError:
-            print("mel_real error, skip") # some audio triggers this for some reason, but not most
-            return None
-        mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth,
-            unvoiced_weight = self.config.train.get('c_unvoiced', 0.8)) * hp.train.c_mel
+        # Spec-path reconstruction / adversarial losses. In pitch-only mode the
+        # spectrogram codec, decoder and main discriminator are frozen, so these
+        # are skipped entirely (no gradient flows to them).
+        mel_loss = stft_loss = score_loss = feat_loss = None
+        if not pitch_only:
+            # Mel Loss
+            mel_fake = self.stft.mel_spectrogram(fake_audio.squeeze(1))
+            try:
+                mel_real = self.stft.mel_spectrogram(audio.squeeze(1))
+            except AssertionError:
+                print("mel_real error, skip") # some audio triggers this for some reason, but not most
+                return None
+            mel_loss = weighted_mel_loss(mel_fake, mel_real, voiced_mask_smooth,
+                unvoiced_weight = self.config.train.get('c_unvoiced', 0.8)) * hp.train.c_mel
 
-        # multi-resolution stft loss
-        sc_loss, mag_loss = self.stft_criterion(
-            fake_audio.squeeze(1), audio.squeeze(1), voiced_mask_mel=voiced_mask_smooth)
-        stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
+            # multi-resolution stft loss
+            sc_loss, mag_loss = self.stft_criterion(
+                fake_audio.squeeze(1), audio.squeeze(1), voiced_mask_mel=voiced_mask_smooth)
+            stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
-        # Generator Loss
-        disc_fake = self.net_d(fake_audio)
-        score_loss = 0.0
-        for (_, score_fake) in disc_fake:
-            score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
-        score_loss = score_loss / len(disc_fake)
+            # Generator Loss
+            disc_fake = self.net_d(fake_audio)
+            score_loss = 0.0
+            for (_, score_fake) in disc_fake:
+                score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+            score_loss = score_loss / len(disc_fake)
 
-        # Feature Loss
-        disc_real = self.net_d(audio)
-        feat_loss = 0.0
-        for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
-            for fake, real in zip(feat_fake, feat_real):
-                feat_loss += torch.mean(torch.abs(fake - real))
-        feat_loss = feat_loss / len(disc_fake)
-        feat_loss = feat_loss * 2
+            # Feature Loss
+            disc_real = self.net_d(audio)
+            feat_loss = 0.0
+            for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+                for fake, real in zip(feat_fake, feat_real):
+                    feat_loss += torch.mean(torch.abs(fake - real))
+            feat_loss = feat_loss / len(disc_fake)
+            feat_loss = feat_loss * 2
 
         # --- Pitch adversarial: discriminator over the reconstructed f0 ---
         # real/fake are log-normalized pitch contours (B, T) with unvoiced
@@ -276,9 +283,13 @@ class TrainModule(pl.LightningModule):
         pitch_feat_loss = pitch_feat_loss * 2
 
         # Loss
-        loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss \
-            + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
-            + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
+        if pitch_only:
+            loss_g = p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
+                + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
+        else:
+            loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss \
+                + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
+                + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -286,20 +297,23 @@ class TrainModule(pl.LightningModule):
             optim_g.step()
             sched_g.step()
 
-        # Discriminator Loss
-        disc_fake = self.net_d(fake_audio.detach())
-        disc_real = self.net_d(audio)
-        loss_d = 0.0
-        for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
-            loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
-            loss_d += torch.mean(torch.pow(score_fake, 2))
-        loss_d = loss_d / len(disc_fake)
-        
-        if loss_d.requires_grad:
-            optim_d.zero_grad()
-            self.manual_backward(loss_d)
-            optim_d.step()
-            sched_d.step()
+        # Discriminator Loss (main audio discriminator — skipped in pitch-only
+        # mode, where net_d is frozen and does not participate).
+        loss_d = None
+        if not pitch_only:
+            disc_fake = self.net_d(fake_audio.detach())
+            disc_real = self.net_d(audio)
+            loss_d = 0.0
+            for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
+                loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
+                loss_d += torch.mean(torch.pow(score_fake, 2))
+            loss_d = loss_d / len(disc_fake)
+
+            if loss_d.requires_grad:
+                optim_d.zero_grad()
+                self.manual_backward(loss_d)
+                optim_d.step()
+                sched_d.step()
 
         # Pitch Discriminator Loss
         pitch_disc_fake = self.net_dp(pitch_fake.detach())
@@ -370,9 +384,14 @@ def parse_args():
     parser.add_argument('--r22_ckpt', type=str, default=None)
     parser.add_argument('--resume_from', type=str, default=None)
     parser.add_argument('--transfer_from', type=str, default=None)
+    parser.add_argument('--pitch_only', action='store_true',
+        help='Freeze all components except the pitch codec (and keep only the '
+             'pitch discriminator), training pitch losses alone.')
 
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
+    if args.pitch_only:
+        config.train.pitch_only = True
     return config, args
 
 def train(config,
@@ -413,6 +432,13 @@ def train(config,
         print('!!! No checkpoint file found - starting from scratch !!!')
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
+
+    pitch_only = bool(config.train.get('pitch_only', False))
+    if pitch_only:
+        print('=== Pitch-only mode: freezing all non-pitch components ===')
+        net_g.freeze_non_pitch()
+        for p in net_d.parameters():
+            p.requires_grad_(False)
 
     training_module = TrainModule(
         net_g=net_g, net_d=net_d, net_dp=net_dp, config=config)
