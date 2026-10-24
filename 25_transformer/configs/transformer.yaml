@@ -34,8 +34,8 @@ codec:
   codebook_num: 8
 pitch_codec:
   hidden_channels: 32
-  code_dim: 32
-  codebook_size: 32
+  code_dim: 48
+  codebook_size: 48
   codebook_num: 2
 
 # --------------------------------------------------------------- data ----

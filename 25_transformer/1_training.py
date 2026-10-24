@@ -3,6 +3,7 @@ import itertools
 from modeling.vits import commons
 from modeling.generator import Generator
 from modeling.vits_decoder.discriminator import Discriminator
+from modeling.pitch_discriminator import PitchDiscriminator
 from dataset_ac import dataset_ac
 from einops import rearrange
 
@@ -46,12 +47,14 @@ class TrainModule(pl.LightningModule):
     def __init__(self,
         net_g : Generator,
         net_d : Discriminator,
+        net_dp : PitchDiscriminator,
         config : OmegaConf):
         super().__init__()
         self.automatic_optimization = False
 
         self.net_g = net_g
         self.net_d = net_d
+        self.net_dp = net_dp
         self.config = config
 
     def setup(self, stage=None):
@@ -83,6 +86,11 @@ class TrainModule(pl.LightningModule):
             lr=self.config.train.lr,
             betas=self.config.train.betas,
             eps=self.config.train.eps)
+        pitch_disc_optim = torch.optim.AdamW(
+            self.net_dp.parameters(),
+            lr=self.config.train.lr,
+            betas=self.config.train.betas,
+            eps=self.config.train.eps)
         gen_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=gen_optim, 
             T_max=self.config.train.get('cosine_anneal_end', 500000),
@@ -93,7 +101,13 @@ class TrainModule(pl.LightningModule):
             T_max=self.config.train.get('cosine_anneal_end', 500000),
             eta_min=1e-6
         )
-        return [gen_optim, disc_optim], [gen_scheduler, disc_scheduler]
+        pitch_disc_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=pitch_disc_optim, 
+            T_max=self.config.train.get('cosine_anneal_end', 500000),
+            eta_min=1e-6
+        )
+        return [gen_optim, disc_optim, pitch_disc_optim], \
+            [gen_scheduler, disc_scheduler, pitch_disc_scheduler]
 
     def on_train_start(self):
         self.test()
@@ -108,6 +122,7 @@ class TrainModule(pl.LightningModule):
         print('=== Testing ===')
         self.net_g.eval()
         self.net_d.eval()
+        self.net_dp.eval()
         # Only use first 5 validation samples for testing
         for j,batch in itertools.islice(enumerate(self.test_dataloader), 5):
             with torch.no_grad():
@@ -122,7 +137,8 @@ class TrainModule(pl.LightningModule):
                     spec=spec,
                     spec_l=batch['spec_length'].squeeze(-1),
                     f0=batch['f0'],
-                    sid=batch['sid']
+                    sid=batch['sid'],
+                    use_pitch_recon=True
                 )
 
                 for i, audio in enumerate(out_audio):
@@ -140,12 +156,14 @@ class TrainModule(pl.LightningModule):
         if is_train:
             assert self.net_g.training
             assert self.net_d.training
+            assert self.net_dp.training
         else:
             assert not self.net_g.training
             assert not self.net_d.training
+            assert not self.net_dp.training
 
-        optim_g, optim_d = self.optimizers()
-        sched_g, sched_d = self.lr_schedulers()
+        optim_g, optim_d, optim_dp = self.optimizers()
+        sched_g, sched_d, sched_dp = self.lr_schedulers()
 
         pit = batch['f0'].to(self.dtype)
         audio = batch['wave']
@@ -235,9 +253,32 @@ class TrainModule(pl.LightningModule):
         feat_loss = feat_loss / len(disc_fake)
         feat_loss = feat_loss * 2
 
+        # --- Pitch adversarial: discriminator over the reconstructed f0 ---
+        # real/fake are log-normalized pitch contours (B, T) with unvoiced
+        # frames zeroed so the discriminator judges only the voiced contour.
+        pitch_real = f0_target.unsqueeze(1)                    # (B, 1, T)
+        pitch_fake = (f0_hat * pitch_voiced).unsqueeze(1)      # (B, 1, T)
+        c_pitch_adv = self.config.train.get('c_pitch_adv', 1.0)
+        c_pitch_feat = self.config.train.get('c_pitch_feat', 1.0)
+
+        pitch_disc_fake = self.net_dp(pitch_fake)
+        pitch_score_loss = 0.0
+        for (_, score_fake) in pitch_disc_fake:
+            pitch_score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
+        pitch_score_loss = pitch_score_loss / len(pitch_disc_fake)
+
+        pitch_disc_real = self.net_dp(pitch_real)
+        pitch_feat_loss = 0.0
+        for (feat_fake, _), (feat_real, _) in zip(pitch_disc_fake, pitch_disc_real):
+            for fake, real in zip(feat_fake, feat_real):
+                pitch_feat_loss += torch.mean(torch.abs(fake - real))
+        pitch_feat_loss = pitch_feat_loss / len(pitch_disc_fake)
+        pitch_feat_loss = pitch_feat_loss * 2
+
         # Loss
         loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss \
-            + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss
+            + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
+            + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
 
         if loss_g.requires_grad:
             optim_g.zero_grad()
@@ -260,13 +301,31 @@ class TrainModule(pl.LightningModule):
             optim_d.step()
             sched_d.step()
 
-        return {'loss_g': loss_g, 'loss_d': loss_d, 'mel_loss': mel_loss,
+        # Pitch Discriminator Loss
+        pitch_disc_fake = self.net_dp(pitch_fake.detach())
+        pitch_disc_real = self.net_dp(pitch_real)
+        loss_dp = 0.0
+        for (_, score_fake), (_, score_real) in zip(pitch_disc_fake, pitch_disc_real):
+            loss_dp += torch.mean(torch.pow(score_real - 1.0, 2))
+            loss_dp += torch.mean(torch.pow(score_fake, 2))
+        loss_dp = loss_dp / len(pitch_disc_fake)
+
+        if loss_dp.requires_grad:
+            optim_dp.zero_grad()
+            self.manual_backward(loss_dp)
+            optim_dp.step()
+            sched_dp.step()
+
+        return {'loss_g': loss_g, 'loss_d': loss_d, 'loss_dp': loss_dp,
+                'mel_loss': mel_loss,
                 'stft_loss': stft_loss, 'score_loss': score_loss, 'feat_loss': feat_loss,
                 'vqloss': vqloss.sum(), 
                 'q_recon_loss': q_recon_loss.sum(), 
                 'p_vqloss': p_vqloss.sum(),
                 'pitch_dec_loss': pitch_dec_loss.sum(),
                 'pitch_q_recon_loss': pitch_q_recon_loss.sum(),
+                'pitch_score_loss': c_pitch_adv * pitch_score_loss,
+                'pitch_feat_loss': c_pitch_feat * pitch_feat_loss,
                 'perplexity': perplexity.sum(),
                 'p_perplexity': p_perplexity.sum()}
 
@@ -274,6 +333,7 @@ class TrainModule(pl.LightningModule):
         torch.set_grad_enabled(True)
         self.net_g.train()
         self.net_d.train()
+        self.net_dp.train()
         ret = self.step(batch, batch_idx, is_train=True)
         if ret is None:
             return None
@@ -288,6 +348,7 @@ class TrainModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         self.net_g.eval()
         self.net_d.eval()
+        self.net_dp.eval()
         ret = self.step(batch, batch_idx, is_train=False)
         if ret is None:
             return None
@@ -321,6 +382,10 @@ def train(config,
     hp = config
     net_g = Generator(hp=hp)
     net_d = Discriminator(hp=hp)
+    pitch_disc_cfg = config.get('pitch_discriminator', {})
+    net_dp = PitchDiscriminator(
+        channels=int(pitch_disc_cfg.get('channels', 32)),
+        n_scales=int(pitch_disc_cfg.get('n_scales', 3)))
 
     if os.path.exists(f'checkpoints/{config.exp_name}/last.ckpt'):
         print('Detected interrupted training - resuming from last.ckpt')
@@ -336,11 +401,13 @@ def train(config,
         state = torch.load(transfer_from, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state)
         load_submodule_prefix(net_d, 'net_d.', state)
+        load_submodule_prefix(net_dp, 'net_dp.', state)
     elif r22_ckpt is not None:
         print("Loading 22 checkpoint: {}".format(r22_ckpt))
         state_dict = torch.load(r22_ckpt, map_location='cpu', weights_only=False)['state_dict']
         load_submodule_prefix(net_g, 'net_g.', state_dict)
         load_submodule_prefix(net_d, 'net_d.', state_dict)
+        load_submodule_prefix(net_dp, 'net_dp.', state_dict)
     else:
         print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
         print('!!! No checkpoint file found - starting from scratch !!!')
@@ -348,7 +415,7 @@ def train(config,
 
 
     training_module = TrainModule(
-        net_g=net_g, net_d=net_d, config=config)
+        net_g=net_g, net_d=net_d, net_dp=net_dp, config=config)
 
     logger = pl.loggers.TensorBoardLogger(
         config.train.get('log_dir', 'logs'), name=config.exp_name,

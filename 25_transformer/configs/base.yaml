@@ -2,7 +2,9 @@
 # 0.2 - spk cond in codebook decoder, switch code params to DAC-esque
 # 0.3 - remove perplexity opt
 # 0.4 - add pitch codes
-exp_name: base_v0.4
+# 0.4.1 - pitch codes increase capacity
+# 0.4.2 - pitch discriminator
+exp_name: base_v0.4.2
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -28,9 +30,12 @@ codec:
   codebook_num: 8
 pitch_codec:
   hidden_channels: 32
-  code_dim: 32
-  codebook_size: 32
+  code_dim: 48
+  codebook_size: 48
   codebook_num: 2
+pitch_discriminator:
+  channels: 32
+  n_scales: 3
 mpd:
   kernel_size: 5
   lReLU_slope: 0.2
@@ -64,6 +69,8 @@ train:
   c_stft: 9
   c_pitch_dec: 1.0
   c_pitch_q: 0.5
+  c_pitch_adv: 1.0
+  c_pitch_feat: 1.0
   eps: 1e-7
   lr: 1e-4
   val_interval: 1
