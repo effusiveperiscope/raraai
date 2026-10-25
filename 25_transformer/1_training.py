@@ -16,10 +16,13 @@ logging.getLogger('numba').setLevel(logging.WARNING)
 from vits_extend.stft_loss import STFTLoss
 from vits_extend.stft import TacotronSTFT
 from vits_extend.stft_loss import MultiResolutionSTFTLoss
+import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from commons import load_state_dict_mismatch, load_submodule_prefix, slice_segments_general
+from commons import (load_state_dict_mismatch, load_submodule_prefix,
+                     matplotlib_to_tensorboard, slice_segments_general)
 
 import pytorch_lightning as pl
 from omegaconf import OmegaConf
@@ -134,12 +137,13 @@ class TrainModule(pl.LightningModule):
                 self.net_g : Generator
                 spec = batch['spec']
                 spec = rearrange(spec, "b t c -> b c t") # channel first is expected for some reason
-                out_audio = self.net_g.infer(
+                out_audio, f0_hat = self.net_g.infer(
                     spec=spec,
                     spec_l=batch['spec_length'].squeeze(-1),
                     f0=batch['f0'],
                     sid=batch['sid'],
-                    use_pitch_recon=True
+                    use_pitch_recon=True,
+                    return_pitch=True
                 )
 
                 for i, audio in enumerate(out_audio):
@@ -151,7 +155,57 @@ class TrainModule(pl.LightningModule):
                         global_step=self.global_step,
                         sample_rate=self.config.data.sampling_rate
                     )
+                    self.log_pitch_curve(
+                        f0_ref=batch['f0'][i],
+                        f0_pred=f0_hat[i],
+                        tag=f'test_pitch_{i}_{j}'
+                    )
                 self.logger.experiment.flush()
+
+    def log_pitch_curve(self, f0_ref, f0_pred, tag):
+        """Log the target and codec-reconstructed f0 contours as an image.
+
+        Args:
+            f0_ref: (T,) ground-truth f0 in Hz, 0 == unvoiced.
+            f0_pred: (T,) f0 produced by the pitch codec (the contour the
+                decoder uses), in Hz, 0 == unvoiced.
+            tag: TensorBoard image tag.
+        """
+        ref = f0_ref.detach().float().cpu().reshape(-1).numpy()
+        pred = f0_pred.detach().float().cpu().reshape(-1).numpy()
+        n = min(ref.size, pred.size)
+        if n == 0:
+            return
+        # 0 Hz marks an unvoiced frame; NaN leaves a gap in the curve.
+        ref = np.where(ref[:n] > 0, ref[:n], np.nan)
+        pred = np.where(pred[:n] > 0, pred[:n], np.nan)
+        if not (np.isfinite(ref).any() or np.isfinite(pred).any()):
+            return
+
+        hop = self.config.data.hop_length
+        sr = self.config.data.sampling_rate
+        t = np.arange(n) * hop / sr
+
+        fig, ax = plt.subplots(figsize=(10, 3))
+        ax.plot(t, ref, color='tab:blue', linewidth=1.2, label='target')
+        ax.plot(t, pred, color='tab:orange', linewidth=1.2,
+                label='codec reconstruction')
+        # Pin the y-range to the target's range (+margin) so a diverging
+        # codec early in training cannot squash the reference curve.
+        finite_ref = ref[np.isfinite(ref)]
+        if finite_ref.size:
+            ax.set_ylim(0.0, max(float(finite_ref.max()) * 1.25, 1.0))
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('f0 (Hz)')
+        ax.set_title(f'Pitch contour (step {self.global_step})')
+        ax.set_xlim(0, max(t[-1], 1e-3))
+        ax.grid(alpha=0.3)
+        ax.legend(loc='upper right', fontsize=8)
+        fig.tight_layout()
+
+        self.logger.experiment.add_image(
+            tag, matplotlib_to_tensorboard(fig), global_step=self.global_step)
+        plt.close(fig)
 
     def step(self, batch, batch_idx, is_train=True):
         if is_train:

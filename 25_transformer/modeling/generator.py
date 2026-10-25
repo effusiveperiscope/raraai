@@ -220,7 +220,26 @@ class Generator(nn.Module):
                 p_uv_logits)
 
     def infer(self, spec, spec_l, f0, sid, use_pitch_recon=False,
-              predict_voicing=False):
+              predict_voicing=False, return_pitch=False):
+        """Synthesise audio from a spectrogram + f0 contour.
+
+        Args:
+            spec: (B, C, T) linear spectrogram.
+            spec_l: (B,) valid spectrogram lengths.
+            f0: (B, T) f0 contour in Hz, 0 == unvoiced.
+            sid: (B,) speaker ids.
+            use_pitch_recon: replace the input f0 with the pitch codec's
+                reconstruction (encode/decode through the codes) before
+                synthesis.
+            predict_voicing: decide voicing from the pitch codec's V/UV head
+                instead of the input f0 mask (only used with
+                ``use_pitch_recon``).
+            return_pitch: also return the f0 contour (Hz) that was fed to
+                the decoder, e.g. for visualisation.
+        Returns:
+            audio: (B, 1, T_audio) waveform, or ``(audio, f0_used)`` when
+            ``return_pitch`` is True.
+        """
         g = self.spk_emb(sid)
         # enc_q returns (B, C, T) with T = decoder frame rate.
         x, x_mask = self.enc_q(spec, spec_l)
@@ -267,6 +286,8 @@ class Generator(nn.Module):
             else:
                 f0 = f0[..., : yq.shape[-1]]
         audio = self.dec(g, yq, f0)
+        if return_pitch:
+            return audio, f0
         return audio
 
     @staticmethod
