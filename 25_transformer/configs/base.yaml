@@ -7,7 +7,8 @@
 # 0.4.2a - pitch only
 # 0.4.3 - increase capacity, reset
 # 0.4.3a - increase discriminator capacity
-exp_name: base_v0.4.3
+# 0.4.4 - slope-aware patch pitch critic, overlapping pitch upsample, fp32 pitch path
+exp_name: base_v0.4.4
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -36,9 +37,16 @@ pitch_codec:
   code_dim: 64
   codebook_size: 64
   codebook_num: 2
+  upsample_kernel: 16
+# Slope-aware patch critic for the pitch contour (see modeling/pitch_discriminator.py).
+# ~52k params per branch at channels=32, so ~160k for n_scales=3.
 pitch_discriminator:
   channels: 64
   n_scales: 3
+  kernel_size: 5
+  # Gain on the (log-f0 first difference) input channel; log-f0 is ~[0, 1]
+  # while per-frame slopes are ~1e-3.
+  delta_scale: 50.0
 mpd:
   kernel_size: 5
   lReLU_slope: 0.2

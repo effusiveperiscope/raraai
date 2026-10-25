@@ -98,11 +98,27 @@ class Generator(nn.Module):
             codebook_num=p_codebook_num,
             gin_channels=hp.vits.gin_channels,
         )
+        # Overlapping transposed conv back to the decoder frame rate.
+        # With kernel_size == stride the temporal support of one code is
+        # exactly its own `down_factor` frames, so the contour is decoded as a
+        # concatenation of independent 40 ms tiles: consecutive tiles are
+        # produced by unrelated linear maps and are not required to join up.
+        # That tile structure is what makes f0_hat look jagged. A wider kernel
+        # gives each frame ~`upsample_kernel` frames of support, i.e. real
+        # blending between neighbouring codes. (kernel - stride) must be even
+        # so that the output length stays exactly `down_factor * T`.
+        p_up_kernel = int(_get_cfg(pitch_codec_cfg, "upsample_kernel",
+                                   4 * down_factor))
+        if p_up_kernel < down_factor or (p_up_kernel - down_factor) % 2:
+            raise ValueError(
+                "pitch_codec.upsample_kernel must be >= down_factor "
+                f"({down_factor}) with the same parity, got {p_up_kernel}")
         self.pitch_upsample = nn.ConvTranspose1d(
             p_hidden,
             p_hidden,
-            kernel_size=down_factor,
+            kernel_size=p_up_kernel,
             stride=down_factor,
+            padding=(p_up_kernel - down_factor) // 2,
         )
         self.pitch_out_proj = nn.Conv1d(p_hidden, 1, kernel_size=1)
         # Voicing (V/UV) head. It predicts, per decoder frame, whether the
@@ -156,26 +172,39 @@ class Generator(nn.Module):
             f0_target: (B, T_full) log-normalized pitch target.
             p_uv_logits: (B, T_full) voiced/unvoiced logits (higher ==
                 voiced), decoded from the same quantized pitch codes.
+
+        Note:
+            The path runs in fp32 even when the trainer uses bf16-mixed
+            precision. The contour is log-normalized to roughly [0, 1], where
+            bf16 has an ulp of ~2e-3; in f0 terms that is ~24 cents, which is
+            coarser than the per-frame movement the pitch codec is supposed to
+            model and much coarser than the slopes a slope-based critic needs
+            to see. The module is small (a 64-wide codec at a quarter of the
+            frame rate), so fp32 costs practically nothing here.
         """
-        f0_in = f0.unsqueeze(1)  # (B, 1, T)
-        f0_target = torch.log1p(torch.clamp(f0_in, min=0.0)) / PITCH_LOG_SCALE
-        t_full = f0_target.shape[-1]
-        if t_pad > 0:
-            f0_target = F.pad(f0_target, (0, t_pad))
-        # Same down_factor as the spec path -> same code rate.
-        px = self.pitch_downsample(f0_target)  # (B, H, T_ds)
-        px_ds = rearrange(px, "b c t -> b t c")
-        pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
-            px_ds, do_uq=False, g=g)
-        pq_ds = pq
-        pq_ct = rearrange(pq, "b t c -> b c t")
-        pq_up = self.pitch_upsample(pq_ct)
-        if t_pad > 0:
-            pq_up = pq_up[..., : pq_up.shape[-1] - t_pad]
-        f0_hat = self.pitch_out_proj(pq_up).squeeze(1)  # (B, T_full)
-        p_uv_logits = self.pitch_uv_proj(pq_up).squeeze(1)  # (B, T_full)
-        return (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
-                f0_target[..., :t_full].squeeze(1), p_uv_logits)
+        with torch.autocast(device_type=f0.device.type, enabled=False):
+            f0 = f0.float()
+            g = g.float()
+            f0_in = f0.unsqueeze(1)  # (B, 1, T)
+            f0_target = (torch.log1p(torch.clamp(f0_in, min=0.0))
+                         / PITCH_LOG_SCALE)
+            t_full = f0_target.shape[-1]
+            if t_pad > 0:
+                f0_target = F.pad(f0_target, (0, t_pad))
+            # Same down_factor as the spec path -> same code rate.
+            px = self.pitch_downsample(f0_target)  # (B, H, T_ds)
+            px_ds = rearrange(px, "b c t -> b t c")
+            pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
+                px_ds, do_uq=False, g=g)
+            pq_ds = pq
+            pq_ct = rearrange(pq, "b t c -> b c t")
+            pq_up = self.pitch_upsample(pq_ct)
+            if t_pad > 0:
+                pq_up = pq_up[..., : pq_up.shape[-1] - t_pad]
+            f0_hat = self.pitch_out_proj(pq_up).squeeze(1)  # (B, T_full)
+            p_uv_logits = self.pitch_uv_proj(pq_up).squeeze(1)  # (B, T_full)
+            return (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
+                    f0_target[..., :t_full].squeeze(1), p_uv_logits)
 
     def forward(self, spec, spec_l, f0, sid):
         g = self.spk_emb(sid)

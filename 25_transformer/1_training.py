@@ -28,6 +28,9 @@ import pytorch_lightning as pl
 from omegaconf import OmegaConf
 import os
 
+# Something above this is setting DEBUG but I don't know what
+logging.getLogger().setLevel(logging.WARNING)
+
 def weighted_mel_loss(mel_pred, mel_target, voiced_mask, unvoiced_weight=0.1):
     """
     mel_pred, mel_target: (B, n_mels, T)
@@ -330,21 +333,23 @@ class TrainModule(pl.LightningModule):
             feat_loss = feat_loss / len(disc_fake)
             feat_loss = feat_loss * 2
 
-        # --- Pitch adversarial: discriminator over the reconstructed f0 ---
+        # --- Pitch adversarial: patch critic over the reconstructed f0 ---
         # real/fake are log-normalized pitch contours (B, T) with unvoiced
-        # frames zeroed so the discriminator judges only the voiced contour.
+        # frames zeroed. The critic is fed the contour *slope* internally and
+        # only scores voiced windows, so it judges the shape of the movement
+        # rather than the level already constrained by pitch_dec_loss.
         pitch_real = f0_target.unsqueeze(1)                    # (B, 1, T)
         pitch_fake = (f0_hat * pitch_voiced).unsqueeze(1)      # (B, 1, T)
         c_pitch_adv = self.config.train.get('c_pitch_adv', 1.0)
         c_pitch_feat = self.config.train.get('c_pitch_feat', 1.0)
 
-        pitch_disc_fake = self.net_dp(pitch_fake)
+        pitch_disc_fake = self.net_dp(pitch_fake, voiced=pitch_voiced)
         pitch_score_loss = 0.0
         for (_, score_fake) in pitch_disc_fake:
             pitch_score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
         pitch_score_loss = pitch_score_loss / len(pitch_disc_fake)
 
-        pitch_disc_real = self.net_dp(pitch_real)
+        pitch_disc_real = self.net_dp(pitch_real, voiced=pitch_voiced)
         pitch_feat_loss = 0.0
         for (feat_fake, _), (feat_real, _) in zip(pitch_disc_fake, pitch_disc_real):
             for fake, real in zip(feat_fake, feat_real):
@@ -388,8 +393,8 @@ class TrainModule(pl.LightningModule):
                 sched_d.step()
 
         # Pitch Discriminator Loss
-        pitch_disc_fake = self.net_dp(pitch_fake.detach())
-        pitch_disc_real = self.net_dp(pitch_real)
+        pitch_disc_fake = self.net_dp(pitch_fake.detach(), voiced=pitch_voiced)
+        pitch_disc_real = self.net_dp(pitch_real, voiced=pitch_voiced)
         loss_dp = 0.0
         for (_, score_fake), (_, score_real) in zip(pitch_disc_fake, pitch_disc_real):
             loss_dp += torch.mean(torch.pow(score_real - 1.0, 2))
@@ -478,7 +483,9 @@ def train(config,
     pitch_disc_cfg = config.get('pitch_discriminator', {})
     net_dp = PitchDiscriminator(
         channels=int(pitch_disc_cfg.get('channels', 32)),
-        n_scales=int(pitch_disc_cfg.get('n_scales', 3)))
+        n_scales=int(pitch_disc_cfg.get('n_scales', 3)),
+        kernel_size=int(pitch_disc_cfg.get('kernel_size', 5)),
+        delta_scale=float(pitch_disc_cfg.get('delta_scale', 50.0)))
 
     if os.path.exists(f'checkpoints/{config.exp_name}/last.ckpt'):
         print('Detected interrupted training - resuming from last.ckpt')
