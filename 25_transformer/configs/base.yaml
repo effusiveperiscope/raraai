@@ -7,7 +7,8 @@
 # 0.4.2a - pitch only
 # 0.4.3 - increase capacity, reset
 # 0.4.3a - increase discriminator capacity
-# 0.4.4 - slope-aware patch pitch critic, overlapping pitch upsample, fp32 pitch path
+# 0.4.4 - slope-aware patch pitch critic, overlapping pitch analysis/synthesis, fp32 pitch path
+# 0.4.5 - pitch_downsample
 exp_name: base_v0.4.4
 vits:
   filter_channels: 640
@@ -37,9 +38,17 @@ pitch_codec:
   code_dim: 64
   codebook_size: 64
   codebook_num: 2
+  # Overlapping analysis conv, kernel > stride with same parity. Restores the
+  # block centre and output length (floor(T/4)) while giving each code 2 frames
+  # of cross-block context and a low-pass before the 4x decimation. Changes the
+  # pitch codes -> 2_preprocess must be re-run with the retrained stage-1 ckpt.
+  downsample_kernel: 8
+  # > down_factor (4) and same parity: overlapping synthesis, so pitch
+  # continuity is structural instead of something the codebook must encode.
+  # Changing it reinitialises pitch_upsample on resume.
   upsample_kernel: 16
 # Slope-aware patch critic for the pitch contour (see modeling/pitch_discriminator.py).
-# ~52k params per branch at channels=32, so ~160k for n_scales=3.
+# 207k params per branch at channels=64, so ~621k for n_scales=3.
 pitch_discriminator:
   channels: 64
   n_scales: 3

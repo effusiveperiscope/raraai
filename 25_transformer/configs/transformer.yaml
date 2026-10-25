@@ -39,6 +39,7 @@ pitch_codec:
   codebook_num: 2
   # Must match configs/base.yaml exactly: validation-time sampling rebuilds the
   # stage-1 Generator from this block.
+  downsample_kernel: 8
   upsample_kernel: 16
 
 # --------------------------------------------------------------- data ----

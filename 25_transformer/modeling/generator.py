@@ -82,10 +82,29 @@ class Generator(nn.Module):
         p_code_dim = int(_get_cfg(pitch_codec_cfg, "code_dim", 32))
         p_codebook_size = int(_get_cfg(pitch_codec_cfg, "codebook_size", 32))
         p_codebook_num = int(_get_cfg(pitch_codec_cfg, "codebook_num", 2))
+        # Overlapping analysis conv. With kernel_size == stride this is a plain
+        # block decimation: code j sees frames 4j..4j+3 and nothing else, so it
+        # is blind to its neighbours -- while the (overlapping) synthesis side
+        # now spreads each code over 16 frames. Two problems with that:
+        #   * the encoder cannot see the context it is contributing to, which
+        #     makes neighbouring codes a non-orthogonal, coupled code;
+        #   * k == s is decimation with no anti-alias filter, so pitch movement
+        #     above the 12.5 Hz code-rate Nyquist folds into the block means.
+        # A wider kernel (symmetric, stride still down_factor) fixes both and
+        # keeps the block centre: with pad = (k - s)/2, code j covers frames
+        # 4j-2..4j+5, i.e. centre 4j+1.5, exactly as the non-overlapping block
+        # did, and the output length is still floor(T / down_factor).
+        p_ds_kernel = int(_get_cfg(pitch_codec_cfg, "downsample_kernel",
+                                   2 * down_factor))
+        if p_ds_kernel < down_factor or (p_ds_kernel - down_factor) % 2:
+            raise ValueError(
+                "pitch_codec.downsample_kernel must be >= down_factor "
+                f"({down_factor}) with the same parity, got {p_ds_kernel}")
+        self.pitch_downsample_pad = (p_ds_kernel - down_factor) // 2
         self.pitch_downsample = nn.Conv1d(
             1,
             p_hidden,
-            kernel_size=down_factor,
+            kernel_size=p_ds_kernel,
             stride=down_factor,
         )
         self.pitch_codec = VevoRepCodec(
@@ -99,14 +118,19 @@ class Generator(nn.Module):
             gin_channels=hp.vits.gin_channels,
         )
         # Overlapping transposed conv back to the decoder frame rate.
-        # With kernel_size == stride the temporal support of one code is
-        # exactly its own `down_factor` frames, so the contour is decoded as a
-        # concatenation of independent 40 ms tiles: consecutive tiles are
-        # produced by unrelated linear maps and are not required to join up.
-        # That tile structure is what makes f0_hat look jagged. A wider kernel
-        # gives each frame ~`upsample_kernel` frames of support, i.e. real
-        # blending between neighbouring codes. (kernel - stride) must be even
-        # so that the output length stays exactly `down_factor * T`.
+        # With kernel_size == stride this layer is exactly block-diagonal: the
+        # `down_factor` frames of a block are `down_factor` different linear
+        # functionals of one code vector, and at every seam the path switches
+        # to a different functional of the *next* code. Nothing ties
+        # W[3] . h[i] to W[0] . h[i+1], so each seam is a discontinuity that
+        # the codebook has to actively spend capacity avoiding -- and 12
+        # bits/frame of L1-optimal VQ has no reason to. Note this is about the
+        # seam, not about context: the codec decoder already has a ~17-code
+        # (680 ms) receptive field, so a code already influences ~68 output
+        # frames before this layer. An overlapping kernel blends
+        # `kernel / stride` neighbouring codes into every frame, which makes
+        # continuity structural instead of learnt. (kernel - stride) must be
+        # even so that the output length stays exactly `down_factor * T`.
         p_up_kernel = int(_get_cfg(pitch_codec_cfg, "upsample_kernel",
                                    4 * down_factor))
         if p_up_kernel < down_factor or (p_up_kernel - down_factor) % 2:
@@ -155,6 +179,23 @@ class Generator(nn.Module):
         for name, param in self.named_parameters():
             param.requires_grad_(name.startswith(pitch_prefixes))
 
+    def _pitch_downsample_conv(self, f0_target):
+        """Overlapping analysis conv, replicate-padded at both ends.
+
+        Expects a log-normalized ``(B, 1, T)`` contour whose length is already
+        a multiple of ``down_factor``. Replicate padding (not zero) because a
+        zero pad reads as ~0 Hz and would drag the first/last code towards
+        unvoiced. Kept in one place so that training (``_pitch_codec_forward``)
+        and code extraction (``encode_codes``) can never diverge -- a drift
+        here would make stage-2 codes inconsistent with stage-1 training.
+        """
+        if self.pitch_downsample_pad > 0:
+            f0_target = F.pad(
+                f0_target,
+                (self.pitch_downsample_pad, self.pitch_downsample_pad),
+                mode='replicate')
+        return self.pitch_downsample(f0_target)  # (B, H, T / down_factor)
+
     def _pitch_codec_forward(self, f0, t_pad, g):
         """Run the low-parameter pitch codec.
 
@@ -192,7 +233,7 @@ class Generator(nn.Module):
             if t_pad > 0:
                 f0_target = F.pad(f0_target, (0, t_pad))
             # Same down_factor as the spec path -> same code rate.
-            px = self.pitch_downsample(f0_target)  # (B, H, T_ds)
+            px = self._pitch_downsample_conv(f0_target)  # (B, H, T_ds)
             px_ds = rearrange(px, "b c t -> b t c")
             pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
                 px_ds, do_uq=False, g=g)
@@ -351,15 +392,34 @@ class Generator(nn.Module):
     def encode_codes(self, spec, spec_l, f0, sid):
         """Encode spec + f0 into integer codes at the shared code rate.
 
+        Each path is the *encoder half* of ``VevoRepCodec.forward``, i.e.
+        ``encoder -> projector -> nearest codebook entry``. The encoder call is
+        mandatory, not optional decoration: stage 1 trains the codebooks and
+        the decoder on ``projector(encoder(x))``, so collecting codes from
+        ``projector(x)`` alone would hand stage 2 a latent distribution the
+        decoder has never been trained on (measured max |dz| ~ 0.9 with the
+        encoder skipped, i.e. a different function -- the codes are not a
+        sub-sample of the trained ones, they are drawn from elsewhere).
+
+        Run this under ``eval()``: the codec encoders contain dropout, which
+        would jitter the extracted codes while stage-1 training sees the
+        dropped variant.
+
         Returns (spec_codes, pitch_codes) as (Q, B, T_ds) int tensors.
         """
+        if self.training:
+            raise RuntimeError(
+                "encode_codes must run under eval(): the codec encoders "
+                "contain dropout, so codes extracted in train mode would not "
+                "match the ones stage 1 optimised. 2_preprocess.py already "
+                "calls net_g.eval(); do the same in ad-hoc scripts.")
         g = self.spk_emb(sid)
         x, _ = self.enc_q(spec, spec_l)
         t_pad = (-x.shape[-1]) % self.down_factor
         if t_pad > 0:
             x = F.pad(x, (0, t_pad))
         x_ds = self.downsample(x)  # (B, C, T_ds)
-        z = self.codec.projector(x_ds)
+        z = self.codec.projector(self.codec.encoder(x_ds))
         _, spec_codes = self.codec.quantizer.inference(z)
 
         t_frames = x.shape[-1] - t_pad
@@ -371,8 +431,8 @@ class Generator(nn.Module):
             f0_aligned, min=0.0)) / PITCH_LOG_SCALE).unsqueeze(1)
         if t_pad > 0:
             f0_target = F.pad(f0_target, (0, t_pad))
-        px = self.pitch_downsample(f0_target)
-        pz = self.pitch_codec.projector(px)
+        px = self._pitch_downsample_conv(f0_target)
+        pz = self.pitch_codec.projector(self.pitch_codec.encoder(px))
         _, pitch_codes = self.pitch_codec.quantizer.inference(pz)
         return spec_codes, pitch_codes
 
