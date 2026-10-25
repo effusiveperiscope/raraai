@@ -9,7 +9,7 @@
 # 0.4.3a - increase discriminator capacity
 # 0.4.4 - slope-aware patch pitch critic, overlapping pitch analysis/synthesis, fp32 pitch path
 # 0.4.5 - pitch_downsample
-exp_name: base_v0.4.4
+exp_name: base_v0.4.5
 vits:
   filter_channels: 640
   gin_channels: 256
