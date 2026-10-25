@@ -33,9 +33,9 @@ codec:
   codebook_size: 64
   codebook_num: 8
 pitch_codec:
-  hidden_channels: 32
-  code_dim: 48
-  codebook_size: 48
+  hidden_channels: 64
+  code_dim: 64
+  codebook_size: 64
   codebook_num: 2
 
 # --------------------------------------------------------------- data ----
@@ -103,6 +103,9 @@ train:
   # Optional: stage-1 Generator checkpoint used to turn sampled codes into
   # audio for TensorBoard. Set to null to disable audio logging.
   generator_checkpoint: checkpoints/base_v0.4/last.ckpt
+  # Voicing decision threshold used by Generator.infer_from_codes when no
+  # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
+  pitch_uv_threshold: 0.5
   sample_interval: 1
   sample_count: 2
   sample_frames: 128

@@ -105,21 +105,36 @@ class Generator(nn.Module):
             stride=down_factor,
         )
         self.pitch_out_proj = nn.Conv1d(p_hidden, 1, kernel_size=1)
+        # Voicing (V/UV) head. It predicts, per decoder frame, whether the
+        # pitch code represents voiced speech. Trained with BCE against
+        # (f0 > 0), so the pitch codes carry their own unvoiced decision and
+        # synthesis no longer needs an external voicing mask.
+        self.pitch_uv_proj = nn.Conv1d(p_hidden, 1, kernel_size=1)
+        # Start biased towards "voiced" with near-zero weights: a checkpoint
+        # that predates this head (so these weights are randomly initialized
+        # by load_state_dict_mismatch) then reproduces the legacy all-voiced
+        # behaviour instead of randomly dropping frames to silence.
+        nn.init.normal_(self.pitch_uv_proj.weight, mean=0.0, std=0.01)
+        nn.init.constant_(self.pitch_uv_proj.bias, 4.0)
+        # Decision threshold on sigmoid(uv_logit) used at inference.
+        self.pitch_uv_threshold = float(_get_cfg(
+            _get_cfg(hp, "train", None), "pitch_uv_threshold", 0.5))
 
     def freeze_non_pitch(self):
         """Freeze every parameter except the pitch path components.
 
-        Keeps ``pitch_downsample``, ``pitch_codec``, ``pitch_upsample`` and
-        ``pitch_out_proj`` trainable and freezes everything else (posterior
-        encoder, spectrogram codec, resampling layers, NSF decoder and the
-        speaker table). Used by stage-1 ``--pitch_only`` fine-tuning so only
-        the pitch codec is updated.
+        Keeps ``pitch_downsample``, ``pitch_codec``, ``pitch_upsample``,
+        ``pitch_out_proj`` and ``pitch_uv_proj`` trainable and freezes
+        everything else (posterior encoder, spectrogram codec, resampling
+        layers, NSF decoder and the speaker table). Used by stage-1
+        ``--pitch_only`` fine-tuning so only the pitch path is updated.
         """
         pitch_prefixes = (
             "pitch_downsample.",
             "pitch_codec.",
             "pitch_upsample.",
             "pitch_out_proj.",
+            "pitch_uv_proj.",
         )
         for name, param in self.named_parameters():
             param.requires_grad_(name.startswith(pitch_prefixes))
@@ -139,6 +154,8 @@ class Generator(nn.Module):
             px_ds: (B, T_ds, H) pre-quantization pitch features.
             p_vqloss, p_perplexity: VQ stats from the pitch codec.
             f0_target: (B, T_full) log-normalized pitch target.
+            p_uv_logits: (B, T_full) voiced/unvoiced logits (higher ==
+                voiced), decoded from the same quantized pitch codes.
         """
         f0_in = f0.unsqueeze(1)  # (B, 1, T)
         f0_target = torch.log1p(torch.clamp(f0_in, min=0.0)) / PITCH_LOG_SCALE
@@ -156,8 +173,9 @@ class Generator(nn.Module):
         if t_pad > 0:
             pq_up = pq_up[..., : pq_up.shape[-1] - t_pad]
         f0_hat = self.pitch_out_proj(pq_up).squeeze(1)  # (B, T_full)
+        p_uv_logits = self.pitch_uv_proj(pq_up).squeeze(1)  # (B, T_full)
         return (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
-                f0_target[..., :t_full].squeeze(1))
+                f0_target[..., :t_full].squeeze(1), p_uv_logits)
 
     def forward(self, spec, spec_l, f0, sid):
         g = self.spk_emb(sid)
@@ -192,14 +210,17 @@ class Generator(nn.Module):
         else:
             f0_aligned = f0[..., :t_frames]
         (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
-            f0_target) = self._pitch_codec_forward(f0_aligned, t_pad, g)
+            f0_target, p_uv_logits) = self._pitch_codec_forward(
+                f0_aligned, t_pad, g)
         y_slice, f0_slice, ids_slice = rand_slice_segments_with_pitch(
             yq, f0, spec_l, self.hp.data.segment_size // self.hp.data.hop_length)
         audio = self.dec(g, y_slice, f0_slice)
         return (audio, ids_slice, yq_ds, x_ds, vqloss, perplexity,
-                f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity)
+                f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity,
+                p_uv_logits)
 
-    def infer(self, spec, spec_l, f0, sid, use_pitch_recon=False):
+    def infer(self, spec, spec_l, f0, sid, use_pitch_recon=False,
+              predict_voicing=False):
         g = self.spk_emb(sid)
         # enc_q returns (B, C, T) with T = decoder frame rate.
         x, x_mask = self.enc_q(spec, spec_l)
@@ -229,10 +250,16 @@ class Generator(nn.Module):
                 f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
             else:
                 f0_aligned = f0[..., :t_frames]
-            (f0_hat_norm, _, _, _, _, _) = self._pitch_codec_forward(
-                f0_aligned, t_pad, g)
+            (f0_hat_norm, _, _, _, _, _,
+                uv_logits) = self._pitch_codec_forward(f0_aligned, t_pad, g)
             # Denormalize log1p pitch back to Hz, keep unvoiced at 0.
-            voiced = (f0_aligned > 0).float()
+            # `predict_voicing` uses the codec's own V/UV head; the default
+            # keeps the legacy behaviour of trusting the input f0 mask.
+            if predict_voicing:
+                voiced = (torch.sigmoid(uv_logits)
+                          >= self.pitch_uv_threshold).float()
+            else:
+                voiced = (f0_aligned > 0).float()
             f0 = (torch.expm1(torch.clamp(
                 f0_hat_norm, min=0.0) * PITCH_LOG_SCALE) * voiced)
             if f0.shape[-1] < yq.shape[-1]:
@@ -300,7 +327,7 @@ class Generator(nn.Module):
         return spec_codes, pitch_codes
 
     def infer_from_codes(self, spec_codes, pitch_codes, sid,
-                         out_len=None, voiced=None):
+                         out_len=None, voiced=None, uv_threshold=None):
         """Synthesize audio directly from integer spec + pitch codes.
 
         Args:
@@ -310,7 +337,11 @@ class Generator(nn.Module):
             sid: (B,) speaker ids.
             out_len: optional frame length at the decoder rate to trim to.
             voiced: optional voicing mask, (B, T_frames) or (B, T_codes).
-                Unvoiced frames render as 0 Hz. Defaults to all voiced.
+                If None, the pitch codec's voicing head decides which frames
+                are voiced; unvoiced frames render as 0 Hz. Pass a mask to
+                override the prediction.
+            uv_threshold: optional override for the voicing decision
+                threshold applied to ``sigmoid(uv_logits)``.
         Returns:
             audio: (B, 1, T_audio) waveform.
         """
@@ -348,9 +379,13 @@ class Generator(nn.Module):
         py = self.pitch_codec.decoder(pzq, self.pitch_codec.g_proj(g))
         py_up = self.pitch_upsample(py)[..., :t_full]
         f0_norm = self.pitch_out_proj(py_up).squeeze(1)  # (B, T_full)
+        uv_logits = self.pitch_uv_proj(py_up).squeeze(1)  # (B, T_full)
 
         if voiced is None:
-            v = torch.ones_like(f0_norm)
+            # No external mask: decode voicing from the pitch codes.
+            thr = (self.pitch_uv_threshold if uv_threshold is None
+                   else float(uv_threshold))
+            v = (torch.sigmoid(uv_logits) >= thr).float()
         else:
             vt = (voiced if torch.is_tensor(voiced)
                   else torch.tensor(voiced, device=f0_norm.device))
@@ -371,19 +406,25 @@ class Generator(nn.Module):
         audio = self.dec(g, yq, f0)
         return audio
 
-    def infer_pitch(self, f0, sid):
+    def infer_pitch(self, f0, sid, predict_voicing=False):
         """Encode/decode a raw f0 contour through the pitch codec only.
 
         Returns (f0_hat_hz, pq_ds, px_ds) where f0_hat_hz is at the input
-        frame rate and codes are at 1/down_factor of it.
+        frame rate and codes are at 1/down_factor of it. With
+        ``predict_voicing=True`` the codec's own V/UV head (rather than the
+        input f0 mask) decides which frames are rendered.
         """
         self.eval()
         with torch.no_grad():
             g = self.spk_emb(sid)
             t_pad = (-f0.shape[-1]) % self.down_factor
-            (f0_hat_norm, pq_ds, px_ds, _, _, _) = self._pitch_codec_forward(
-                f0, t_pad, g)
-            voiced = (f0 > 0).float()
+            (f0_hat_norm, pq_ds, px_ds, _, _, _,
+                uv_logits) = self._pitch_codec_forward(f0, t_pad, g)
+            if predict_voicing:
+                voiced = (torch.sigmoid(uv_logits)
+                          >= self.pitch_uv_threshold).float()
+            else:
+                voiced = (f0 > 0).float()
             f0_hat = (torch.expm1(torch.clamp(
                 f0_hat_norm, min=0.0) * PITCH_LOG_SCALE) * voiced)
         return f0_hat, pq_ds, px_ds

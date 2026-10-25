@@ -4,7 +4,10 @@
 # 0.4 - add pitch codes
 # 0.4.1 - pitch codes increase capacity
 # 0.4.2 - pitch discriminator
-exp_name: base_v0.4.2
+# 0.4.2a - pitch only
+# 0.4.3 - increase capacity, reset
+# 0.4.3a - increase discriminator capacity
+exp_name: base_v0.4.3
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -29,12 +32,12 @@ codec:
   codebook_size: 64
   codebook_num: 8
 pitch_codec:
-  hidden_channels: 32
-  code_dim: 48
-  codebook_size: 48
+  hidden_channels: 64
+  code_dim: 64
+  codebook_size: 64
   codebook_num: 2
 pitch_discriminator:
-  channels: 32
+  channels: 64
   n_scales: 3
 mpd:
   kernel_size: 5
@@ -71,6 +74,9 @@ train:
   c_pitch_q: 0.5
   c_pitch_adv: 1.0
   c_pitch_feat: 1.0
+  c_pitch_uv: 1.0
+  c_pitch_uv_frame: 0.1
+  pitch_uv_threshold: 0.5
   eps: 1e-7
   lr: 1e-4
   val_interval: 1

@@ -176,7 +176,8 @@ class TrainModule(pl.LightningModule):
         pitch_only = self.pitch_only
 
         fake_audio, ids_slice, yq_ds, x_ds, vqloss, perplexity, \
-            f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity = self.net_g(
+            f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity, \
+            p_uv_logits = self.net_g(
             spec, spec_l, pit, sid
         )
         audio = commons.slice_segments(
@@ -217,6 +218,21 @@ class TrainModule(pl.LightningModule):
         c_pitch_q = self.config.train.get('c_pitch_q', 1.0)
         pitch_dec_loss = pitch_dec_loss * c_pitch_dec
         pitch_q_recon_loss = pitch_q_recon_loss * c_pitch_q
+
+        # Voicing (V/UV) objective: the pitch codec predicts, from its codes,
+        # whether a frame is voiced. This lets stage-2 synthesis render
+        # unvoiced frames without an external voicing mask. BCE is applied on
+        # every frame (1 == voiced, 0 == unvoiced).
+        c_pitch_uv = self.config.train.get('c_pitch_uv', 1.0)
+        c_pitch_uv_frame = self.config.train.get('c_pitch_uv_frame', 0.1)
+        uv_target = pitch_voiced
+        pitch_uv_loss = F.binary_cross_entropy_with_logits(
+            p_uv_logits, uv_target) * c_pitch_uv
+        # Also regress the decoded log-pitch towards 0 on unvoiced frames so a
+        # mis-gated frame renders silence rather than a stray tone.
+        pitch_unvoiced = 1.0 - pitch_voiced
+        pitch_uv_frame_loss = ((f0_hat ** 2) * pitch_unvoiced).sum() / (
+            pitch_unvoiced.sum().clamp_min(1.0)) * c_pitch_uv_frame
 
         # Smooth the mask slightly to avoid hard discontinuities at transitions
         # (optional but helps — unvoiced/voiced boundaries are ambiguous)
@@ -285,10 +301,12 @@ class TrainModule(pl.LightningModule):
         # Loss
         if pitch_only:
             loss_g = p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
+                + pitch_uv_loss + pitch_uv_frame_loss \
                 + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
         else:
             loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss \
                 + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
+                + pitch_uv_loss + pitch_uv_frame_loss \
                 + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
 
         if loss_g.requires_grad:
@@ -338,6 +356,8 @@ class TrainModule(pl.LightningModule):
                 'p_vqloss': p_vqloss.sum(),
                 'pitch_dec_loss': pitch_dec_loss.sum(),
                 'pitch_q_recon_loss': pitch_q_recon_loss.sum(),
+                'pitch_uv_loss': pitch_uv_loss,
+                'pitch_uv_frame_loss': pitch_uv_frame_loss,
                 'pitch_score_loss': c_pitch_adv * pitch_score_loss,
                 'pitch_feat_loss': c_pitch_feat * pitch_feat_loss,
                 'perplexity': perplexity.sum(),

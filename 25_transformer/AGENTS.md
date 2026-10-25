@@ -17,8 +17,9 @@ learns to predict those codes from text (phonemes) plus a speaker id.
   trained as a GAN (with MPD/MRD and pitch discriminators) to reconstruct
   audio. It owns the frozen speaker-embedding table and two RVQ codecs: a
   **spectrogram codec** (`codec`, 8 codebooks) and a **pitch codec**
-  (`pitch_codec`, 2 codebooks) over the f0 contour. This is where actual
-  synthesis happens.
+  (`pitch_codec`, 2 codebooks) over the f0 contour. The pitch codec also owns
+  a small **voicing (V/UV) head** (`pitch_uv_proj`) so its codes carry the
+  voiced/unvoiced decision. This is where actual synthesis happens.
 - **Stage 2** — a **`CodeTransformer`** (`modeling/transformer.py`) that
   predicts the spectrogram + pitch codes autoregressively from phoneme tokens
   and a speaker id, using a MusicGen-style **delay pattern** across codebooks.
@@ -225,6 +226,19 @@ Two config files exist with **non-overlapping responsibilities**:
    asserts this in `infer_from_codes`.
 8. **`torch.load(..., weights_only=True)`** is used in `dataset_codes.py`, but
    `weights_only=False` is required for full checkpoints (see §5).
+9. **The pitch codec predicts voicing (V/UV) itself.** `Generator.pitch_uv_proj`
+   is a per-frame head trained with `c_pitch_uv` (BCE against `f0 > 0`) plus a
+   small unvoiced-f0 regression weighted by `c_pitch_uv_frame`. At synthesis,
+   `infer_from_codes(..., voiced=None)` thresholds these logits
+   (`pitch_uv_threshold`) to decide voicing; pass an explicit mask to override.
+   Consequences:
+   - A stage-1 checkpoint created **before** this head existed loads it randomly
+     initialized (`load_state_dict_mismatch(..., strict=False)`), so its
+     predicted voicing is meaningless. Fine-tune with
+     `python 1_training.py --config configs/base.yaml --pitch_only` (the head is
+     in `freeze_non_pitch`'s trainable set) before relying on predicted voicing.
+   - No voicing mask needs to be stored on disk for stage 2: the information
+     lives in the pitch codes and is decoded by the head.
 
 ---
 
