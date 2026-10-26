@@ -7,15 +7,17 @@
 # Expected filelists (written by 2_preprocess):
 #   data/base/train_stage2.txt
 #   data/base/val_stage2.txt
-exp_name: transformer_v0.1
+
+# v0.2 - improved pitch encoder,
+exp_name: transformer_v0.2
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
 transformer:
   hidden_size: 768
   n_heads: 12
-  encoder_layers: 4
-  decoder_layers: 10
+  encoder_layers: 6
+  decoder_layers: 12
   dim_feedforward: 2048
   dropout: 0.1
   max_positions: 4096
@@ -25,6 +27,14 @@ transformer:
   # this must be large enough to hold every stage-1 id you use
   # (see speaker_map.py and train.speaker_map).
   n_speakers: 512
+  # Also feed `sid` to the decoder (its own embedding table), not just to the
+  # phoneme encoder. Without this the voice can only reach the autoregressive
+  # model through cross-attention to the encoder memory, which is a weak,
+  # easily averaged-away channel (speaker bleed / identical prosody per
+  # voice). Set to false to load a checkpoint trained without the decoder
+  # embedding (e.g. transformer_v0.1, which also used encoder_layers=4 /
+  # decoder_layers=10 -- match those too or the load stays partial).
+  decoder_speaker_cond: true
 
 # The codebook layout below must match the stage-1 Generator that produced
 # the codes (see configs/base.yaml).
@@ -34,8 +44,8 @@ codec:
   codebook_num: 8
 pitch_codec:
   hidden_channels: 64
-  code_dim: 64
-  codebook_size: 64
+  code_dim: 128
+  codebook_size: 128
   codebook_num: 2
   # Must match configs/base.yaml exactly: validation-time sampling rebuilds the
   # stage-1 Generator from this block.
@@ -106,10 +116,24 @@ train:
   speaker_map: null
   # Optional: stage-1 Generator checkpoint used to turn sampled codes into
   # audio for TensorBoard. Set to null to disable audio logging.
-  generator_checkpoint: checkpoints/base_v0.4/last.ckpt
+  generator_checkpoint: checkpoints/base_v0.4.6/last.ckpt
   # Voicing decision threshold used by Generator.infer_from_codes when no
   # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
   pitch_uv_threshold: 0.5
+  # TensorBoard logging of "what the model actually produces". Every
+  # `sample_interval` epochs (and once at the start of training) 2_training.py
+  # greedily/sampling-decodes `sample_count` val items and logs:
+  #   codes/{spec,pitch}_*  target-vs-generated codebook heatmaps
+  #   audio/{target,generated}_* / mel/* / pitch/*  re-synthesised samples
+  #   probe/*               same phonemes across speakers (speaker conditioning)
   sample_interval: 1
   sample_count: 2
   sample_frames: 128
+  # Decoding for these samples: lower temperature sharpens, top_k truncates.
+  # Sampling (rather than greedy) matters: greedy decoding tends to collapse
+  # into repeated code frames and looks worse than the model really is.
+  sample_temperature: 0.9
+  sample_top_k: 20
+  # Number of *other* speakers to re-render each sample with. 0 disables the
+  # speaker-conditioning probe; requires >= 2 distinct sids in the val set.
+  speaker_probe: 2

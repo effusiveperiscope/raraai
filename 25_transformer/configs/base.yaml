@@ -9,7 +9,8 @@
 # 0.4.3a - increase discriminator capacity
 # 0.4.4 - slope-aware patch pitch critic, overlapping pitch analysis/synthesis, fp32 pitch path
 # 0.4.5 - pitch_downsample
-exp_name: base_v0.4.5
+# 0.4.6 - increase capacity
+exp_name: base_v0.4.6
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -35,8 +36,8 @@ codec:
   codebook_num: 8
 pitch_codec:
   hidden_channels: 64
-  code_dim: 64
-  codebook_size: 64
+  code_dim: 128
+  codebook_size: 128
   codebook_num: 2
   # Overlapping analysis conv, kernel > stride with same parity. Restores the
   # block centre and output length (floor(T/4)) while giving each code 2 frames

@@ -12,6 +12,17 @@ computations for it:
   the right so that every codebook can be trained with the exact same
   next-token objective while still conditioning on the already-decoded
   frames of the other codebooks.
+
+Speaker conditioning is applied on **both** sides of the model.  The encoder
+adds a speaker embedding to the phoneme tokens (so the memory is
+speaker-specific), and — because cross-attention alone is a narrow, easily
+averaged-away channel — the decoder has its own speaker embedding table that
+is added to every decoder position.  Without the decoder-side embedding the
+only path for ``sid`` is "constant vector -> 6 pre-LN encoder layers ->
+cross-attention keys/values", which in practice produces speaker bleed
+(same intonation/prosody for every voice) even when the encoder sees a
+perfectly different ``sid``.  See ``transformer.decoder_speaker_cond`` in
+``configs/transformer.yaml``.
 * ``CodeTransformer`` glues them together and provides ``build_delay_pattern``,
   ``compute_batch_loss`` and ``generate``.  ``2_training.py`` therefore only
   needs to own the optimisation loop and logging.
@@ -144,11 +155,28 @@ class DelayCodebookDecoder(nn.Module):
         dim_feedforward: int,
         dropout: float,
         max_positions: int,
+        n_speakers: int = 0,
+        speaker_cond: bool = True,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
         self.num_codebooks = len(self.vocab_sizes)
         self.hidden_size = hidden_size
+        self.speaker_cond = bool(speaker_cond)
+
+        # Decoder-side speaker conditioning.  The encoder already puts `sid`
+        # into the memory, but relying on cross-attention alone is fragile:
+        # the decoder must recover a constant vector from the keys/values at
+        # every step.  A dedicated embedding added to each decoder position
+        # makes the voice a first-class input of the autoregressive model.
+        if self.speaker_cond:
+            if n_speakers <= 0:
+                raise ValueError(
+                    "speaker_cond=True requires n_speakers > 0, got "
+                    f"{n_speakers}")
+            self.spk_emb = nn.Embedding(n_speakers, hidden_size)
+        else:
+            self.spk_emb = None
 
         self.embeds = nn.ModuleList(
             [nn.Embedding(v + 1, hidden_size) for v in self.vocab_sizes]
@@ -193,10 +221,17 @@ class DelayCodebookDecoder(nn.Module):
         codes: torch.Tensor,  # (B, K, L) long, pad index == vocab size
         memory: torch.Tensor,  # (B, N, H)
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
+        sid: Optional[torch.Tensor] = None,  # (B,) long
     ) -> List[torch.Tensor]:
         B, K, L = codes.shape
         x = self.embed(codes)
         x = self.pos(x)
+        if self.spk_emb is not None:
+            if sid is None:
+                raise ValueError(
+                    "DelayCodebookDecoder was built with speaker_cond=True "
+                    "but no sid was passed")
+            x = x + self.spk_emb(sid.to(codes.device)).unsqueeze(1)
 
         tgt_mask = self._causal_mask(L, x.device, x.dtype)
         mem_pad = None if memory_mask is None else ~memory_mask
@@ -226,6 +261,8 @@ class CodeTransformer(nn.Module):
         max_positions = int(_get_cfg(tcfg, "max_positions", 4096))
         phone_vocab = int(_get_cfg(tcfg, "phone_vocab_size", 1024))
         n_speakers = int(_get_cfg(tcfg, "n_speakers", 512))
+        decoder_speaker_cond = bool(
+            _get_cfg(tcfg, "decoder_speaker_cond", True))
 
         codec = _get_cfg(config, "codec", None)
         pitch_codec = _get_cfg(config, "pitch_codec", None)
@@ -243,6 +280,8 @@ class CodeTransformer(nn.Module):
         # Per-codebook pad/start index (== vocabulary size, cf. MusicGen bos==pad).
         self.pad_ids = list(self.vocab_sizes)
         self.hidden_size = hidden_size
+        self.n_speakers = n_speakers
+        self.decoder_speaker_cond = decoder_speaker_cond
 
         self.encoder = PhonemeEncoder(
             phone_vocab_size=phone_vocab,
@@ -262,6 +301,8 @@ class CodeTransformer(nn.Module):
             dim_feedforward=ffn,
             dropout=dropout,
             max_positions=max_positions,
+            n_speakers=n_speakers,
+            speaker_cond=decoder_speaker_cond,
         )
 
     # ------------------------------------------------------------------ #
@@ -322,11 +363,24 @@ class CodeTransformer(nn.Module):
         memory_mask: Optional[torch.Tensor],
         codes: torch.Tensor,  # (B, K, T)
         code_lengths: Optional[torch.Tensor] = None,
+        sid: Optional[torch.Tensor] = None,  # (B,) long
     ) -> dict:
         """Delayed next-token loss over all codebooks.
 
-        Returns a dict with the total loss plus per-group (spec/pitch)
-        losses for monitoring.
+        Returns a dict with the total loss plus per-group (spec/pitch) losses
+        and diagnostics that make "is it learning?" answerable from
+        TensorBoard alone:
+
+        ``loss``/``spec_loss``/``pitch_loss``
+            mean cross-entropy over all / spec / pitch codebooks.
+        ``acc``/``spec_acc``/``pitch_acc``
+            teacher-forced top-1 accuracy over non-pad target positions.
+        ``code_losses`` (K,), ``code_accs`` (K,), ``code_usage_entropy`` (K,)
+            the same per codebook.  ``code_usage_entropy`` is the entropy of
+            the batch-averaged predicted distribution, normalised to
+            ``[0, 1]`` by ``log(vocab - 1)``; values near 0 mean the head has
+            collapsed onto a handful of codes even if the loss still looks
+            healthy.
         """
         B, K, T = codes.shape
         delayed = self.build_delay_pattern(codes, code_lengths)  # (B, K, L)
@@ -337,25 +391,49 @@ class CodeTransformer(nn.Module):
         inputs = seq[..., :L]
         targets = seq[..., 1:]
 
-        logits = self.decoder(inputs, memory, memory_mask)  # list of (B, L, v+1)
+        # list of (B, L, v+1)
+        logits = self.decoder(inputs, memory, memory_mask, sid=sid)
 
-        losses = []
+        losses, accs, entropies = [], [], []
         for k in range(K):
-            lk = F.cross_entropy(
-                logits[k].reshape(-1, logits[k].size(-1)),
-                targets[:, k].reshape(-1),
-                ignore_index=self.pad_ids[k],
-            )
-            losses.append(lk)
+            # fp32 for both CE and the diagnostics: under bf16-mixed the
+            # logits come back bf16, which is fine for CE but too coarse for
+            # a mean over ~1e5 positions.
+            lg = logits[k].float()
+            flat_logits = lg.reshape(-1, lg.size(-1))
+            flat_targets = targets[:, k].reshape(-1)
+            losses.append(F.cross_entropy(
+                flat_logits, flat_targets, ignore_index=self.pad_ids[k]))
+
+            valid = flat_targets != self.pad_ids[k]  # (B*L,)
+            if valid.any():
+                accs.append(
+                    (flat_logits.argmax(-1)[valid] == flat_targets[valid])
+                    .float().mean())
+                probs = F.softmax(flat_logits[valid], dim=-1).mean(0)
+                ent = -(probs.clamp_min(1e-9).log() * probs).sum()
+                # `probs.size(-1)` includes the pad class, which is never a
+                # target, so the attainable maximum is log(vocab - 1).
+                entropies.append(
+                    ent / math.log(max(probs.size(-1) - 1, 2)))
+            else:  # degenerate batch (everything masked)
+                accs.append(lg.new_zeros(()))
+                entropies.append(lg.new_zeros(()))
 
         losses = torch.stack(losses)  # (K,)
-        spec_loss = losses[: self.spec_codebook_num].mean()
-        pitch_loss = losses[self.spec_codebook_num :].mean()
-        loss = losses.mean()
+        accs = torch.stack(accs)  # (K,)
+        entropies = torch.stack(entropies)  # (K,)
+        n_spec = self.spec_codebook_num
         return {
-            "loss": loss,
-            "spec_loss": spec_loss,
-            "pitch_loss": pitch_loss,
+            "loss": losses.mean(),
+            "spec_loss": losses[:n_spec].mean(),
+            "pitch_loss": losses[n_spec:].mean(),
+            "acc": accs.mean(),
+            "spec_acc": accs[:n_spec].mean(),
+            "pitch_acc": accs[n_spec:].mean(),
+            "code_losses": losses,
+            "code_accs": accs,
+            "code_usage_entropy": entropies,
         }
 
     def forward(
@@ -370,7 +448,8 @@ class CodeTransformer(nn.Module):
         """Training forward pass: phonemes + speaker -> spec/pitch code loss."""
         memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
-        return self.code_loss(memory, memory_mask, codes, code_lengths)
+        return self.code_loss(
+            memory, memory_mask, codes, code_lengths, sid=sid)
 
     def compute_batch_loss(self, batch: dict) -> dict:
         """Convenience wrapper used by the Lightning module.
@@ -418,7 +497,7 @@ class CodeTransformer(nn.Module):
             seq = self._pad_column(B, device)
             cols = []
             for i in range(L):
-                logits = self.decoder(seq, memory, memory_mask)
+                logits = self.decoder(seq, memory, memory_mask, sid=sid)
                 col = []
                 for k in range(K):
                     lg = logits[k][:, -1] / max(temperature, 1e-6)
@@ -454,10 +533,11 @@ class CodeTransformer(nn.Module):
 
     def describe(self) -> str:
         n = self.num_parameters()
+        spk = ("encoder+decoder" if self.decoder_speaker_cond else "encoder only")
         return (
             f"CodeTransformer(hidden={self.hidden_size}, codebooks="
             f"{self.spec_codebook_num} spec + {self.pitch_codebook_num} pitch, "
-            f"params={n / 1e6:.2f}M)"
+            f"speaker={spk}, params={n / 1e6:.2f}M)"
         )
 
 
@@ -500,7 +580,8 @@ if __name__ == "__main__":
     code_lengths = torch.tensor([T, T - 7])
 
     out = model(phone_ids, phone_lengths, sid, spec_codes, pitch_codes, code_lengths)
-    print({k: float(v) for k, v in out.items()})
+    print({k: (float(v.detach()) if v.numel() == 1 else v.detach().tolist())
+           for k, v in out.items()})
 
     gen = model.generate(phone_ids[:1], phone_lengths[:1], sid[:1], max_frames=16)
     print("generated", tuple(gen.shape))

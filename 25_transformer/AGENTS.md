@@ -185,7 +185,20 @@ Two config files exist with **non-overlapping responsibilities**:
 - **Logging:** `logs/` holds TensorBoard runs (`train.log_interval` controls
   step logging). Validation audio for stage 2 is optionally logged by loading a
   frozen stage-1 Generator (`train.generator_checkpoint`); it is non-fatal if
-  the checkpoint is missing.
+  the checkpoint is missing, and every visual/audio log is skipped without a
+  stage-1 checkpoint or TensorBoard logger.
+- **Stage-2 diagnostics.** `2_training.py` logs, per codebook, `{train,val}_`
+  `loss/`, `acc/`, `usage_entropy/` (`spec0..7`, `pitch8..9`), plus
+  `{train,val}_{acc,spec_acc,pitch_acc}`, `train_grad_norm` and `lr`. Every
+  `train.sample_interval` epochs (and at train start) it also samples
+  `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
+  `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps), `audio/`,
+  `mel/`, `pitch/`, and — when `train.speaker_probe > 0` and the val set has
+  ≥2 speakers — `probe/*` (same phonemes re-generated per speaker, with
+  `probe/{spec,pitch}_code_change_frac` and `probe/f0_delta_hz` as numeric
+  "is the speaker conditioning doing anything" signals). Pitch curves come
+  from `Generator.infer_from_codes(..., return_pitch=True)`, which returns f0
+  in Hz at the audio frame rate (`sampling_rate / hop_length`).
 
 ---
 
@@ -239,6 +252,14 @@ Two config files exist with **non-overlapping responsibilities**:
      in `freeze_non_pitch`'s trainable set) before relying on predicted voicing.
    - No voicing mask needs to be stored on disk for stage 2: the information
      lives in the pitch codes and is decoded by the head.
+10. **Stage-2 `decoder_speaker_cond` changes the parameter set.** The decoder
+    now has its own speaker embedding (`transformer.decoder_speaker_cond:
+    true`, default). Checkpoints trained without it (`transformer_v0.1`) do
+    **not** load strictly: set `decoder_speaker_cond: false` *and* match the
+    layer counts that checkpoint used (v0.1 was `encoder_layers: 4`,
+    `decoder_layers: 10`) when resuming/transferring from it.
+    `load_state_dict_mismatch` only reports shape/key mismatches, so silent
+    partial loads are easy to miss — always check the reported keys.
 
 ---
 

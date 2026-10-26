@@ -437,7 +437,8 @@ class Generator(nn.Module):
         return spec_codes, pitch_codes
 
     def infer_from_codes(self, spec_codes, pitch_codes, sid,
-                         out_len=None, voiced=None, uv_threshold=None):
+                         out_len=None, voiced=None, uv_threshold=None,
+                         return_pitch=False):
         """Synthesize audio directly from integer spec + pitch codes.
 
         Args:
@@ -452,8 +453,12 @@ class Generator(nn.Module):
                 override the prediction.
             uv_threshold: optional override for the voicing decision
                 threshold applied to ``sigmoid(uv_logits)``.
+            return_pitch: also return the f0 contour (Hz) decoded from
+                ``pitch_codes``, e.g. for stage-2 validation plots.
         Returns:
-            audio: (B, 1, T_audio) waveform.
+            audio: (B, 1, T_audio) waveform, or ``(audio, f0)`` when
+            ``return_pitch`` is True. ``f0`` is ``(B, T_audio // hop_length)``
+            in Hz at the audio frame rate, 0 == unvoiced.
         """
         g = self.spk_emb(sid)
         spec_idx = self._normalize_code_indices(
@@ -514,6 +519,8 @@ class Generator(nn.Module):
             f0_norm, min=0.0) * PITCH_LOG_SCALE) * v)
 
         audio = self.dec(g, yq, f0)
+        if return_pitch:
+            return audio, f0
         return audio
 
     def infer_pitch(self, f0, sid, predict_voicing=False):
