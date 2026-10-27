@@ -158,6 +158,8 @@ Two config files exist with **non-overlapping responsibilities**:
 `exp_name` drives checkpoint and TensorBoard paths:
 `checkpoints/{exp_name}/` and `logs/{exp_name}/`.
 
+Use conda env raraai25 for environment with dependencies including GPU pytorch.
+
 ### Codebook loss weighting (stage 2)
 
 The per-codebook cross-entropies are **not** averaged uniformly. `CodeTransformer`
@@ -342,6 +344,15 @@ Notes:
     `decoder_layers: 10`) when resuming/transferring from it.
     `load_state_dict_mismatch` only reports shape/key mismatches, so silent
     partial loads are easy to miss — always check the reported keys.
+11. **Preprocessed tensors are named by *basename* only** (`data/base/<basename
+    of the source>.wave`, `data/base2/<basename>.spec_codes`). Two source files
+    with the same basename in different folders therefore overwrite each other
+    and both filelist lines point at the same tensor. `filelists_1/base_linux.txt`
+    has 188 such collisions (502 extra lines) — 474 duplicate lines in
+    `data/base/train.txt` and 27 items shared with `val.txt` — while
+    `filelists_2/` currently has none. Check with
+    `python dataset_duration.py data/base/train.txt data/base/val.txt`, which
+    reports duplicate lines and train/val overlap.
 
 ---
 
@@ -356,6 +367,11 @@ python 1_training.py --config configs/base.yaml            # auto-resumes last.c
 python 1_training.py --config configs/base.yaml --resume_from checkpoints/base_v0.4.2/last.ckpt
 python 1_training.py --config configs/base.yaml --transfer_from some.ckpt   # partial weight transfer
 
+# Dataset duration / duplicate / train-val-overlap report
+# (auto-detects stage-1, stage-2 and raw-audio filelists; --json for scripting)
+python dataset_duration.py data/base2/train_stage2.txt data/base2/val_stage2.txt \
+    --per-speaker --hist
+
 # Speaker map bootstrap
 python speaker_map.py --filelist filelists_2/25_stage2_base1.txt \
     --stage1-filelist filelists_1/base_linux.txt --out speakers.json
@@ -366,6 +382,12 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --config configs/base.yaml --speaker_map speakers.json
 python 2_training.py --config configs/transformer.yaml
 
+# Stage-1 codec round-trip on your own audio (spec/f0 -> codes -> audio)
+python test_stage1_codes.py test.wav \
+    --checkpoint checkpoints/base_v0.4.6/last.ckpt --sid 0
+# ...add --roundtrip for code -> audio -> code match fractions and
+# --save_tensors to dump spec/pitch codes + both f0 contours.
+
 # Ad-hoc smoke tests (many modules have an `if __name__ == "__main__"` block)
 python modeling/transformer.py    # constructs a CodeTransformer, runs fwd + generate
 python modeling/generator.py      # constructs a Generator, runs infer
@@ -373,3 +395,7 @@ python modeling/generator.py      # constructs a Generator, runs infer
 
 There is no test suite in this repo; validation is done by running the ad-hoc
 `__main__` blocks in `modeling/*.py` and by training on a small filelist.
+`test_stage1_codes.py` is the exception worth knowing about: it exercises the
+exact encode (`2_preprocess.py`) / decode (stage-2 validation) path of a stage-1
+checkpoint on arbitrary audio and prints mel/f0/voicing metrics plus per-codebook
+usage.
