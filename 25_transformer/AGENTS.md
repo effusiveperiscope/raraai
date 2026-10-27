@@ -158,6 +158,73 @@ Two config files exist with **non-overlapping responsibilities**:
 `exp_name` drives checkpoint and TensorBoard paths:
 `checkpoints/{exp_name}/` and `logs/{exp_name}/`.
 
+### Codebook loss weighting (stage 2)
+
+The per-codebook cross-entropies are **not** averaged uniformly. `CodeTransformer`
+combines them as
+
+```
+loss = sum_k w_k * CE_k / sum_k w_k        w = CodeTransformer.loss_weights(epoch)
+```
+
+controlled by two optional keys in `configs/transformer.yaml`:
+
+- `transformer.codebook_weights` — list of `codec.codebook_num +
+  pitch_codec.codebook_num` floats, order `spec0..spec7, pitch8, pitch9`. Absent
+  (or all `1.0`) reproduces the historical `losses.mean()`. Rationale for the
+  shipped values: `spec0` is the coarse spectral envelope (errors there cost
+  intelligibility and later books can't repair them), books 7 is near-inaudible
+  residual detail, and the pitch books have a 2x larger vocabulary (`log 128`
+  vs `log 64`) so their raw CE is much flatter.
+- `transformer.codebook_weight_warmup_epochs` — soft curriculum: weights are
+  linearly interpolated from uniform at epoch 0 to the list above at epoch
+  `>= N`. `0` applies them immediately.
+
+Notes:
+- Only *relative* weights matter (the sum renormalises), and they only change
+  the loss — **no re-preprocessing** is needed when tuning them.
+- `code_loss`/`compute_batch_loss` take an `epoch` argument; `2_training.py`
+  passes `self.current_epoch` for train and `None` (full target weights) for
+  val so `val_loss` stays a fixed yardstick across the warmup.
+- The weights are plain attributes, not buffers, so `state_dict` is unchanged
+  and existing stage-2 checkpoints load with no key/shape drift.
+- Logged per epoch as `train_loss_weight/{spec0..pitch9}`.
+
+### Gradient clipping (stage 2)
+
+`TrainModule.on_before_optimizer_step` clips gradients before every optimizer
+step, configured by two optional `train` keys in `configs/transformer.yaml`:
+
+- `grad_clip_val` — max value; `0` (or absent) disables clipping. The
+  pre-clip norm is logged either way.
+- `grad_clip_algorithm` — `"norm"` (default, `clip_grad_norm_`: clip the total
+  norm) or `"value"` (`clip_grad_value_`: clip each element). Only validated
+  when `grad_clip_val > 0`; anything else raises `ValueError`.
+
+Notes:
+
+- Clipping is done in the hook, **not** via `pl.Trainer(gradient_clip_val=...)`
+  — passing it to the Trainer as well would clip twice (doubly attenuating
+  spikes). Since the hook runs after AMP unscaling, it sees real gradients.
+- Logged: `train_grad_norm` (pre-clip — the spike detector, same tag/meaning
+  as before clipping existed), `train_grad_clip_scale` (factor applied,
+  `1.0` = no clipping) at `train.log_interval`, and per epoch
+  `train_grad_norm_max` + `train_grad_clip_frac` (fraction of steps that were
+  clipped). The two epoch scalars are computed on *every* step, so they expose
+  spikes that fall between two logged steps; they only exist when clipping is
+  enabled.
+- All of it is tensor math (no `float()` on GPU tensors and no `if tensor > x`
+  in the hot path), so the hook adds no per-step device sync.
+- Non-finite gradients are *not* repaired: Lightning's default
+  `error_if_nonfinite=False` is kept, so an `inf` norm gives a clip factor of
+  0 (harmless no-op step) while `nan` grads stay `nan`. A `nan`
+  `train_grad_norm` means the run is already poisoned — restart from a
+  checkpoint.
+- Reference magnitude with `batch_size: 8` / `max_frames: 256`: the total grad
+  norm is ~0.7-1.0 at init, so the shipped `grad_clip_val: 1.0` only bites on
+  spikes. Clipping changes no checkpoint shape, so it needs neither
+  re-preprocessing nor a fresh run — a spike can be fixed by resuming.
+
 ---
 
 ## 5. Conventions
@@ -188,11 +255,18 @@ Two config files exist with **non-overlapping responsibilities**:
   the checkpoint is missing, and every visual/audio log is skipped without a
   stage-1 checkpoint or TensorBoard logger.
 - **Stage-2 diagnostics.** `2_training.py` logs, per codebook, `{train,val}_`
-  `loss/`, `acc/`, `usage_entropy/` (`spec0..7`, `pitch8..9`), plus
-  `{train,val}_{acc,spec_acc,pitch_acc}`, `train_grad_norm` and `lr`. Every
+  `loss/`, `acc/`, `usage_entropy/` (`spec0..7`, `pitch8..9`) — these per-book
+  curves are always **unweighted** (raw diagnostics), whereas `{train,val}_loss`
+  is the weighted combination described in §4, and
+  `train_loss_weight/{spec0..pitch9}` shows the effective weights per epoch.
+  It also logs
+  `{train,val}_{acc,spec_acc,pitch_acc}`, `train_grad_norm` /
+  `train_grad_clip_scale` (plus per-epoch `train_grad_norm_max` /
+  `train_grad_clip_frac` when clipping is on — see §4) and `lr`. Every
   `train.sample_interval` epochs (and at train start) it also samples
   `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
-  `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps), `audio/`,
+  `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the
+  free-running agreement scalars `sample/{spec,pitch}_code_match_frac_{j}`,
   `mel/`, `pitch/`, and — when `train.speaker_probe > 0` and the val set has
   ≥2 speakers — `probe/*` (same phonemes re-generated per speaker, with
   `probe/{spec,pitch}_code_change_frac` and `probe/f0_delta_hz` as numeric

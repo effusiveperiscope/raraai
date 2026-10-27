@@ -179,6 +179,30 @@ class TrainModule(pl.LightningModule):
         self.config = config
         self.net_g = None
 
+        # Gradient clipping (applied in on_before_optimizer_step, i.e. before
+        # every optimizer step). 0 disables clipping; the norm is still
+        # logged. See configs/transformer.yaml for the knobs.
+        self.grad_clip_val = float(
+            config.train.get("grad_clip_val", 0.0) or 0.0)
+        self.grad_clip_algorithm = str(
+            config.train.get("grad_clip_algorithm", "norm") or "norm")
+        if self.grad_clip_val < 0:
+            raise ValueError(
+                f"train.grad_clip_val must be >= 0, got {self.grad_clip_val}")
+        if self.grad_clip_val > 0 and self.grad_clip_algorithm not in ("norm",
+                                                                      "value"):
+            raise ValueError(
+                "train.grad_clip_algorithm must be 'norm' or 'value', got "
+                f"{self.grad_clip_algorithm!r}")
+        if self.grad_clip_val > 0:
+            print(f"Gradient clipping: {self.grad_clip_algorithm} "
+                  f"max={self.grad_clip_val}")
+        # Per-epoch spike statistics (only meaningful with clipping enabled,
+        # where the norm is computed on every step anyway).
+        self._grad_norm_max = None
+        self._grad_clipped_steps = 0.0
+        self._grad_steps = 0.0
+
     def setup(self, stage=None):
         hp = self.config
         val_filelist = hp.train.val_filelist
@@ -225,8 +249,24 @@ class TrainModule(pl.LightningModule):
         self._sample_and_log()
 
     def on_train_epoch_end(self):
+        self._log_grad_epoch_stats()
         self._sample_and_log()
         return super().on_train_epoch_end()
+
+    def _log_grad_epoch_stats(self):
+        """Log the worst gradient norm seen this epoch and how often clipping hit.
+
+        ``train_grad_norm`` is only sampled every ``log_interval`` steps, so a
+        single spiking step can slip between two log points; these two scalars
+        are computed on *every* step (when clipping is enabled) and make such
+        spikes — and whether ``grad_clip_val`` is doing anything — visible.
+        """
+        if (self.logger is None or self.grad_clip_val <= 0
+                or not self._grad_steps):
+            return
+        self._add_scalar("train_grad_norm_max", self._grad_norm_max)
+        frac = self._grad_clipped_steps / self._grad_steps  # tensor once clipped
+        self._add_scalar("train_grad_clip_frac", torch.as_tensor(frac))
 
     # ------------------------------------------------------------------ #
     # Optional sampling / audio + visual logging
@@ -426,10 +466,38 @@ class TrainModule(pl.LightningModule):
     # ------------------------------------------------------------------ #
     # Train / val
     # ------------------------------------------------------------------ #
-    def _forward_loss(self, batch):
+    def _forward_loss(self, batch, epoch=None):
+        """Batch -> loss dict, with ``epoch`` selecting the codebook weights.
+
+        Train passes ``self.current_epoch`` so the curriculum applies.  Val
+        passes ``None`` (the full configured weights) on purpose: val has to
+        stay a fixed yardstick, otherwise ``val_loss`` silently changes
+        definition midway through the warmup and early stopping /
+        checkpointing compare incomparable numbers.
+        """
         batch = {k: (v.to(self.device) if torch.is_tensor(v) else v)
                  for k, v in batch.items()}
-        return self.net.compute_batch_loss(batch)
+        return self.net.compute_batch_loss(batch, epoch=epoch)
+
+    def on_train_epoch_start(self):
+        """Log the effective per-codebook loss weights once per epoch.
+
+        Makes ``transformer.codebook_weight_warmup_epochs`` visible in
+        TensorBoard: the curves start uniform and reach the configured
+        hierarchy at the end of the warmup.  Also resets the per-epoch
+        gradient-spike counters.
+        """
+        self._grad_norm_max = None
+        self._grad_clipped_steps = 0.0
+        self._grad_steps = 0.0
+        if self.logger is None:
+            return
+        n_spec = self.net.spec_codebook_num
+        weights = self.net.loss_weights(self.current_epoch)
+        for i, w in enumerate(weights.detach().float().cpu().tolist()):
+            group = "spec" if i < n_spec else "pitch"
+            self._add_scalar(f"train_loss_weight/{group}{i}",
+                             torch.tensor(float(w)))
 
     def _log_step_metrics(self, prefix, out, on_step):
         """Log the loss dict produced by ``CodeTransformer.code_loss``.
@@ -457,32 +525,91 @@ class TrainModule(pl.LightningModule):
                 group = "spec" if i < n_spec else "pitch"
                 self.log(f"{prefix}_{tag}/{group}{i}", float(v), **kw)
 
-    def on_before_optimizer_step(self, optimizer):
-        """Log global grad norm and LR at the configured log interval."""
-        every = max(int(self.config.train.get("log_interval", 50) or 50), 1)
-        if self.global_step % every != 0:
-            return
-        total = None
-        for p in self.net.parameters():
-            if p.grad is None:
-                continue
+    @staticmethod
+    def _grad_total_norm(params):
+        """L2 norm of all grads as an on-device tensor (``None`` if no grads).
+
+        Mirrors ``torch.nn.utils.clip_grad_norm_``'s reduction (upcast to fp32)
+        without clipping, and without forcing a GPU->CPU sync.
+        """
+        sq_total = None
+        for p in params:
             sq = p.grad.detach().float().pow(2).sum()
-            total = sq if total is None else total + sq
-        if total is not None:
-            self.log("train_grad_norm", total.sqrt(), on_step=True,
+            sq_total = sq if sq_total is None else sq_total + sq
+        return None if sq_total is None else sq_total.sqrt()
+
+    def on_before_optimizer_step(self, optimizer):
+        """Clip gradients (if configured), then log norms and LR.
+
+        Clipping happens here — before the optimizer step — so it protects the
+        update itself.  All values are kept as tensors until ``self.log`` so
+        the hook costs no GPU->CPU sync, and only tensors are compared, so the
+        per-step statistic accumulation stays on-device.
+
+        Logged: ``train_grad_norm`` (the **pre-clip** norm, i.e. the spike
+        detector — unchanged name/meaning from before clipping existed),
+        ``train_grad_clip_scale`` (the factor actually applied to the grads,
+        ``1.0`` when clipping did not trigger) and ``lr``.  Per epoch,
+        ``train_grad_norm_max`` / ``train_grad_clip_frac`` catch spikes that
+        fall between ``log_interval`` steps.
+
+        Note: clipping cannot repair non-finite gradients. Lightning's
+        default (``error_if_nonfinite=False``) is kept: an ``inf`` norm yields
+        a clip factor of 0, i.e. a harmless no-op step, while ``nan`` grads
+        stay ``nan`` — if ``train_grad_norm`` goes ``nan`` the run is already
+        poisoned and needs a restart from a checkpoint.
+        """
+        clip_val = self.grad_clip_val
+        every = max(int(self.config.train.get("log_interval", 50) or 50), 1)
+        log_now = self.global_step % every == 0
+        params = [p for p in self.net.parameters() if p.grad is not None]
+
+        norm = None
+        scale = None
+        if clip_val > 0 and self.grad_clip_algorithm == "norm":
+            # Returns the *pre-clip* total norm, so no second reduction is
+            # needed to log the spike magnitude.
+            norm = torch.nn.utils.clip_grad_norm_(params, clip_val)
+            if norm is not None:
+                scale = torch.clamp(clip_val / (norm + 1e-6), max=1.0)
+        elif clip_val > 0:  # element-wise ("value") clipping
+            norm = self._grad_total_norm(params)
+            torch.nn.utils.clip_grad_value_(params, clip_val)
+            if norm is not None:
+                # No single scale is applied; report the ratio against the
+                # equivalent total-norm bound so the number stays comparable.
+                n_elements = sum(p.numel() for p in params)
+                scale = torch.clamp(clip_val * (n_elements ** 0.5)
+                                    / (norm + 1e-6), max=1.0)
+        elif log_now:
+            norm = self._grad_total_norm(params)
+
+        if norm is not None and scale is not None:
+            self._grad_norm_max = (norm if self._grad_norm_max is None
+                                   else torch.maximum(self._grad_norm_max, norm))
+            self._grad_clipped_steps += (scale < 1.0).float()
+            self._grad_steps += 1
+
+        if not log_now:
+            return
+        if norm is not None:
+            self.log("train_grad_norm", norm, on_step=True,
+                     on_epoch=False, logger=True)
+        if scale is not None:
+            self.log("train_grad_clip_scale", scale, on_step=True,
                      on_epoch=False, logger=True)
         self.log("lr", float(optimizer.param_groups[0]["lr"]), on_step=True,
                  on_epoch=False, logger=True)
 
     def training_step(self, batch, batch_idx):
         self.net.train()
-        out = self._forward_loss(batch)
+        out = self._forward_loss(batch, epoch=self.current_epoch)
         self._log_step_metrics("train", out, on_step=True)
         return out["loss"]
 
     def validation_step(self, batch, batch_idx):
         self.net.eval()
-        out = self._forward_loss(batch)
+        out = self._forward_loss(batch)  # fixed (final) codebook weights
         self._log_step_metrics("val", out, on_step=False)
         return out["loss"]
 

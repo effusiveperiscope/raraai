@@ -283,6 +283,14 @@ class CodeTransformer(nn.Module):
         self.n_speakers = n_speakers
         self.decoder_speaker_cond = decoder_speaker_cond
 
+        # Coarse-to-fine loss weighting (see ``loss_weights``).  Stored as
+        # plain attributes rather than buffers so they stay out of
+        # ``state_dict`` and existing checkpoints keep loading unchanged.
+        self.codebook_weights = self._parse_codebook_weights(
+            _get_cfg(tcfg, "codebook_weights", None))
+        self.codebook_weight_warmup_epochs = float(
+            _get_cfg(tcfg, "codebook_weight_warmup_epochs", 0) or 0)
+
         self.encoder = PhonemeEncoder(
             phone_vocab_size=phone_vocab,
             n_speakers=n_speakers,
@@ -311,6 +319,50 @@ class CodeTransformer(nn.Module):
     @classmethod
     def from_config(cls, config) -> "CodeTransformer":
         return cls(config)
+
+    def _parse_codebook_weights(self, raw) -> List[float]:
+        """Validate ``transformer.codebook_weights`` into a ``(K,)`` list.
+
+        ``None`` (key absent) means uniform weighting, i.e. the historical
+        ``losses.mean()`` behaviour.
+        """
+        if raw is None:
+            return [1.0] * self.codebook_num
+        weights = [float(w) for w in raw]
+        if len(weights) != self.codebook_num:
+            raise ValueError(
+                f"transformer.codebook_weights has {len(weights)} entries but "
+                f"there are {self.codebook_num} codebooks "
+                f"({self.spec_codebook_num} spec + {self.pitch_codebook_num} "
+                f"pitch)")
+        if any(w < 0 for w in weights):
+            raise ValueError(
+                f"transformer.codebook_weights must be >= 0, got {weights}")
+        if sum(weights) <= 0:
+            raise ValueError(
+                "transformer.codebook_weights must not sum to 0")
+        return weights
+
+    def loss_weights(self, epoch: Optional[int] = None) -> torch.Tensor:
+        """Effective ``(K,)`` loss weights for training epoch ``epoch``.
+
+        ``loss = sum_k w_k * CE_k / sum_k w_k``, so only the *relative* weights
+        matter.  With ``transformer.codebook_weight_warmup_epochs = N > 0`` the
+        weights are linearly interpolated from uniform at epoch 0 to the
+        configured hierarchy at epoch ``N`` — a soft curriculum: the coarse
+        codebooks are not swamped by the fine-detail ones before the coarse
+        structure exists.  ``epoch=None`` or ``N <= 0`` returns the configured
+        weights unchanged.
+
+        The tensor is float32 on CPU; ``code_loss`` moves it to the loss
+        device/dtype itself.
+        """
+        target = torch.tensor(self.codebook_weights, dtype=torch.float32)
+        warm = self.codebook_weight_warmup_epochs
+        if epoch is None or warm <= 0:
+            return target
+        progress = min(max(float(epoch) / warm, 0.0), 1.0)
+        return (1.0 - progress) + progress * target
 
     def _pad_column(self, batch_size: int, device, dtype=torch.long) -> torch.Tensor:
         """(B, K, 1) column of per-codebook pad/start ids."""
@@ -364,23 +416,34 @@ class CodeTransformer(nn.Module):
         codes: torch.Tensor,  # (B, K, T)
         code_lengths: Optional[torch.Tensor] = None,
         sid: Optional[torch.Tensor] = None,  # (B,) long
+        epoch: Optional[int] = None,
     ) -> dict:
         """Delayed next-token loss over all codebooks.
+
+        Per-codebook cross-entropies are combined as
+        ``loss = sum_k w_k * CE_k / sum_k w_k`` with ``w = loss_weights(epoch)``
+        (uniform unless ``transformer.codebook_weights`` is set), so the
+        coarse codebooks can be prioritised over the fine residual ones.
 
         Returns a dict with the total loss plus per-group (spec/pitch) losses
         and diagnostics that make "is it learning?" answerable from
         TensorBoard alone:
 
         ``loss``/``spec_loss``/``pitch_loss``
-            mean cross-entropy over all / spec / pitch codebooks.
+            weighted mean cross-entropy over all / spec / pitch codebooks
+            (weights renormalised inside the group, so the two group losses
+            still average back to ``loss``).
         ``acc``/``spec_acc``/``pitch_acc``
             teacher-forced top-1 accuracy over non-pad target positions.
         ``code_losses`` (K,), ``code_accs`` (K,), ``code_usage_entropy`` (K,)
-            the same per codebook.  ``code_usage_entropy`` is the entropy of
+            the same per codebook, always *unweighted* so the raw per-book
+            behaviour stays visible.  ``code_usage_entropy`` is the entropy of
             the batch-averaged predicted distribution, normalised to
             ``[0, 1]`` by ``log(vocab - 1)``; values near 0 mean the head has
             collapsed onto a handful of codes even if the loss still looks
             healthy.
+        ``loss_weights`` (K,)
+            the effective weights used for this batch, for logging.
         """
         B, K, T = codes.shape
         delayed = self.build_delay_pattern(codes, code_lengths)  # (B, K, L)
@@ -423,18 +486,38 @@ class CodeTransformer(nn.Module):
         losses = torch.stack(losses)  # (K,)
         accs = torch.stack(accs)  # (K,)
         entropies = torch.stack(entropies)  # (K,)
+
+        # Coarse-to-fine combination.  ``code_losses`` above stays unweighted
+        # (raw diagnostics); only the optimised total is weighted.
+        weights = self.loss_weights(epoch).to(device=losses.device,
+                                             dtype=losses.dtype)
         n_spec = self.spec_codebook_num
         return {
-            "loss": losses.mean(),
-            "spec_loss": losses[:n_spec].mean(),
-            "pitch_loss": losses[n_spec:].mean(),
+            "loss": self._weighted_mean(losses, weights),
+            "spec_loss": self._weighted_mean(losses[:n_spec],
+                                             weights[:n_spec]),
+            "pitch_loss": self._weighted_mean(losses[n_spec:],
+                                              weights[n_spec:]),
             "acc": accs.mean(),
             "spec_acc": accs[:n_spec].mean(),
             "pitch_acc": accs[n_spec:].mean(),
             "code_losses": losses,
             "code_accs": accs,
             "code_usage_entropy": entropies,
+            "loss_weights": weights,
         }
+
+    @staticmethod
+    def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """``sum(w * v) / sum(w)``.
+
+        ``numel()`` checks are pure Python so this adds no GPU sync per step;
+        the ``clamp_min`` guards a degenerate all-zero weight group (schedule
+        intentionally muting a group), where ``sum(w)`` would be 0.
+        """
+        if values.numel() == 0:
+            return values.new_zeros(())
+        return (values * weights).sum() / weights.sum().clamp_min(1e-8)
 
     def forward(
         self,
@@ -444,18 +527,25 @@ class CodeTransformer(nn.Module):
         spec_codes: torch.Tensor,
         pitch_codes: torch.Tensor,
         code_lengths: Optional[torch.Tensor] = None,
+        epoch: Optional[int] = None,
     ) -> dict:
-        """Training forward pass: phonemes + speaker -> spec/pitch code loss."""
+        """Training forward pass: phonemes + speaker -> spec/pitch code loss.
+
+        ``epoch`` only selects the codebook weighting schedule (see
+        :meth:`loss_weights`); it does not affect the model's computation.
+        """
         memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
         return self.code_loss(
-            memory, memory_mask, codes, code_lengths, sid=sid)
+            memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch)
 
-    def compute_batch_loss(self, batch: dict) -> dict:
+    def compute_batch_loss(self, batch: dict,
+                           epoch: Optional[int] = None) -> dict:
         """Convenience wrapper used by the Lightning module.
 
         Expects ``phone_ids``, ``phone_lengths``, ``sid``, ``spec_codes``,
-        ``pitch_codes`` and an optional ``code_lengths`` entry.
+        ``pitch_codes`` and an optional ``code_lengths`` entry.  ``epoch``
+        drives the codebook weight curriculum.
         """
         return self.forward(
             phone_ids=batch["phone_ids"],
@@ -464,6 +554,7 @@ class CodeTransformer(nn.Module):
             spec_codes=batch["spec_codes"],
             pitch_codes=batch["pitch_codes"],
             code_lengths=batch.get("code_lengths"),
+            epoch=epoch,
         )
 
     # ------------------------------------------------------------------ #

@@ -8,8 +8,9 @@
 #   data/base/train_stage2.txt
 #   data/base/val_stage2.txt
 
-# v0.2 - improved pitch encoder,
-exp_name: transformer_v0.2
+# v0.2 - improved pitch encoder, expanded params
+# v0.2.1 - codebook weighting, grad clipping
+exp_name: transformer_v0.2.1
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -35,6 +36,25 @@ transformer:
   # embedding (e.g. transformer_v0.1, which also used encoder_layers=4 /
   # decoder_layers=10 -- match those too or the load stays partial).
   decoder_speaker_cond: true
+
+  # Coarse-to-fine loss weighting over the K = 8 spec + 2 pitch codebooks
+  # (order: spec0..spec7, pitch8, pitch9).  The optimised loss is
+  #   sum_k w_k * CE_k / sum_k w_k
+  # so only the *relative* weights matter; per-codebook curves
+  # (train_loss/spec0 ...) stay unweighted for diagnostics.
+  # Rationale: spec0 carries the coarse spectral envelope, where an error
+  # costs intelligibility and can never be repaired by later codebooks; the
+  # higher spec books are ever finer residual detail (book 7 is nearly
+  # inaudible), and the pitch books have a 2x larger vocabulary so a much
+  # flatter cross-entropy (log 128 vs log 64).
+  # Set to [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] (or delete) for the old uniform mean.
+  codebook_weights: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.4, 0.7, 0.5]
+  # Soft curriculum: linearly interpolate the weights from uniform (epoch 0)
+  # to the list above (epoch >= N), so early training is not dominated by the
+  # fine books before the coarse structure exists.  0 = apply immediately.
+  # Validation always uses the full (final) weights, so val curves stay
+  # comparable across the warmup.
+  codebook_weight_warmup_epochs: 5
 
 # The codebook layout below must match the stage-1 Generator that produced
 # the codes (see configs/base.yaml).
@@ -95,6 +115,20 @@ train:
   - 0.98
   eps: 1e-8
   weight_decay: 0.01
+  # Gradient clipping, applied by 2_training.py's on_before_optimizer_step
+  # (before every optimizer step, so the update itself is protected).
+  #   norm  -> torch.nn.utils.clip_grad_norm_  (clip the *total* grad norm,
+  #            the usual choice for transformers)
+  #   value -> torch.nn.utils.clip_grad_value_ (clip each element separately)
+  # 0 disables clipping; the pre-clip norm is still logged either way.
+  # Reference: at init with batch_size 8 / max_frames 256 the total grad norm
+  # sits around 0.7-1.0, so 1.0 only bites on genuine spikes. Raising it (e.g.
+  # 5.0) makes clipping rarer; watch train_grad_clip_frac in TensorBoard.
+  # Do NOT also pass gradient_clip_val to pl.Trainer -- that would clip twice.
+  # Only this loss/clip pair is affected, so changing it needs no
+  # re-preprocessing and old checkpoints resume normally.
+  grad_clip_val: 1.0
+  grad_clip_algorithm: norm
   cosine_anneal_end: 1000000
   max_steps: 1000000
   max_epochs: -1
