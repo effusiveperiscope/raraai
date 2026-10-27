@@ -11,6 +11,7 @@
 # v0.2 - improved pitch encoder, expanded params
 # v0.2.1 - codebook weighting, grad clipping (numerically dead: see precision)
 # v0.3 - fp32/TF32 instead of bf16 autocast (see train.precision)
+# v0.4 - genshin dataset, stronger regularization
 exp_name: transformer_v0.3
 tensorboard_version: 0
 
@@ -21,7 +22,7 @@ transformer:
   encoder_layers: 6
   decoder_layers: 12
   dim_feedforward: 2048
-  dropout: 0.1
+  dropout: 0.15
   max_positions: 4096
   phone_vocab_size: 1024   # g2pen_tokenizer_clean vocab
   phone_pad_id: 0
@@ -115,7 +116,7 @@ train:
   - 0.9
   - 0.98
   eps: 1e-8
-  weight_decay: 0.01
+  weight_decay: 0.03
   # Numerical precision for training/resume.
   #   bf16-mixed (historical default) -> DO NOT USE for this model. Autocast
   #       casts the LayerNorm / softmax elementwise maths to bf16, and the
