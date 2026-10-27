@@ -4,3 +4,4 @@ filelists
 data
 logs
 test_out
+*.wav
