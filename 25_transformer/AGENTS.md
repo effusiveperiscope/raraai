@@ -244,9 +244,17 @@ Notes:
   nest state under `state_dict`, and module params may be prefixed (`net_g.`,
   `net_d.`, `net_dp.`, `net.`). Always load full checkpoints with
   `weights_only=False`.
-- **Devices:** default to `cuda:0` when available, else `cpu`. Stage-1 and
-  stage-2 training run with PyTorch Lightning `accelerator='gpu'`,
-  `precision='bf16-mixed'`.
+- **Devices:** default to `cuda:0` when available, else `cpu`. Both stages train
+  with PyTorch Lightning `accelerator='gpu'`. **Stage 2 must run in
+  `precision: 32-true` with `torch.set_float32_matmul_precision("high")`**
+  (TF32 GEMMs; set in `2_training.py`'s `__main__` — keep the legacy setter,
+  Lightning 2.6 still calls the legacy getter). `bf16-mixed` autocast silently
+  corrupts the decoder `norm2.weight/bias` gradients by ~1e4x even at a healthy
+  checkpoint, Adam amplifies that noise into a random walk of the LayerNorm
+  gains, and the run explodes within a few thousand steps (this killed
+  `transformer_v0.2` at step 18.8k and `v0.2.1` immediately). `precision` is
+  read from `config.train.precision`, so don't delete the key. Stage 1 still
+  uses `bf16-mixed`.
 - **`mp.set_start_method('spawn', force=True)`** appears at the top of both
   training `__main__` blocks and is required on Linux; don't remove it.
 - **Logging:** `logs/` holds TensorBoard runs (`train.log_interval` controls

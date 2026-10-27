@@ -741,6 +741,14 @@ if __name__ == "__main__":
     import torch.multiprocessing as mp
 
     mp.set_start_method("spawn", force=True)  # needed on Linux
+    # TF32 tensor cores for the fp32 matmuls (see train.precision in
+    # configs/transformer.yaml). Autocast bf16 corrupts the decoder LayerNorm
+    # gradients; TF32 only rounds matmul operands, so the elementwise
+    # LayerNorm/softmax maths stays fp32 and the gradients stay correct.
+    # NB: use the legacy setter (not torch.backends.cuda.matmul.fp32_precision)
+    # -- Lightning 2.6 still calls the legacy getter and mixing the two APIs
+    # raises "checking the matmul precision ... mix of legacy and new APIs".
+    torch.set_float32_matmul_precision("high")
 
     config, args = parse_args()
     train(config, resume_from=args.resume_from, transfer_from=args.transfer_from)
