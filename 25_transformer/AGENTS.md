@@ -96,6 +96,24 @@ python 1_training.py --config configs/base.yaml
 <base>.wave|<base>.spec|<base>.f0|sid
 ```
 
+Two extra flags make re-runs cheap and drop clips that cannot be trained on:
+
+- `--skip_existing` — reuse tensors already in `output_dir` (no audio load, no
+  feature extraction, and `FeatureExtractor` is built lazily, i.e. only if some
+  file still needs extracting) and just re-validate them.
+- `--min_frames N` — omit clips whose `.spec` has fewer than `N` frames from
+  `train.txt`/`val.txt` (default `data.segment_size // data.hop_length` = 16,
+  i.e. one training segment; `0` disables it). Too-short clips are still
+  written to disk, so later `--skip_existing` runs do not re-extract them.
+  The train/val split is computed over the *kept* files.
+
+```bash
+# Rebuild the genshin filelists without re-extracting anything, dropping clips
+# too short for a training segment
+python 1_preprocess.py --filelist filelists_1/genshin_full_eng_linux.txt \
+    --output_dir data/genshin_full_stage1 --skip_existing
+```
+
 ### Stage 2
 
 Stage 2 depends on a trained stage-1 checkpoint, which is used (frozen) as an
@@ -311,9 +329,13 @@ Notes:
    `commons.py`/`utils.py` — be careful *which* `commons` an import resolves to
    (`import commons` = repo root; `from modeling.vits import commons` =
    vendored).
-5. **`skip_if_one_exists` quirk:** in both `*_preprocess.py`, the "already
-   exists" check returns from the *whole loop* (not just the current file) on
-   first hit. Keep this in mind if you rely on it for incremental runs.
+5. **`skip_if_one_exists`:** in `2_preprocess.py` the "already exists" check
+   still does `return` from the *whole loop* (not just the current file) on the
+   first hit — keep that in mind if you rely on it for incremental runs.
+   `1_preprocess.py` now skips per file instead (see §3) and, with
+   `--skip_existing`, also re-checks the clip length, so re-running it over an
+   already-extracted corpus only rewrites `train.txt`/`val.txt` and never
+   builds the heavy `FeatureExtractor`.
 6. **Features require heavy downloads** on first use: `Qwen3-ASR-0.6B`,
    `Qwen3-ForcedAligner-0.6B`, RMVPE weights, `therealvul/g2pen_tokenizer_clean`.
    `FeatureExtractor.__init__` accepts `load_qwen=True` default; code that only
