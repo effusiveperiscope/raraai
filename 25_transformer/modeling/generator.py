@@ -282,8 +282,9 @@ class Generator(nn.Module):
         (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
             f0_target, p_uv_logits) = self._pitch_codec_forward(
                 f0_aligned, t_pad, g)
+        seg = self.hp.data.segment_size // self.hp.data.hop_length
         y_slice, f0_slice, ids_slice = rand_slice_segments_with_pitch(
-            yq, f0, spec_l, self.hp.data.segment_size // self.hp.data.hop_length)
+            yq, f0, spec_l.clamp_min(seg), seg)
         audio = self.dec(g, y_slice, f0_slice)
         return (audio, ids_slice, yq_ds, x_ds, vqloss, perplexity,
                 f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity,

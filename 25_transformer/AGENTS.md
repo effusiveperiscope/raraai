@@ -375,6 +375,29 @@ Notes:
     `filelists_2/` currently has none. Check with
     `python dataset_duration.py data/base/train.txt data/base/val.txt`, which
     reports duplicate lines and train/val overlap.
+12. **Changing `data.segment_size` requires re-running `1_preprocess.py`.** The
+    generator slices training segments with
+    `rand_slice_segments_with_pitch(yq, f0, spec_l, segment_size // hop_length)`
+    (`modeling/generator.py`), and `x_lengths` there is the **real** clip length
+    from `dataset_ac`, not the batch-padded `T`. For a clip shorter than the
+    segment, `ids_str_max = spec_l - segment` goes negative, so
+    `slice_segments` gets a negative start index and the slice comes back empty
+    → `RuntimeError` on the assignment in `modeling/vits/commons.py`. Padding
+    does not save you (`PadGroup(to_length=[257])` only lengthens the tensor).
+    Because such clips are rare (a handful per 100 k), the crash lands a few
+    hundred steps into a run instead of at startup. `1_preprocess.py` already
+    filters them — its `min_frames` default is `segment / hop_length` — so just
+    re-run it with `--skip_existing` after any `segment_size` change:
+
+    ```bash
+    python 1_preprocess.py --filelist filelists_1/genshin_full_eng_linux.txt \
+        --output_dir data/genshin_full_stage1 --skip_existing
+    ```
+
+    This only re-validates lengths and rewrites `train.txt`/`val.txt`; nothing
+    is re-extracted, and the val set stays ~identical (the shuffle is seeded
+    with `--shuffle_seed 42`, and the 5 % split is the tail of the shuffled
+    kept list, so dropping a few clips shifts only a handful of members).
 
 ---
 
