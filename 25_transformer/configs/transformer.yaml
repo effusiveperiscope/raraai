@@ -160,6 +160,7 @@ train:
   log_interval: 50
   keep_ckpts: 2
   log_dir: logs
+  num_workers: 6
   train_filelist: data/base2/train_stage2.txt
   val_filelist: data/base2/val_stage2.txt
   # Optional speaker map (see speaker_map.py). Stage-1 and stage-2 speaker

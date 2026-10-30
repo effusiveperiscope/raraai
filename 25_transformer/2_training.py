@@ -231,19 +231,32 @@ class TrainModule(pl.LightningModule):
         self.hp = hp
 
     def configure_optimizers(self):
-        optim = torch.optim.AdamW(
-            self.net.parameters(),
+        muon_params = [p for p in self.net.parameters() if p.ndim == 2]
+        adamw_params = [p for p in self.net.parameters() if p.ndim != 2]
+        optim_adamw = torch.optim.AdamW(
+            adamw_params,
             lr=self.config.train.lr,
             betas=tuple(self.config.train.betas),
             eps=self.config.train.eps,
             weight_decay=self.config.train.get("weight_decay", 0.0),
         )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer=optim,
+        optim_muon = torch.optim.Muon(
+            muon_params,
+            lr=self.config.train.lr * 200,
+            weight_decay=self.config.train.get("weight_decay"),
+        )
+        sched_adamw = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optim_adamw,
             T_max=self.config.train.get("cosine_anneal_end", 1000000),
             eta_min=1e-6,
         )
-        return {"optimizer": optim, "lr_scheduler": sched}
+        sched_muon = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optim_muon,
+            T_max=self.config.train.get("cosine_anneal_end", 1000000),
+            eta_min=1e-6 * 200,
+        )
+        return [optim_adamw, optim_muon], \
+                [sched_adamw, sched_muon]
 
     def on_train_start(self):
         self._sample_and_log()

@@ -28,9 +28,6 @@ import pytorch_lightning as pl
 from omegaconf import OmegaConf
 import os
 
-# Something above this is setting DEBUG but I don't know what
-logging.getLogger().setLevel(logging.WARNING)
-
 def weighted_mel_loss(mel_pred, mel_target, voiced_mask, unvoiced_weight=0.1):
     """
     mel_pred, mel_target: (B, n_mels, T)
@@ -532,14 +529,16 @@ def train(config,
     train_dataset = dataset_ac(config.train.train_filelist, is_train=True)
     val_dataset = dataset_ac(config.train.val_filelist, is_train=False)
     print("Creating dataloaders...")
-    #num_workers = config.train.get('num_workers', 4)
-    num_workers = 0
+    num_workers = config.train.get('num_workers', 4)
+    #num_workers = 0
     train_dataloader = train_dataset.loader(
         batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
-            persistent_workers=num_workers > 0)
+            persistent_workers=num_workers > 0,
+            pin_memory=config.train.get('pin_memory', False))
     val_dataloader = val_dataset.loader(
         batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, 
-            persistent_workers=num_workers > 0)
+            persistent_workers=num_workers > 0,
+            pin_memory=config.train.get('pin_memory', False))
     print("Done")
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
@@ -591,6 +590,10 @@ if __name__ == '__main__':
     mp.set_start_method('spawn', force=True) # This is needed on Linux
 
     config, args = parse_args()
+
+    # Something above this is setting DEBUG but I don't know what
+    logging.getLogger().setLevel(logging.WARNING)
+
     train(config,
         resume_from=args.resume_from,
         transfer_from=args.transfer_from,

@@ -11,7 +11,10 @@
 # 0.4.5 - pitch_downsample
 # 0.4.6 - increase capacity
 # 0.4.7 - genshin dataset
-exp_name: base_v0.4.7
+# 0.4.7a - increase batch size + lr
+# 0.4.7b - back off lr
+# 0.4.7c - higher segment size, back off batch size to compensate
+exp_name: base_v0.4.7c
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -28,7 +31,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 8000
+  segment_size: 16000
   win_length: 1536
   hop_length: 480
 codec:
@@ -83,7 +86,7 @@ gen:
   upsample_rates: [12, 10, 2, 2]
   upsample_input: 192
 train:
-  batch_size: 8
+  batch_size: 16
   betas:
   - 0.8
   - 0.99
@@ -101,7 +104,10 @@ train:
   val_interval: 1
   test_interval: 1
   keep_ckpts: 2
+  num_workers: 6
+  pin_memory: True
   log_dir: logs
   train_filelist: data/genshin_full_stage1/train.txt
   val_filelist: data/genshin_full_stage1/val.txt
   max_steps: 3e7
+  cosine_anneal_end: 2e6
