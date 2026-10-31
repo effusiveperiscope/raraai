@@ -145,6 +145,25 @@ and emits `train_stage2.txt` / `val_stage2.txt` lines:
 <base>.phone_ids|<base>.spec_codes|<base>.pitch_codes|sid
 ```
 
+**Silent / near-silent clips are dropped by default.** Before extracting
+anything, `2_preprocess.py` runs a level check on the loaded 48 kHz audio
+(`audio_level_stats` / `is_silent` in the script): a clip is skipped when the
+RMS of its loudest 20 ms frame is below `--min_rms_db` (default `-50` dBFS), or
+— only when `--min_speech_frac > 0` — when fewer than that fraction of its
+20 ms frames reach `--min_rms_db` (drops clips that are almost all silence).
+Dropped clips are not written to disk and their reason (loudest frame / peak /
+active-frame fraction, all dBFS) is printed. Notes:
+
+- `--min_rms_db none` disables the filter; raise it (e.g. `-35`) to also drop
+  very quiet recordings. Nothing about the filter is stored on disk, so
+  changing the thresholds only needs a re-run — with `--skip_existing` the
+  level check still runs (audio is loaded, no features are re-extracted), so
+  silent clips can be dropped from an already-encoded corpus, but clips that
+  pass are reused as-is.
+- `train_stage2.txt` / `val_stage2.txt` are split over the **kept** clips, so
+  dropping clips never shifts items out of train into val. If *nothing*
+  survives, the script raises instead of writing empty filelists.
+
 Tensor shapes (see `dataset_codes.py` docstring):
 
 - `phone_ids`   `(n_phone,)`               long
@@ -330,9 +349,11 @@ Notes:
    (`import commons` = repo root; `from modeling.vits import commons` =
    vendored).
 5. **`skip_if_one_exists`:** in `2_preprocess.py` the "already exists" check
-   still does `return` from the *whole loop* (not just the current file) on the
-   first hit — keep that in mind if you rely on it for incremental runs.
-   `1_preprocess.py` now skips per file instead (see §3) and, with
+   now skips per file (it used to `return` from the *whole loop* on the first
+   hit, truncating the filelists) and appends the existing tensors to the new
+   filelist. When the silence filter is on (its default — see §3) the reused
+   clips are still level-checked, which loads the audio but re-extracts
+   nothing. `1_preprocess.py` likewise skips per file and, with
    `--skip_existing`, also re-checks the clip length, so re-running it over an
    already-extracted corpus only rewrites `train.txt`/`val.txt` and never
    builds the heavy `FeatureExtractor`.
@@ -426,6 +447,15 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 --checkpoint checkpoints/base_v0.4/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json
 python 2_training.py --config configs/transformer.yaml
+
+# Rewrite the stage-2 filelists only (no re-extraction), now also dropping
+# silent/near-silent clips and clips that are <5% non-silent frames. The
+# silence check is the default (-50 dBFS on the loudest 20 ms frame);
+# `--min_rms_db none` disables it, `--min_rms_db -35` is stricter.
+python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
+    --output_dir data/base2 --checkpoint checkpoints/base_v0.4/last.ckpt \
+    --config configs/base.yaml --speaker_map speakers.json \
+    --skip_existing --min_speech_frac 0.05
 
 # Stage-1 codec round-trip on your own audio (spec/f0 -> codes -> audio)
 python test_stage1_codes.py test.wav \
