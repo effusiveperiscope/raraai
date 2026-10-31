@@ -41,6 +41,15 @@ Bootstrap a starter map from the stage-1 assignment with::
 
     python speaker_map.py --filelist filelists_2/base.txt \\
         --stage1-filelist filelists_1/base_linux.txt --out speaker_map.json
+
+The bootstrap canonicalises **by exact file first**: every stage-2 sample is
+looked up in the stage-1 filelist (normalised path, then exact basename when
+only the root differs, e.g. Windows vs Linux filelists), and the matched
+stage-1 id is what the emitted rules are derived from.  The speaker-name
+heuristic (``00_48_04_Sunset Shimmer_...flac`` -> ``Sunset Shimmer``) is only a
+fallback for files that are absent from the stage-1 filelist.  When exact
+matching disagrees with the name-level rule (or the filename is unparseable) a
+``path:`` rule is emitted so the exact id wins at resolution time.
 """
 
 from __future__ import annotations
@@ -48,6 +57,7 @@ from __future__ import annotations
 import argparse
 import collections
 import fnmatch
+import glob
 import json
 import os
 import re
@@ -57,9 +67,14 @@ from typing import Optional
 _SPEAKER_RE = re.compile(r"^\d{2}_\d{2}_\d{2}_(.+?)_")
 
 
+def _norm_path(path: str) -> str:
+    """Normalise separators so Windows and POSIX filelist entries compare."""
+    return path.replace("\\", "/")
+
+
 def speaker_name_from_path(path: str) -> Optional[str]:
     """Best-effort speaker/character name from a sliced-dialogue filename."""
-    m = _SPEAKER_RE.match(os.path.basename(path))
+    m = _SPEAKER_RE.match(os.path.basename(_norm_path(path)))
     return m.group(1) if m else None
 
 
@@ -75,7 +90,7 @@ def _rule_matches(pattern: str, path: str) -> bool:
             os.path.basename(path), pattern
         )
     if pattern.startswith("path:"):
-        return path == pattern[len("path:"):]
+        return _norm_path(path) == _norm_path(pattern[len("path:"):])
     if any(c in pattern for c in "*?["):
         return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(
             os.path.basename(path), pattern
@@ -134,17 +149,79 @@ def build_from_stage1(stage1_filelist: str) -> dict:
     for name, c in counts.items():
         if name is None:
             continue
+
         # most frequent id; ties broken by the smallest id
         out[name] = min(c.items(), key=lambda kv: (-kv[1], kv[0]))[0]
     return out
 
 
+def build_stage1_index(
+    stage1_filelist: str,
+) -> tuple[dict, dict, set]:
+    """Index the stage-1 filelist for exact-file canonicalisation.
+
+    Returns ``(path_sids, basename_sids, ambiguous_basenames)`` where
+
+    * ``path_sids`` maps a separator-normalised full path to its stage-1 id
+      (most frequent id wins when a path is listed more than once),
+    * ``basename_sids`` maps a basename to its stage-1 id, but **only** when
+      every stage-1 file with that basename agrees on the id,
+    * ``ambiguous_basenames`` is the set of basenames that map to more than
+      one stage-1 id and must therefore not be matched by basename alone.
+
+    A basename index is needed because filelists from different platforms
+    store the same corpus under different roots (e.g. ``D:\\MLP_Samples\\...``
+    vs ``/mnt/data/MLP_Samples/...``), so full paths do not always match.
+    """
+    votes: dict = collections.defaultdict(collections.Counter)
+    with open(stage1_filelist, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or "|" not in line:
+                continue
+            path, _, raw = line.rpartition("|")
+            try:
+                sid = int(raw)
+            except ValueError:
+                continue
+            votes[_norm_path(path)][sid] += 1
+
+    path_sids = {
+        path: min(c.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        for path, c in votes.items()
+    }
+
+    basenames: dict = collections.defaultdict(set)
+    for path, sid in path_sids.items():
+        basenames[os.path.basename(path)].add(sid)
+
+    ambiguous = {b for b, sids in basenames.items() if len(sids) > 1}
+    basename_sids = {
+        b: next(iter(sids)) for b, sids in basenames.items() if len(sids) == 1
+    }
+    return path_sids, basename_sids, ambiguous
+
+
 def make_template(filelist: str, stage1_filelist: str, out_path: str,
                   unmapped: str = "skip") -> dict:
-    """Write a starter speaker map and report entries needing manual work."""
+    """Write a starter speaker map and report entries needing manual work.
+
+    Each stage-2 file is first matched exactly against the stage-1 filelist
+    (full path, then unambiguous basename).  Only files with no exact match
+    fall back to the speaker-name heuristic, so the generated ids come from
+    stage 1 whenever the sample is present in both corpora.  Exact matches
+    that contradict the name-level rule (and matches for unparseable
+    filenames) are emitted as ``path:`` rules ahead of the name rules.
+    """
     stage1 = build_from_stage1(stage1_filelist)
+    path_sids, basename_sids, ambiguous = build_stage1_index(stage1_filelist)
+
     seen = collections.Counter()
     unknown = collections.Counter()
+    name_votes: dict = collections.defaultdict(collections.Counter)
+    exact_hits: list[tuple[str, int, Optional[str]]] = []
+    stats = collections.Counter()
+
     with open(filelist, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -152,27 +229,98 @@ def make_template(filelist: str, stage1_filelist: str, out_path: str,
                 continue
             path = line.split("|")[0]
             name = speaker_name_from_path(path)
-            if name is None:
-                unknown[path] += 1
-            else:
-                seen[name] += 1
 
-    rules = []
+            norm = _norm_path(path)
+            basename = os.path.basename(norm)
+            sid = path_sids.get(norm)
+            if sid is not None:
+                stats["exact_path"] += 1
+            else:
+                sid = basename_sids.get(basename)
+                if sid is not None:
+                    stats["exact_basename"] += 1
+                else:
+                    if basename in ambiguous:
+                        stats["ambiguous_basename"] += 1
+                    if name is not None and name in stage1:
+                        sid = stage1[name]
+                        stats["name"] += 1
+
+            if sid is None:
+                stats["unresolved"] += 1
+                if name is None:
+                    unknown[path] += 1
+            else:
+                exact_hits.append((path, sid, name))
+
+            if name is not None:
+                seen[name] += 1
+                if sid is not None:
+                    name_votes[name][sid] += 1
+
+    # Speaker-name rules: prefer ids proven by exact file matches, then fall
+    # back to the stage-1 name assignment.
+    name_sid = {}
     for name in sorted(seen):
-        sid = stage1.get(name)
-        if sid is not None:
-            rules.append({"match": name, "sid": sid})
+        votes = name_votes.get(name)
+        if votes:
+            # most frequent id; ties broken by the smallest id
+            name_sid[name] = min(votes.items(), key=lambda kv: (-kv[1], kv[0]))[0]
         else:
-            print(f"  [warn] no stage-1 id for speaker {name!r} ({seen[name]} files)")
+            sid = stage1.get(name)
+            if sid is not None:
+                name_sid[name] = sid
+            else:
+                print(f"  [warn] no stage-1 id for speaker {name!r} "
+                      f"({seen[name]} files)")
+
+    # Name rules are emitted as delimited globs (``*_Name_*``) rather than bare
+    # substrings, because a bare name also occurs inside dialogue text, e.g.
+    # ``00_06_23_Rainbow_Annoyed_Noisy_all because of Pinkie's playing..flac``
+    # would otherwise hit a ``Pinkie`` rule.  Speaker names always come from
+    # the ``_<Name>_`` slot, so the delimiters are what make them unique.
+    name_rules = [
+        {"match": f"glob:*_{glob.escape(name)}_*", "sid": sid}
+        for name, sid in name_sid.items()
+    ]
+
+    def _rule_sid(path: str) -> Optional[int]:
+        for rule in name_rules:
+            if _rule_matches(rule["match"], path):
+                return int(rule["sid"])
+        return None
+
+    # Exact-path overrides, emitted only where the name rules would not already
+    # reproduce the exact stage-1 id.
+    override_rules = []
+    seen_overrides = set()
+    for path, sid, name in exact_hits:
+        if _rule_sid(path) == sid:
+            continue
+        key = (path, sid)
+        if key in seen_overrides:
+            continue
+        seen_overrides.add(key)
+        override_rules.append({"match": f"path:{path}", "sid": sid})
+
+    rules = override_rules + name_rules
 
     speaker_map = {"rules": rules, "sid_map": {}, "unmapped": unmapped}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(speaker_map, f, indent=2)
 
-    print(f"Wrote starter map ({len(rules)} rules) to {out_path}")
+    print(f"Wrote starter map ({len(name_sid)} name rules, "
+          f"{len(override_rules)} exact-path overrides) to {out_path}")
+    print(f"  matched by exact path:     {stats['exact_path']}")
+    print(f"  matched by exact basename: {stats['exact_basename']}")
+    print(f"  matched by speaker name:   {stats['name']}")
+    print(f"  unresolved:                {stats['unresolved']}")
+    if stats["ambiguous_basename"]:
+        print(f"  [warn] {stats['ambiguous_basename']} file(s) had a basename "
+              f"shared by multiple stage-1 ids; fell back to speaker name")
     if unknown:
-        print(f"  [warn] {len(unknown)} path(s) had no recognisable speaker name; "
-              "add explicit rules for them, e.g. "
+        print(f"  [warn] {len(unknown)} unresolved path(s) had no recognisable "
+              "speaker name; add explicit rules for them, e.g. "
               '{"match": "glob:*m5_*", "sid": 45}')
     return speaker_map
 
