@@ -179,9 +179,9 @@ class TrainModule(pl.LightningModule):
         self.config = config
         self.net_g = None
 
-        # Gradient clipping (applied in on_before_optimizer_step, i.e. before
-        # every optimizer step). 0 disables clipping; the norm is still
-        # logged. See configs/transformer.yaml for the knobs.
+        # Gradient clipping (applied in _clip_and_log_grads, i.e. before every
+        # optimizer step). 0 disables clipping; the norm is still logged. See
+        # configs/transformer.yaml for the knobs.
         self.grad_clip_val = float(
             config.train.get("grad_clip_val", 0.0) or 0.0)
         self.grad_clip_algorithm = str(
@@ -202,6 +202,26 @@ class TrainModule(pl.LightningModule):
         self._grad_norm_max = None
         self._grad_clipped_steps = 0.0
         self._grad_steps = 0.0
+
+        # `configure_optimizers` returns two optimizers (Muon for the 2-D
+        # matrices, AdamW for everything else) and PyTorch Lightning >= 2.0
+        # rejects that with automatic optimization ("Training with multiple
+        # optimizers is only supported with manual optimization").  We
+        # therefore own zero_grad / backward / clip / step, see training_step.
+        # NB: Lightning does not call `on_before_optimizer_step` in manual
+        # optimization, which is why the clipping moved into
+        # `_clip_and_log_grads` (called explicitly before stepping).
+        self.automatic_optimization = False
+
+        # Lightning forbids `Trainer(accumulate_grad_batches > 1)` with manual
+        # optimization, so the knob must not be silently ignored if someone
+        # adds it to the config.
+        accum = int(config.train.get("accumulate_grad_batches", 1) or 1)
+        if accum > 1:
+            raise ValueError(
+                "train.accumulate_grad_batches > 1 is not supported: Lightning "
+                "disallows automatic gradient accumulation with manual "
+                "optimization, which the Muon+AdamW optimizer pair requires.")
 
     def setup(self, stage=None):
         hp = self.config
@@ -231,19 +251,35 @@ class TrainModule(pl.LightningModule):
         self.hp = hp
 
     def configure_optimizers(self):
+        """Muon on the 2-D matrices, AdamW on everything else (biases, norms).
+
+        Two optimizers on disjoint parameter sets, both fed by the same loss,
+        so the module runs with ``automatic_optimization = False`` (see
+        ``__init__``).  The optimizers/schedulers are returned in a fixed order
+        and `training_step` unpacks them by position.
+        """
         muon_params = [p for p in self.net.parameters() if p.ndim == 2]
         adamw_params = [p for p in self.net.parameters() if p.ndim != 2]
+        if not muon_params or not adamw_params:
+            raise ValueError(
+                "Expected both 2-D (Muon) and non-2-D (AdamW) parameters, got "
+                f"{len(muon_params)} and {len(adamw_params)}")
+        weight_decay = float(self.config.train.get("weight_decay", 0.0) or 0.0)
+        # Muon normalises its update onto the orthogonal group, so it needs a
+        # much larger step than Adam(W): the usual recipe is ~0.02 for the
+        # hidden layers, i.e. the AdamW LR scaled by ~200.
+        muon_lr_mult = float(self.config.train.get("muon_lr_mult", 200.0))
         optim_adamw = torch.optim.AdamW(
             adamw_params,
             lr=self.config.train.lr,
             betas=tuple(self.config.train.betas),
             eps=self.config.train.eps,
-            weight_decay=self.config.train.get("weight_decay", 0.0),
+            weight_decay=weight_decay,
         )
         optim_muon = torch.optim.Muon(
             muon_params,
-            lr=self.config.train.lr * 200,
-            weight_decay=self.config.train.get("weight_decay"),
+            lr=self.config.train.lr * muon_lr_mult,
+            weight_decay=weight_decay,
         )
         sched_adamw = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=optim_adamw,
@@ -253,10 +289,14 @@ class TrainModule(pl.LightningModule):
         sched_muon = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=optim_muon,
             T_max=self.config.train.get("cosine_anneal_end", 1000000),
-            eta_min=1e-6 * 200,
+            eta_min=1e-6 * muon_lr_mult,
         )
-        return [optim_adamw, optim_muon], \
-                [sched_adamw, sched_muon]
+        print(f"Optimizers: Muon {len(muon_params)} 2-D tensors @ "
+              f"lr={optim_muon.param_groups[0]['lr']:g}, AdamW "
+              f"{len(adamw_params)} tensors @ "
+              f"lr={optim_adamw.param_groups[0]['lr']:g} "
+              f"(weight_decay={weight_decay:g})")
+        return [optim_adamw, optim_muon], [sched_adamw, sched_muon]
 
     def on_train_start(self):
         self._sample_and_log()
@@ -551,20 +591,28 @@ class TrainModule(pl.LightningModule):
             sq_total = sq if sq_total is None else sq_total + sq
         return None if sq_total is None else sq_total.sqrt()
 
-    def on_before_optimizer_step(self, optimizer):
-        """Clip gradients (if configured), then log norms and LR.
+    def _clip_and_log_grads(self, optim_adamw, optim_muon):
+        """Clip gradients (if configured), then log norms and learning rates.
 
-        Clipping happens here — before the optimizer step — so it protects the
-        update itself.  All values are kept as tensors until ``self.log`` so
-        the hook costs no GPU->CPU sync, and only tensors are compared, so the
+        Called from ``training_step`` immediately before the optimizers step.
+        In automatic optimization this lived in ``on_before_optimizer_step``,
+        but Lightning never invokes that hook under
+        ``automatic_optimization = False`` (it hangs off the precision plugin's
+        automatic-mode step closure), so the clip has to be requested
+        explicitly.  All values are kept as tensors until ``self.log`` so the
+        call costs no GPU->CPU sync, and only tensors are compared, so the
         per-step statistic accumulation stays on-device.
+
+        Both optimizers consume the same gradient buffers (disjoint parameter
+        sets, one backward pass), so clipping once covers both updates.
 
         Logged: ``train_grad_norm`` (the **pre-clip** norm, i.e. the spike
         detector — unchanged name/meaning from before clipping existed),
         ``train_grad_clip_scale`` (the factor actually applied to the grads,
-        ``1.0`` when clipping did not trigger) and ``lr``.  Per epoch,
-        ``train_grad_norm_max`` / ``train_grad_clip_frac`` catch spikes that
-        fall between ``log_interval`` steps.
+        ``1.0`` when clipping did not trigger), ``lr`` (AdamW) and
+        ``lr_muon``.  Per epoch, ``train_grad_norm_max`` /
+        ``train_grad_clip_frac`` catch spikes that fall between
+        ``log_interval`` steps.
 
         Note: clipping cannot repair non-finite gradients. Lightning's
         default (``error_if_nonfinite=False``) is kept: an ``inf`` norm yields
@@ -611,14 +659,49 @@ class TrainModule(pl.LightningModule):
         if scale is not None:
             self.log("train_grad_clip_scale", scale, on_step=True,
                      on_epoch=False, logger=True)
-        self.log("lr", float(optimizer.param_groups[0]["lr"]), on_step=True,
+        self.log("lr", float(optim_adamw.param_groups[0]["lr"]), on_step=True,
                  on_epoch=False, logger=True)
+        self.log("lr_muon", float(optim_muon.param_groups[0]["lr"]),
+                 on_step=True, on_epoch=False, logger=True)
 
     def training_step(self, batch, batch_idx):
+        """Manual optimization: zero_grad -> backward -> clip -> step -> sched.
+
+        Lightning requires manual optimization for multiple optimizers (see
+        ``__init__``) and — as a direct consequence — forbids automatic
+        gradient accumulation with it, so every batch is exactly one step of
+        each optimizer (equivalent to ``accumulate_grad_batches=1``;
+        ``__init__`` rejects a larger value).
+        """
         self.net.train()
         out = self._forward_loss(batch, epoch=self.current_epoch)
         self._log_step_metrics("train", out, on_step=True)
-        return out["loss"]
+
+        optim_adamw, optim_muon = self.optimizers()
+        sched_adamw, sched_muon = self.lr_schedulers()
+        # set_to_none keeps the no-grad buffers unallocated (as Lightning's
+        # automatic loop does).
+        optim_adamw.zero_grad(set_to_none=True)
+        optim_muon.zero_grad(set_to_none=True)
+
+        loss = out["loss"]
+        # `manual_backward` (not `loss.backward()`) so Lightning keeps control
+        # of AMP scaling / DDP grad sync should the precision ever change.
+        self.manual_backward(loss)
+        self._clip_and_log_grads(optim_adamw, optim_muon)
+        # Step AdamW through its LightningOptimizer wrapper: that is what
+        # advances Trainer.global_step (and hence max_steps,
+        # cosine_anneal_end, every_n_train_steps and the log axis).  Every
+        # wrapper .step() counts one global step, so Muon is stepped through
+        # the wrapped torch optimizer instead — stepping both wrappers would
+        # burn two global steps per batch and silently halve the configured
+        # budget.  Both updates consume the same (already clipped) gradients;
+        # the wrapper only adds step accounting.
+        optim_adamw.step()
+        optim_muon.optimizer.step()
+        sched_adamw.step()
+        sched_muon.step()
+        return loss
 
     def validation_step(self, batch, batch_idx):
         self.net.eval()
@@ -649,6 +732,17 @@ def train(config, resume_from=None, transfer_from=None):
     if resume_from is not None:
         print(f"Resuming from lightning checkpoint: {resume_from}")
         d = torch.load(resume_from, map_location="cpu", weights_only=False)
+        # Lightning restores optimizer states positionally
+        # (``zip(self.optimizers, checkpoint["optimizer_states"])``), so a
+        # checkpoint written by the old single-AdamW code would silently leave
+        # Muon's momentum/step counters at zero.  Say so loudly.
+        n_opt_states = len(d.get("optimizer_states") or [])
+        if n_opt_states != 2:
+            print(f"WARNING: {resume_from} contains {n_opt_states} optimizer "
+                  f"state(s), but this code trains with 2 (AdamW + Muon). "
+                  f"Lightning restores them positionally, so the Muon state "
+                  f"cannot be recovered -- prefer --transfer_from if the "
+                  f"checkpoint predates the Muon optimizer.")
         if d["global_step"] >= config.train.get("max_steps", 1000000):
             print("Maximum steps reached. Exiting.")
             return

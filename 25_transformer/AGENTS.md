@@ -236,10 +236,48 @@ Notes:
   and existing stage-2 checkpoints load with no key/shape drift.
 - Logged per epoch as `train_loss_weight/{spec0..pitch9}`.
 
+### Optimizers & manual optimization (stage 2)
+
+`TrainModule` splits the parameters between **two optimizers**:
+
+- `torch.optim.Muon` on every **2-D** parameter (attention / FFN / projection
+  matrices), with `lr * train.muon_lr_mult` (`200` → `0.02` with the shipped
+  `lr: 1e-4`; see the comment in `configs/transformer.yaml`), and
+- `torch.optim.AdamW` on everything else (biases, LayerNorm gains) with
+  `train.lr` / `betas` / `eps`.
+
+Lightning ≥ 2.0 refuses multiple optimizers in automatic optimization
+(`Training with multiple optimizers is only supported with manual
+optimization`), so `TrainModule.__init__` sets
+`self.automatic_optimization = False` and `training_step` runs the step itself:
+`zero_grad` → `self.manual_backward(loss)` → clip/log → `AdamW.step()` →
+`Muon.step()` → both cosine schedulers. Consequences:
+
+- `on_before_optimizer_step` is **never called** in manual optimization (it
+  hangs off the precision plugin's automatic-mode closure), so clipping moved
+  into `TrainModule._clip_and_log_grads`, which `training_step` calls
+  explicitly. Do not re-add a clipping hook — it would not run.
+- Only the AdamW step goes through its `LightningOptimizer` wrapper; that is
+  what advances `Trainer.global_step`. Muon is stepped via
+  `optim_muon.optimizer.step()`, because every wrapper `.step()` counts one
+  global step and two per batch would silently halve `max_steps`,
+  `cosine_anneal_end`, `every_n_train_steps` and friends. One batch = one
+  step per optimizer, like the old single-optimizer runs.
+- `Trainer(accumulate_grad_batches > 1)` is rejected by Lightning under manual
+  optimization, so `TrainModule.__init__` raises if
+  `train.accumulate_grad_batches > 1`.
+- `self.optimizers()` order is `[AdamW, Muon]` and `lr_schedulers()` is
+  `[sched_adamw, sched_muon]`; `training_step` unpacks them by position, so
+  keep `configure_optimizers` in that order.
+- Both optimizers are plain `torch.optim.Optimizer`s, so checkpoints keep two
+  `optimizer_states` + two `lr_schedulers` entries; resuming from them works
+  as before (a checkpoint saved by the old single-AdamW code would not match).
+
 ### Gradient clipping (stage 2)
 
-`TrainModule.on_before_optimizer_step` clips gradients before every optimizer
-step, configured by two optional `train` keys in `configs/transformer.yaml`:
+`TrainModule._clip_and_log_grads` clips gradients before every optimizer
+step (called from `training_step`; see the manual-optimization note above),
+configured by two optional `train` keys in `configs/transformer.yaml`:
 
 - `grad_clip_val` — max value; `0` (or absent) disables clipping. The
   pre-clip norm is logged either way.
@@ -249,18 +287,20 @@ step, configured by two optional `train` keys in `configs/transformer.yaml`:
 
 Notes:
 
-- Clipping is done in the hook, **not** via `pl.Trainer(gradient_clip_val=...)`
-  — passing it to the Trainer as well would clip twice (doubly attenuating
-  spikes). Since the hook runs after AMP unscaling, it sees real gradients.
+- Clipping is done in Python, **not** via `pl.Trainer(gradient_clip_val=...)`
+  — Lightning forbids that with manual optimization (and it would clip twice).
+- The gradient buffers are shared by both optimizers (disjoint parameters, one
+  backward pass), so clipping once protects both updates.
 - Logged: `train_grad_norm` (pre-clip — the spike detector, same tag/meaning
   as before clipping existed), `train_grad_clip_scale` (factor applied,
-  `1.0` = no clipping) at `train.log_interval`, and per epoch
+  `1.0` = no clipping), `lr` (AdamW) and `lr_muon` at `train.log_interval`,
+  and per epoch
   `train_grad_norm_max` + `train_grad_clip_frac` (fraction of steps that were
   clipped). The two epoch scalars are computed on *every* step, so they expose
   spikes that fall between two logged steps; they only exist when clipping is
   enabled.
 - All of it is tensor math (no `float()` on GPU tensors and no `if tensor > x`
-  in the hot path), so the hook adds no per-step device sync.
+  in the hot path), so the call adds no per-step device sync.
 - Non-finite gradients are *not* repaired: Lightning's default
   `error_if_nonfinite=False` is kept, so an `inf` norm gives a clip factor of
   0 (harmless no-op step) while `nan` grads stay `nan`. A `nan`
@@ -316,7 +356,8 @@ Notes:
   It also logs
   `{train,val}_{acc,spec_acc,pitch_acc}`, `train_grad_norm` /
   `train_grad_clip_scale` (plus per-epoch `train_grad_norm_max` /
-  `train_grad_clip_frac` when clipping is on — see §4) and `lr`. Every
+  `train_grad_clip_frac` when clipping is on — see §4), and `lr` (AdamW) /
+  `lr_muon` (see §4 for the two-optimizer manual-optimization setup). Every
   `train.sample_interval` epochs (and at train start) it also samples
   `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
   `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the

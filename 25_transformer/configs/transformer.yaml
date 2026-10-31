@@ -12,7 +12,7 @@
 # v0.2.1 - codebook weighting, grad clipping (numerically dead: see precision)
 # v0.3 - fp32/TF32 instead of bf16 autocast (see train.precision)
 # v0.4 - genshin dataset, stronger regularization
-exp_name: transformer_v0.3
+exp_name: transformer_v0.4
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -117,6 +117,16 @@ train:
   - 0.98
   eps: 1e-8
   weight_decay: 0.03
+  # Stage 2 trains with TWO optimizers (Lightning manual optimization, see
+  # 2_training.py -> TrainModule.training_step): Muon on every 2-D parameter
+  # (attention / FFN / projection matrices) and AdamW on everything else
+  # (biases, LayerNorm gains). Both get `weight_decay` above; Muon's step is
+  # `lr * muon_lr_mult` because its update is orthogonalised, so it needs a
+  # much larger LR (~0.02 with lr=1e-4 is the usual recipe). Relative order is
+  # fixed: `self.optimizers()` -> [AdamW, Muon].
+  muon_lr_mult: 200.0
+  # Note: Trainer(accumulate_grad_batches > 1) is rejected by Lightning under
+  # manual optimization, so 2_training.py refuses to start if this key is > 1.
   # Numerical precision for training/resume.
   #   bf16-mixed (historical default) -> DO NOT USE for this model. Autocast
   #       casts the LayerNorm / softmax elementwise maths to bf16, and the
@@ -137,8 +147,8 @@ train:
   #       bf16 autocast, but gradient error vs true fp32 drops from 4.6% to
   #       0.13% total and from ~1e4x to ~4x on the near-zero LayerNorm grads.
   precision: 32-true
-  # Gradient clipping, applied by 2_training.py's on_before_optimizer_step
-  # (before every optimizer step, so the update itself is protected).
+  # Gradient clipping, applied by 2_training.py in `_clip_and_log_grads`,
+  # called from `training_step` right before the (manual) optimizer steps.
   #   norm  -> torch.nn.utils.clip_grad_norm_  (clip the *total* grad norm,
   #            the usual choice for transformers)
   #   value -> torch.nn.utils.clip_grad_value_ (clip each element separately)
@@ -146,7 +156,8 @@ train:
   # Reference: at init with batch_size 8 / max_frames 256 the total grad norm
   # sits around 0.7-1.0, so 1.0 only bites on genuine spikes. Raising it (e.g.
   # 5.0) makes clipping rarer; watch train_grad_clip_frac in TensorBoard.
-  # Do NOT also pass gradient_clip_val to pl.Trainer -- that would clip twice.
+  # Do NOT also pass gradient_clip_val to pl.Trainer: Lightning forbids it
+  # with manual optimization (and it would clip twice).
   # Only this loss/clip pair is affected, so changing it needs no
   # re-preprocessing and old checkpoints resume normally.
   grad_clip_val: 1.0
@@ -161,8 +172,8 @@ train:
   keep_ckpts: 2
   log_dir: logs
   num_workers: 6
-  train_filelist: data/base2/train_stage2.txt
-  val_filelist: data/base2/val_stage2.txt
+  train_filelist: data/genshin_full_stage2/train_stage2.txt
+  val_filelist: data/genshin_full_stage2/val_stage2.txt
   # Optional speaker map (see speaker_map.py). Stage-1 and stage-2 speaker
   # ids are NOT guaranteed to line up, but the stage-1 Generator's speaker
   # embedding is what determines the synthesized voice. Canonicalise the
@@ -173,7 +184,7 @@ train:
   speaker_map: null
   # Optional: stage-1 Generator checkpoint used to turn sampled codes into
   # audio for TensorBoard. Set to null to disable audio logging.
-  generator_checkpoint: checkpoints/base_v0.4.6/last.ckpt
+  generator_checkpoint: checkpoints/base_v0.4.7d/last.ckpt
   # Voicing decision threshold used by Generator.infer_from_codes when no
   # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
   pitch_uv_threshold: 0.5
