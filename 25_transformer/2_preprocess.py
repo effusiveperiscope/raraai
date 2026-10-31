@@ -204,6 +204,10 @@ def process_filelist(filelist_path,
         if 'longform' in line:
             continue
         split = line.split('|')
+
+        if len(split) != 3: # skip malformed lines
+            continue
+
         line = split[0]
         sid = split[1]
         transcr = split[2]
