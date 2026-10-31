@@ -47,6 +47,63 @@ def feature_paths(output_dir, base_line, keys=FEATURE_KEYS):
         os.path.basename(base_line) + '.' + key)) for key in keys]
 
 
+def existing_tensors_ok(savepaths, keys=FEATURE_KEYS):
+    """Check that already-written stage-2 tensors are usable.
+
+    `--skip_existing` reuses tensors from a previous run without loading the
+    audio, so the only cheap way to notice a truncated/corrupt file is to
+    inspect its header. The checks mirror what ``dataset_codes.py`` and
+    ``Generator.infer_from_codes`` require:
+
+    * `phone_ids` is a non-empty 1-D long tensor,
+    * `spec_codes` / `pitch_codes` are 2-D ``(Q, T)`` with a non-zero `T`,
+    * both code tensors share the same `T` (AGENTS.md footgun 7).
+
+    ``mmap=True`` maps the file instead of reading it, so checking a whole
+    corpus is cheap.
+
+    Args:
+        savepaths: Tensor paths in `keys` order, as returned by
+            `feature_paths`.
+        keys: Tensor suffixes, in the order they appear in `savepaths`.
+
+    Returns:
+        ``(ok, reason)`` where `reason` is an empty string when `ok` is True
+        and a short human-readable explanation otherwise.
+    """
+    shapes = {}
+    for key, path in zip(keys, savepaths):
+        try:
+            value = torch.load(path, map_location='cpu', weights_only=True,
+                               mmap=True)
+        except (RuntimeError, OSError, ValueError):
+            # Filesystems without mmap support (or an older save format).
+            try:
+                value = torch.load(path, map_location='cpu',
+                                   weights_only=True)
+            except Exception as e:  # corrupt / truncated file
+                return False, f'unreadable {key} ({e})'
+        shapes[key] = tuple(value.shape)
+
+    phone_shape = shapes.get('phone_ids', ())
+    if len(phone_shape) != 1 or phone_shape[0] == 0:
+        return False, f'phone_ids has shape {phone_shape}'
+
+    code_shapes = {}
+    for key in ('spec_codes', 'pitch_codes'):
+        shape = shapes.get(key, ())
+        if len(shape) != 2 or shape[1] == 0:
+            return False, f'{key} has shape {shape}'
+        code_shapes[key] = shape
+
+    n_spec = code_shapes['spec_codes'][1]
+    n_pitch = code_shapes['pitch_codes'][1]
+    if n_spec != n_pitch:
+        return False, (f'spec_codes/pitch_codes frame counts differ '
+                       f'({n_spec} vs {n_pitch})')
+    return True, ''
+
+
 def audio_level_stats(wav, sr, frame_ms=SILENCE_FRAME_MS,
                       active_db=-50.0):
     """Level statistics used to detect silent / near-silent clips.
@@ -158,6 +215,30 @@ def process_filelist(filelist_path,
     skip_if_one_exists=False, checkpoint_path=None, config_path='configs/base.yaml',
     device=None, speaker_map_path=None, min_rms_db=DEFAULT_MIN_RMS_DB,
     min_speech_frac=0.0):
+    """Extract stage-2 (phone_ids, spec_codes, pitch_codes) for a filelist.
+
+    Args:
+        filelist_path: ``audio_path|sid|transcription`` lines.
+        val_fraction: Fraction of the *kept* clips written to
+            `val_stage2.txt`; the rest goes to `train_stage2.txt`.
+        output_dir: Where tensors and both filelists are written.
+        shuffle_seed: Seed for the pre-split shuffle.
+        skip_if_one_exists: Reuse tensors already in `output_dir` instead of
+            re-extracting them. Reuse is decided per file (a missing tensor
+            only re-extracts that clip) and the tensors are header-checked
+            (see `existing_tensors_ok`), so unusable files are rebuilt. The
+            silence filter still runs, which loads the audio but performs no
+            feature extraction, so silent clips can be dropped from an
+            already-encoded corpus.
+        checkpoint_path: Stage-1 checkpoint used (frozen) as the codec.
+        config_path: Stage-1 config matching `checkpoint_path`.
+        device: Torch device for the Generator; defaults to cuda if present.
+        speaker_map_path: JSON map canonicalising ids into the stage-1 space
+            (see speaker_map.py).
+        min_rms_db: Silence filter threshold in dBFS (`NO_DB_FLOOR` disables
+            the filter). See `is_silent`.
+        min_speech_frac: Also drop clips with fewer active frames than this.
+    """
     if checkpoint_path is None:
         raise ValueError('--checkpoint is required: path to a 1_training checkpoint')
 
@@ -172,8 +253,12 @@ def process_filelist(filelist_path,
     hp = OmegaConf.load(config_path)
     if device is None:
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    fe = FeatureExtractor(hp=hp)
-    net_g = load_generator(checkpoint_path, hp, device)
+    # `FeatureExtractor` pulls in Qwen3-ASR/forced aligner + RMVPE and the
+    # Generator needs a checkpoint load, so both are built lazily: only when a
+    # clip actually has to be extracted. A `--skip_existing` run with the
+    # silence filter off therefore never touches either.
+    fe = None
+    net_g = None
 
     # Optional canonicalisation of speaker ids into the stage-1 space so a
     # single id works for both the stage-2 transformer and the frozen
@@ -187,6 +272,7 @@ def process_filelist(filelist_path,
     n_skipped_speaker = 0
     n_skipped_silent = 0
     n_reused = 0
+    n_invalid = 0
 
     # `--min_rms_db none` (NO_DB_FLOOR) turns the silence filter off.
     silence_filter = min_rms_db is not None and min_rms_db > NO_DB_FLOOR
@@ -228,6 +314,14 @@ def process_filelist(filelist_path,
         savepaths = feature_paths(output_dir, base_line)
         reuse = (skip_if_one_exists
                  and all(os.path.exists(p) for p in savepaths))
+        if reuse:
+            # Reusing skips audio + extraction, so validate what is on disk;
+            # a corrupt/inconsistent file falls through and is rebuilt.
+            ok, reason = existing_tensors_ok(savepaths)
+            if not ok:
+                print(f'Ignoring existing tensors for {base_line}: {reason}')
+                n_invalid += 1
+                reuse = False
         # A reused clip needs no audio unless the silence filter has to
         # re-check it, which is what makes `--skip_existing` usable for
         # retroactively dropping silent clips from an existing corpus.
@@ -237,6 +331,15 @@ def process_filelist(filelist_path,
             continue
 
         if not os.path.exists(line):
+            if reuse:
+                # The tensors are usable but the source audio is gone, so the
+                # level check cannot be re-run; keep the clip rather than
+                # dropping an entry that is already encoded.
+                print(f'Audio not found for {base_line}; '
+                      'keeping existing tensors')
+                n_reused += 1
+                new_lines.append('|'.join(savepaths) + f'|{sid}')
+                continue
             print(f'File not found: {line}')
             continue
 
@@ -263,6 +366,10 @@ def process_filelist(filelist_path,
         wav_16k, _ = librosa.load(line, sr=16000)
         savepaths = []
         try:
+            if fe is None:
+                fe = FeatureExtractor(hp=hp)
+            if net_g is None:
+                net_g = load_generator(checkpoint_path, hp, device)
 
             feats, _ = fe.extract(wav_16k, transcription=transcr)
             feats_ac = fe.extract_features_ac(wav_48k)
@@ -301,7 +408,6 @@ def process_filelist(filelist_path,
 
         except Exception as e:
             print(f'Error processing {line}: {e}')
-            raise e
             continue
 
         newline = '|'.join(savepaths)+f'|{sid}'
@@ -312,6 +418,8 @@ def process_filelist(filelist_path,
     print(f'Kept {len(new_lines)} file(s) ({n_reused} reused); '
           f'omitted {n_skipped_silent} silent/near-silent clip(s)'
           + (f' below {min_rms_db:.1f} dBFS' if silence_filter else '')
+          + (f'; rebuilt {n_invalid} unusable tensor set(s)'
+             if skip_if_one_exists and n_invalid else '')
           + '.')
 
     # Split the *kept* items, not the raw line count: omitting clips must not
@@ -350,6 +458,11 @@ if __name__ == '__main__':
     parser.add_argument('--speaker_map', type=str, default=None,
         help='JSON map canonicalising speaker ids to the stage-1 space '
              '(see speaker_map.py)')
+    parser.add_argument('--skip_existing', action='store_true',
+        help='reuse tensors already present in --output_dir instead of '
+             're-extracting them; reuse is decided per file and the tensors '
+             'are shape-checked, so missing/corrupt clips are rebuilt. The '
+             'silence check still runs (audio only, no extraction).')
     parser.add_argument('--min_rms_db', type=db_floor, default=DEFAULT_MIN_RMS_DB,
         help='drop clips that are silent or near-silent: a clip is skipped '
              'when the RMS of its loudest 20 ms frame is below this level in '
@@ -373,6 +486,7 @@ if __name__ == '__main__':
         config_path=args.config,
         device=args.device,
         speaker_map_path=args.speaker_map,
+        skip_if_one_exists=args.skip_existing,
         min_rms_db=args.min_rms_db,
         min_speech_frac=args.min_speech_frac,
     )

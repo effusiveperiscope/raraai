@@ -163,6 +163,13 @@ active-frame fraction, all dBFS) is printed. Notes:
 - `train_stage2.txt` / `val_stage2.txt` are split over the **kept** clips, so
   dropping clips never shifts items out of train into val. If *nothing*
   survives, the script raises instead of writing empty filelists.
+- `--skip_existing` reuses tensors already in `--output_dir` instead of
+  re-running the ASR/aligner + codec. Reuse is per file (only clips with a
+  missing tensor are encoded) and the existing tensors are header-checked
+  (`existing_tensors_ok`: `phone_ids` non-empty 1-D, `spec_codes`/`pitch_codes`
+  2-D with equal, non-zero frame counts), so corrupt entries are rebuilt.
+  `FeatureExtractor` and the stage-1 `Generator` are built lazily — a pure
+  reuse run never loads either, although `--checkpoint` is still required.
 
 Tensor shapes (see `dataset_codes.py` docstring):
 
@@ -348,15 +355,22 @@ Notes:
    `commons.py`/`utils.py` — be careful *which* `commons` an import resolves to
    (`import commons` = repo root; `from modeling.vits import commons` =
    vendored).
-5. **`skip_if_one_exists`:** in `2_preprocess.py` the "already exists" check
-   now skips per file (it used to `return` from the *whole loop* on the first
-   hit, truncating the filelists) and appends the existing tensors to the new
-   filelist. When the silence filter is on (its default — see §3) the reused
-   clips are still level-checked, which loads the audio but re-extracts
-   nothing. `1_preprocess.py` likewise skips per file and, with
-   `--skip_existing`, also re-checks the clip length, so re-running it over an
-   already-extracted corpus only rewrites `train.txt`/`val.txt` and never
-   builds the heavy `FeatureExtractor`.
+5. **`--skip_existing` / `skip_if_one_exists`:** in `2_preprocess.py` the
+   "already exists" check skips per file (it used to `return` from the *whole
+   loop* on the first hit, truncating the filelists) and appends the existing
+   tensors to the new filelist. Reused tensor sets are header-checked by
+   `existing_tensors_ok` (`mmap=True`, shapes only: non-empty `phone_ids`,
+   2-D `spec_codes`/`pitch_codes` with equal, non-zero `T`), so a truncated or
+   inconsistent file falls through and is rebuilt instead of silently entering
+   the filelist. When the silence filter is on (its default — see §3) the
+   reused clips are still level-checked, which loads the audio but re-extracts
+   nothing; if the source audio has disappeared the clip is kept as-is instead
+   of being dropped. The heavy `FeatureExtractor` and the stage-1 `Generator`
+   are built lazily, so a reuse-only run never constructs either (a bogus
+   `--checkpoint` is harmless in that case). `1_preprocess.py` likewise skips
+   per file and, with `--skip_existing`, also re-checks the clip length, so
+   re-running it over an already-extracted corpus only rewrites
+   `train.txt`/`val.txt` and never builds the heavy `FeatureExtractor`.
 6. **Features require heavy downloads** on first use: `Qwen3-ASR-0.6B`,
    `Qwen3-ForcedAligner-0.6B`, RMVPE weights, `therealvul/g2pen_tokenizer_clean`.
    `FeatureExtractor.__init__` accepts `load_qwen=True` default; code that only
