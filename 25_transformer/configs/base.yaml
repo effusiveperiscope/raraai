@@ -14,7 +14,9 @@
 # 0.4.7a - increase batch size + lr
 # 0.4.7b - back off lr
 # 0.4.7c - higher segment size, back off batch size to compensate
-exp_name: base_v0.4.7c
+# 0.4.7d - segment size had no audible effect, resetting.
+# - modify q_recon_loss to also work on unvoiced frames
+exp_name: base_v0.4.7d
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -31,7 +33,7 @@ data:
   mel_fmax: 24000.0 
   mel_fmin: 50.0
   sampling_rate: 48000
-  segment_size: 16000
+  segment_size: 8000
   win_length: 1536
   hop_length: 480
 codec:
@@ -86,12 +88,13 @@ gen:
   upsample_rates: [12, 10, 2, 2]
   upsample_input: 192
 train:
-  batch_size: 16
+  batch_size: 32
   betas:
   - 0.8
   - 0.99
   c_mel: 1.0
   c_stft: 9
+  c_qr_uv: 0.5
   c_pitch_dec: 1.0
   c_pitch_q: 0.5
   c_pitch_adv: 1.0

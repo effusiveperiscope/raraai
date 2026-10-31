@@ -244,15 +244,15 @@ class TrainModule(pl.LightningModule):
 
         voiced_mask_ds = F.interpolate(
             (pit > 0).unsqueeze(1).float(), 
-            size=(pit.size(-1) + 3) // 4).transpose(1,2) # 1/4 factor
+            size=(pit.size(-1) + 3) // 4, mode='area').transpose(1,2) # 1/4 factor
 
         # f0 shape: (B, T) — 0 or NaN on unvoiced frames
         f0_sliced = slice_segments_general(pit, ids_slice, hp.data.segment_size // hp.data.hop_length)
         voiced_mask_sliced = (f0_sliced > 0).float()  # (B, T), 1=voiced, 0=unvoiced
 
-        q_recon_loss = (F.mse_loss(yq_ds, x_ds,
-            reduction='none') * voiced_mask_ds).sum() / (
-                voiced_mask_ds.sum())
+        c_qr_uv = self.config.train.get('c_qr_uv', 0.5)
+        w = voiced_mask_ds + (1.0 - voiced_mask_ds) * c_qr_uv
+        q_recon_loss = (F.mse_loss(yq_ds, x_ds, reduction='none') * w).sum() / w.sum().clamp_min(1e-6)
 
         # Pitch decoding loss: train the low-parameter pitch codec to
         # reconstruct the (log-normalized) f0 contour. Only voiced frames
