@@ -188,6 +188,33 @@ Tensor shapes (see `dataset_codes.py` docstring):
 - `spec_codes`  `(Q_spec, T_codes)`        long (Q_spec = `codec.codebook_num`)
 - `pitch_codes` `(Q_pitch, T_codes)`       long (Q_pitch = `pitch_codec.codebook_num`)
 
+**Heteronyms (homographs).** g2p_en picks between a heteronym's two
+pronunciations (`read` past/present, `refuse` verb/noun, `present`, `record`,
+…) from the **Penn tag of the word inside its sentence** — it runs
+`nltk.pos_tag` over whatever string it is given. `HorsePhonemizer.phonemize`
+is called once per forced-alignment token (see `features.extract`), so a naive
+per-word call tags each word in isolation and always returns the same
+pronunciation (~1 % of the `25_stage2_base1` utterances are affected, mostly
+`use`/`used`/`close`/`read`). The fix, already wired in, is:
+
+- `FeatureExtractor.extract` tags the whole utterance once
+  (`HorsePhonemizer.tag_words` over the aligner's items) and passes each tag
+  down as `phonemize(word, tag=...)`, so the heteronym branch of g2p_en's
+  homograph table (`g2p_en.homograph2features`, re-implemented in
+  `_homograph_pronunciation`) sees real context. `phonemize(text)` with
+  `tag=None` still reproduces the old context-free behaviour.
+- `new_horsewords.clean` accepts POS-qualified keys (`USE/VB  Y UW1 Z`,
+  `LEAD/VB  L IY1 D`) for the cases g2p_en *still* gets wrong even in context
+  (its tagger is a small perceptron: "use the tool" is tagged `IN`, and `lead`
+  is not in its homograph table at all, so it falls back to `cmudict[0]` =
+  the metal). Matching is exact tag first, then two-letter prefix, so
+  `USE/VB` covers `VB/VBD/VBP/VBZ`; POS-qualified > plain word > g2p_en.
+
+Because `phone_ids` are baked into the tensors, a phonemizer change only takes
+effect on a re-run that rebuilds them: `--skip_existing` accepts the old
+`phone_ids` (it only checks shape), so delete `*.phone_ids` (which makes that
+clip's whole tensor set get rebuilt) or point `--output_dir` elsewhere.
+
 ---
 
 ## 4. Configuration

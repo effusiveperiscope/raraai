@@ -141,9 +141,15 @@ class FeatureExtractor:
         sr = getattr(mel_extractor, "sampling_rate", 16000)
         n_frames = f0.shape[0]
 
+        # Tag the utterance's words together so g2p_en can pick the right
+        # pronunciation for heteronyms ("read" / "refuse" / "present" ...).
+        # One tag per item, in order; the items *are* the sentence's words.
+        item_texts = [getattr(it, "text", "") for it in items]
+        tags = self.hphzr.tag_words(item_texts)
+
         out = []
-        for it in items:
-            text = getattr(it, "text", "")
+        for i, it in enumerate(items):
+            text = item_texts[i]
             start_time = float(getattr(it, "start_time", 0.0))
             end_time = float(getattr(it, "end_time", 0.0))
             start_frame = int(math.floor(start_time * sr / hop))
@@ -155,7 +161,7 @@ class FeatureExtractor:
             contour = f0[start_frame:end_frame].astype(np.float64, copy=True)
             voiced = contour[contour > 0]
             mean = float(voiced.mean()) if voiced.size > 0 else 0.0
-            phones = self.hphzr.phonemize(text)
+            phones = self.hphzr.phonemize(text, tag=tags[i])
             out.append({
                 "text": text,
                 "phones": phones,
