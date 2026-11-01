@@ -171,6 +171,17 @@ active-frame fraction, all dBFS) is printed. Notes:
   `FeatureExtractor` and the stage-1 `Generator` are built lazily — a pure
   reuse run never loads either, although `--checkpoint` is still required.
 
+**Clips with no phonemes are dropped too.** When the ASR + forced alignment
+return an empty phone sequence (typically a 0.4–0.9 s interjection such as
+"hmm"), the codes are still valid but there is no text to condition on, so the
+clip could only train the stage-2 transformer as an *unconditional* sample. The
+guard sits right after `fe.extract(...)` and before the codes are encoded, so
+neither the filelist entry nor the tensors are written (the count is printed in
+the final summary). `existing_tensors_ok` also rejects such a tensor, so
+`--skip_existing` rebuilds and then re-drops it — i.e. a corpus that still
+contains them (e.g. `data/genshin_full_stage2`, 1.0 % of the clips) should be
+rebuilt with this guard before a fresh stage-2 run.
+
 Tensor shapes (see `dataset_codes.py` docstring):
 
 - `phone_ids`   `(n_phone,)`               long
@@ -235,6 +246,47 @@ Notes:
 - The weights are plain attributes, not buffers, so `state_dict` is unchanged
   and existing stage-2 checkpoints load with no key/shape drift.
 - Logged per epoch as `train_loss_weight/{spec0..pitch9}`.
+
+### Encoder → decoder conditioning (stage 2, v0.4.1)
+
+The decoder only sees the text through cross-attention to the `PhonemeEncoder`
+memory, and that channel can silently die: the loss keeps falling (acoustic
+continuity is a strong prior) while the model ignores the phonemes entirely.
+This is what happened in v0.4 — the encoder's pre-LN residual stream grew
+~20 → ~4000 over six layers, one dimension carried ~4000 at every position,
+the stock final `LayerNorm` divided by that dimension's magnitude, the memory's
+variation across phoneme positions dropped to **0.7%** of its norm, and the
+cross-attention became uniform (entropy / log N ≈ 0.99):
+`CE(fixed phonemes) − CE(shuffled phonemes)` was **+0.003 nats**, i.e. zero.
+
+Two `transformer` keys control it:
+
+- `memory_norm` — `temporal` (default since v0.4.1) standardises every memory
+  dimension over the *time* axis (masked instance norm + learnable
+  `memory_gain`/`memory_bias`), so a runaway dimension can no longer suppress
+  the others (measured on the same batch: the memory's per-dimension spread
+  over phoneme positions goes from **0.007** to **1.01**, and the
+  cross-attention entropy from 0.985 to 0.12 for the same queries). `layer`
+  reproduces the historical single `LayerNorm` over the feature axis and exists
+  only to load/evaluate ≤ v0.4 checkpoints; `none` returns the raw residual
+  stream.
+- `residual_scale` — GPT-2-style scaling of the *initial* weights of the
+  residual output projections (`self_attn.out_proj`, `multihead_attn.out_proj`,
+  `linear2`) by `1/sqrt(2·n_layers)` in the encoder and `1/sqrt(3·n_layers)` in
+  the decoder, which stops the residual stream from growing in the first place.
+  Initialisation only: no new parameters, no `state_dict` change.
+
+Notes:
+
+- A model built with `memory_norm: temporal` has two extra parameters
+  (`encoder.memory_gain`, `encoder.memory_bias`) and **no**
+  `encoder.encoder.norm.*`. Resuming a ≤ v0.4 checkpoint with
+  `--resume_from` therefore fails Lightning's strict load; use
+  `--transfer_from` (it reports the two unexpected keys and leaves
+  `memory_gain` at 1.0 / `memory_bias` at 0.0), or evaluate the old checkpoint
+  with `memory_norm: layer`.
+- Setting `memory_norm: temporal` needs **no** re-preprocessing: it only
+  changes how the encoder output is normalised at train time.
 
 ### Optimizers & manual optimization (stage 2)
 
@@ -357,8 +409,16 @@ Notes:
   `{train,val}_{acc,spec_acc,pitch_acc}`, `train_grad_norm` /
   `train_grad_clip_scale` (plus per-epoch `train_grad_norm_max` /
   `train_grad_clip_frac` when clipping is on — see §4), and `lr` (AdamW) /
-  `lr_muon` (see §4 for the two-optimizer manual-optimization setup). Every
-  `train.sample_interval` epochs (and at train start) it also samples
+  `lr_muon` (see §4 for the two-optimizer manual-optimization setup).
+  Every epoch it also logs `val_text_delta` (plus `/spec` and `/pitch`): the
+  teacher-forced CE on the first `train.text_delta_batches` validation batches
+  with the phonemes rotated across samples *minus* the CE with the real ones.
+  This is the "is the text conditioning alive?" signal — `val_loss` cannot show
+  it, because acoustic continuity alone keeps the loss falling. ~0 nats means
+  the decoder ignores the encoder memory (see §4 and
+  `test_stage2_conditioning.py`); `0` in `train.text_delta_batches` disables
+  the probe. Every `train.sample_interval`
+  epochs (and at train start) it also samples
   `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
   `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the
   free-running agreement scalars `sample/{spec,pitch}_code_match_frac_{j}`,
@@ -521,6 +581,11 @@ python test_stage1_codes.py test.wav \
 # Ad-hoc smoke tests (many modules have an `if __name__ == "__main__"` block)
 python modeling/transformer.py    # constructs a CodeTransformer, runs fwd + generate
 python modeling/generator.py      # constructs a Generator, runs infer
+
+# Is the stage-2 text conditioning actually alive? (CPU by default, so it can
+# run next to a training job; --device cuda for speed)
+python test_stage2_conditioning.py \
+    --checkpoint checkpoints/transformer_v0.4.1/last.ckpt --batches 4
 ```
 
 There is no test suite in this repo; validation is done by running the ad-hoc
@@ -528,4 +593,7 @@ There is no test suite in this repo; validation is done by running the ad-hoc
 `test_stage1_codes.py` is the exception worth knowing about: it exercises the
 exact encode (`2_preprocess.py`) / decode (stage-2 validation) path of a stage-1
 checkpoint on arbitrary audio and prints mel/f0/voicing metrics plus per-codebook
-usage.
+usage. `test_stage2_conditioning.py` is its stage-2 counterpart: it reports the
+encoder-memory scale/spread, the per-layer cross-attention entropy and the
+teacher-forced loss with real vs shuffled vs random phonemes, and prints a
+DEAD/WEAK/HEALTHY verdict on the text conditioning (see §4).

@@ -223,6 +223,24 @@ class TrainModule(pl.LightningModule):
                 "disallows automatic gradient accumulation with manual "
                 "optimization, which the Muon+AdamW optimizer pair requires.")
 
+        # Text-conditioning diagnostic (v0.4.1): every epoch, compare the
+        # teacher-forced CE on the first `text_delta_batches` validation
+        # batches against the same batches with the phonemes rotated across
+        # samples. The difference is `val_text_delta`; ~0 means the decoder is
+        # ignoring the encoder memory (a text-blind, speaker-only code LM),
+        # which is invisible in the loss because acoustic continuity alone is a
+        # strong prior. 0 disables the probe.
+        self.text_delta_batches = int(
+            config.train.get("text_delta_batches", 0) or 0)
+        self._reset_text_delta()
+
+    def _reset_text_delta(self):
+        """Clear the per-epoch accumulators of the text-conditioning probe."""
+        self._text_delta_sum = 0.0
+        self._text_delta_spec_sum = 0.0
+        self._text_delta_pitch_sum = 0.0
+        self._text_delta_count = 0
+
     def setup(self, stage=None):
         hp = self.config
         val_filelist = hp.train.val_filelist
@@ -703,11 +721,65 @@ class TrainModule(pl.LightningModule):
         sched_muon.step()
         return loss
 
+    def on_validation_epoch_start(self):
+        self._reset_text_delta()
+
+    @torch.no_grad()
+    def _accumulate_text_delta(self, batch, out):
+        """Add ``CE(wrong phonemes) - CE(real phonemes)`` for one batch.
+
+        The phonemes *and* their lengths are rotated across the batch, so each
+        sample is scored against another sample's text while keeping its own
+        speaker id and its own code targets.  A delta of ~0 means the decoder
+        is not using the encoder memory at all (see `text_delta_batches` in
+        ``configs/transformer.yaml``); anything above ~0.05 nats means the text
+        is genuinely contributing.
+        """
+        phones = batch["phone_ids"]
+        if phones.shape[0] < 2:
+            return
+        lengths = batch["phone_lengths"]
+        rotate = torch.roll(torch.arange(phones.shape[0], device=phones.device), 1)
+        wrong = self.net.compute_batch_loss(
+            {**batch, "phone_ids": phones[rotate],
+             "phone_lengths": lengths[rotate]},
+            epoch=None,  # fixed (final) codebook weights, like val_loss
+        )
+        # float() forces a device sync; only the first `text_delta_batches`
+        # batches of the epoch pay it.
+        self._text_delta_sum += float(wrong["loss"] - out["loss"])
+        self._text_delta_spec_sum += float(wrong["spec_loss"] - out["spec_loss"])
+        self._text_delta_pitch_sum += float(wrong["pitch_loss"] - out["pitch_loss"])
+        self._text_delta_count += 1
+
+    def on_validation_epoch_end(self):
+        """Log ``val_text_delta`` (the "is the text conditioning alive?" metric)."""
+        if self.text_delta_batches <= 0 or not self._text_delta_count:
+            return
+        n = float(self._text_delta_count)
+        delta = self._text_delta_sum / n
+        self._add_scalar("val_text_delta", torch.tensor(delta))
+        self._add_scalar("val_text_delta/spec",
+                         torch.tensor(self._text_delta_spec_sum / n))
+        self._add_scalar("val_text_delta/pitch",
+                         torch.tensor(self._text_delta_pitch_sum / n))
+        message = (f"val_text_delta = {delta:+.4f} nats "
+                   f"(CE with rotated phonemes - CE with the real ones)")
+        if delta < 0.05:
+            message += ("  <-- text conditioning is not carrying information "
+                        "yet; if this persists for several epochs, check "
+                        "transformer.memory_norm / "
+                        "test_stage2_conditioning.py")
+        print(message)
+
     def validation_step(self, batch, batch_idx):
         self.net.eval()
         out = self._forward_loss(batch)  # fixed (final) codebook weights
         self._log_step_metrics("val", out, on_step=False)
+        if batch_idx < self.text_delta_batches:
+            self._accumulate_text_delta(batch, out)
         return out["loss"]
+
 
 
 def parse_args():

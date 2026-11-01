@@ -87,7 +87,40 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class PhonemeEncoder(nn.Module):
-    """Encodes phoneme tokens + a speaker id into a cross-attention memory."""
+    """Encodes phoneme tokens + a speaker id into a cross-attention memory.
+
+    The memory must stay *discriminative across phoneme positions*: the decoder
+    reaches the text only through cross-attention, so if two positions produce
+    near-identical keys the attention degenerates into a uniform average and
+    the model becomes a text-blind acoustic LM (silently: the loss keeps
+    falling while `phoneme -> code` conditioning is gone).  Use
+    ``test_stage2_conditioning.py`` to check.
+
+    The problem is the residual stream: pre-LN transformers do not bound it,
+    and on this model it grows ~20 -> ~4000 over six layers.  With the stock
+    final ``LayerNorm`` that is fatal, because the LayerNorm divides by the
+    per-position std *across feature dimensions*: one runaway dimension sets
+    that denominator, every informative dimension is crushed to ~1% of its size
+    and the cross-attention keys become almost identical (measured attention
+    entropy / log N ~= 0.99, i.e. uniform).
+
+    ``memory_norm`` selects how the memory is normalised:
+
+    * ``"temporal"`` (default since v0.4.1) — standardise every dimension over
+      the *time* axis (masked instance norm + learnable per-dimension affine).
+      Each dimension is divided by its own spread, so a runaway dimension can
+      no longer suppress the others; directions that are constant over time
+      (they carry no positional information) collapse into the bias.
+    * ``"layer"`` — the historical single ``LayerNorm`` over the feature axis.
+      Kept so pre-v0.4.1 checkpoints can still be loaded/evaluated (they were
+      trained under the collapsed regime).
+    * ``"none"`` — return the raw residual stream.
+
+    ``residual_scale`` additionally scales the initial weights of the sublayer
+    output projections (``self_attn.out_proj``, ``linear2``) by
+    ``1/sqrt(2 * n_layers)`` (GPT-2 style), which stops the residual stream
+    from growing in the first place.
+    """
 
     def __init__(
         self,
@@ -99,8 +132,17 @@ class PhonemeEncoder(nn.Module):
         dim_feedforward: int,
         dropout: float,
         max_positions: int,
+        memory_norm: str = "temporal",
+        residual_scale: bool = True,
     ):
         super().__init__()
+        if memory_norm not in ("temporal", "layer", "none"):
+            raise ValueError(
+                "transformer.memory_norm must be 'temporal', 'layer' or "
+                f"'none', got {memory_norm!r}")
+        self.memory_norm = str(memory_norm)
+        self.memory_norm_eps = 1e-5
+
         self.phone_emb = nn.Embedding(phone_vocab_size, hidden_size)
         self.spk_emb = nn.Embedding(n_speakers, hidden_size)
         self.pos = SinusoidalPositionalEncoding(hidden_size, max_positions)
@@ -113,7 +155,38 @@ class PhonemeEncoder(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(layer, n_layers, norm=nn.LayerNorm(hidden_size))
+        self.encoder = nn.TransformerEncoder(
+            layer, n_layers,
+            # With "temporal" the final LayerNorm is counter-productive (see
+            # the class docstring); the per-dimension norm below replaces it.
+            norm=nn.LayerNorm(hidden_size) if self.memory_norm == "layer" else None,
+        )
+
+        # Learnable affine of the per-dimension (temporal) normalisation.
+        if self.memory_norm == "temporal":
+            self.memory_gain = nn.Parameter(torch.ones(hidden_size))
+            self.memory_bias = nn.Parameter(torch.zeros(hidden_size))
+        else:
+            self.register_parameter("memory_gain", None)
+            self.register_parameter("memory_bias", None)
+
+        if residual_scale and n_layers > 0:
+            scale = 1.0 / math.sqrt(2.0 * n_layers)
+            for enc_layer in self.encoder.layers:
+                enc_layer.self_attn.out_proj.weight.data.mul_(scale)
+                enc_layer.linear2.weight.data.mul_(scale)
+
+    def _temporal_norm(
+        self, x: torch.Tensor, valid: torch.Tensor
+    ) -> torch.Tensor:
+        """Masked per-dimension standardisation of ``(B, N, H)`` over `N`."""
+        mask = valid.unsqueeze(-1).to(x.dtype)
+        count = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        mean = (x * mask).sum(dim=1, keepdim=True) / count
+        var = (((x - mean) ** 2) * mask).sum(dim=1, keepdim=True) / count
+        x = (x - mean) / torch.sqrt(var + self.memory_norm_eps)
+        x = x * self.memory_gain + self.memory_bias
+        return x * mask
 
     def forward(
         self,
@@ -134,6 +207,8 @@ class PhonemeEncoder(nn.Module):
         x = self.pos(x)
         x = self.encoder(x, src_key_padding_mask=~valid)
         x = x * valid.unsqueeze(-1).to(x.dtype)
+        if self.memory_norm == "temporal":
+            x = self._temporal_norm(x, valid)
         return x, valid
 
 
@@ -144,6 +219,13 @@ class DelayCodebookDecoder(nn.Module):
     spectrogram codebooks and pitch codebooks have different vocabulary
     sizes.  Every codebook gets one extra "pad/start" index equal to its
     vocabulary size (mirroring MusicGen's ``bos == pad`` token).
+
+    ``residual_scale`` scales the initial weights of the three residual output
+    projections (``self_attn.out_proj``, ``multihead_attn.out_proj``,
+    ``linear2``) by ``1/sqrt(3 * n_layers)``.  The decoder's residual stream
+    otherwise grows by >30x over twelve layers, which shrinks the
+    cross-attention contribution to a few percent of the residual and makes it
+    even easier for the model to ignore the phoneme memory.
     """
 
     def __init__(
@@ -157,6 +239,7 @@ class DelayCodebookDecoder(nn.Module):
         max_positions: int,
         n_speakers: int = 0,
         speaker_cond: bool = True,
+        residual_scale: bool = True,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -195,6 +278,13 @@ class DelayCodebookDecoder(nn.Module):
         self.heads = nn.ModuleList(
             [nn.Linear(hidden_size, v + 1) for v in self.vocab_sizes]
         )
+
+        if residual_scale and n_layers > 0:
+            scale = 1.0 / math.sqrt(3.0 * n_layers)
+            for dec_layer in self.decoder.layers:
+                dec_layer.self_attn.out_proj.weight.data.mul_(scale)
+                dec_layer.multihead_attn.out_proj.weight.data.mul_(scale)
+                dec_layer.linear2.weight.data.mul_(scale)
 
         self._causal_mask_cache = None
         self._causal_mask_key = None
@@ -263,6 +353,9 @@ class CodeTransformer(nn.Module):
         n_speakers = int(_get_cfg(tcfg, "n_speakers", 512))
         decoder_speaker_cond = bool(
             _get_cfg(tcfg, "decoder_speaker_cond", True))
+        # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
+        memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
+        residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
 
         codec = _get_cfg(config, "codec", None)
         pitch_codec = _get_cfg(config, "pitch_codec", None)
@@ -300,6 +393,8 @@ class CodeTransformer(nn.Module):
             dim_feedforward=ffn,
             dropout=dropout,
             max_positions=max_positions,
+            memory_norm=memory_norm,
+            residual_scale=residual_scale,
         )
         self.decoder = DelayCodebookDecoder(
             vocab_sizes=self.vocab_sizes,
@@ -311,7 +406,10 @@ class CodeTransformer(nn.Module):
             max_positions=max_positions,
             n_speakers=n_speakers,
             speaker_cond=decoder_speaker_cond,
+            residual_scale=residual_scale,
         )
+        self.memory_norm = memory_norm
+        self.residual_scale = residual_scale
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -628,7 +726,8 @@ class CodeTransformer(nn.Module):
         return (
             f"CodeTransformer(hidden={self.hidden_size}, codebooks="
             f"{self.spec_codebook_num} spec + {self.pitch_codebook_num} pitch, "
-            f"speaker={spk}, params={n / 1e6:.2f}M)"
+            f"speaker={spk}, memory_norm={self.memory_norm}, "
+            f"residual_scale={self.residual_scale}, params={n / 1e6:.2f}M)"
         )
 
 

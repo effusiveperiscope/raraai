@@ -12,7 +12,14 @@
 # v0.2.1 - codebook weighting, grad clipping (numerically dead: see precision)
 # v0.3 - fp32/TF32 instead of bf16 autocast (see train.precision)
 # v0.4 - genshin dataset, stronger regularization
-exp_name: transformer_v0.4
+# v0.4.1 - fix the collapsed phoneme encoder: per-dimension (temporal) memory
+#          normalisation + GPT-2-style residual scaling, so cross-attention can
+#          actually align to the current phoneme (see transformer.memory_norm).
+#          Adds the val_text_delta diagnostic (train.text_delta_batches) and
+#          drops stage-2 clips whose alignment produced no phonemes.
+#          v0.4 checkpoints have no memory_gain/memory_bias keys: use
+#          --transfer_from (partial load), NOT --resume_from, to warm-start.
+exp_name: transformer_v0.4.1
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -29,7 +36,7 @@ transformer:
   # Speaker ids are canonicalised into the stage-1 Generator id space, so
   # this must be large enough to hold every stage-1 id you use
   # (see speaker_map.py and train.speaker_map).
-  n_speakers: 512
+  n_speakers: 4096
   # Also feed `sid` to the decoder (its own embedding table), not just to the
   # phoneme encoder. Without this the voice can only reach the autoregressive
   # model through cross-attention to the encoder memory, which is a weak,
@@ -38,6 +45,31 @@ transformer:
   # embedding (e.g. transformer_v0.1, which also used encoder_layers=4 /
   # decoder_layers=10 -- match those too or the load stays partial).
   decoder_speaker_cond: true
+
+  # How the encoder memory handed to the decoder's cross-attention is
+  # normalised (v0.4.1).  This decides whether text conditioning works at all:
+  #   temporal -> standardise each memory dimension over the *time* axis
+  #               (masked instance norm + learnable gain/bias).  Each dimension
+  #               is divided by its own spread, so a runaway residual dimension
+  #               cannot suppress the others.  USE THIS.  In v0.4 the encoder
+  #               residual stream grew to ~4000 in one dimension; the stock
+  #               final LayerNorm divided by that dimension's magnitude, the
+  #               memory's variation over phoneme positions dropped to ~1% and
+  #               the cross-attention became uniform (entropy/log N ~0.99),
+  #               i.e. the model ignored the text entirely (val_text_delta
+  #               was +0.003 nats).
+  #   layer    -> historical single LayerNorm over the feature axis (the
+  #               collapse above).  Only for loading/evaluating <= v0.4
+  #               checkpoints.
+  #   none     -> raw residual stream.
+  memory_norm: temporal
+
+  # GPT-2 style residual scaling on the *initial* weights of the residual
+  # output projections (1/sqrt(2*n_layers) in the encoder, 1/sqrt(3*n_layers)
+  # in the decoder).  Keeps the residual stream from growing by >30x, which is
+  # what produced the runaway dimension in the first place.  Initialisation
+  # only: no extra parameters, no state_dict change.
+  residual_scale: true
 
   # Coarse-to-fine loss weighting over the K = 8 spec + 2 pitch codebooks
   # (order: spec0..spec7, pitch8, pitch9).  The optimised loss is
@@ -188,6 +220,15 @@ train:
   # Voicing decision threshold used by Generator.infer_from_codes when no
   # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
   pitch_uv_threshold: 0.5
+  # Text-conditioning diagnostic (v0.4.1), logged every epoch as
+  # `val_text_delta` = CE(with the batch's phonemes shuffled across samples)
+  # - CE(with the real ones), plus `val_text_delta/spec` and `/pitch`.
+  # It is computed on the first N validation batches (0 disables).  A value
+  # near 0 means the decoder ignores the phoneme memory: the run is then an
+  # unconditional code LM + speaker, and no amount of data/parameters helps.
+  # Reference: ~3.0 nats is the marginal entropy of a spec codebook, so a
+  # healthy run should show an O(0.1-1.0) nat gap; < 0.05 is effectively dead.
+  text_delta_batches: 4
   # TensorBoard logging of "what the model actually produces". Every
   # `sample_interval` epochs (and once at the start of training) 2_training.py
   # greedily/sampling-decodes `sample_count` val items and logs:

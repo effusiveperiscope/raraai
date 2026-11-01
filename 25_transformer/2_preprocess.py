@@ -238,6 +238,11 @@ def process_filelist(filelist_path,
         min_rms_db: Silence filter threshold in dBFS (`NO_DB_FLOOR` disables
             the filter). See `is_silent`.
         min_speech_frac: Also drop clips with fewer active frames than this.
+
+    Clips whose ASR/forced alignment produce an empty phoneme sequence (very
+    short interjections, usually) are dropped: their codes are valid but there
+    is no text to condition on, so they would only train the transformer as an
+    unconditional sample.
     """
     if checkpoint_path is None:
         raise ValueError('--checkpoint is required: path to a 1_training checkpoint')
@@ -271,6 +276,7 @@ def process_filelist(filelist_path,
     new_lines = []
     n_skipped_speaker = 0
     n_skipped_silent = 0
+    n_skipped_phone = 0
     n_reused = 0
     n_invalid = 0
 
@@ -372,9 +378,20 @@ def process_filelist(filelist_path,
                 net_g = load_generator(checkpoint_path, hp, device)
 
             feats, _ = fe.extract(wav_16k, transcription=transcr)
-            feats_ac = fe.extract_features_ac(wav_48k)
             phone_ids = list(itertools.chain.from_iterable(
                 [f['phone_ids'] for f in feats]))
+            if not phone_ids:
+                # ASR/forced alignment produced nothing (typically a very short
+                # interjection).  The codes would be fine, but with no phonemes
+                # the clip can only train the transformer as an *unconditional*
+                # sample -- it teaches the model to predict codes from nothing.
+                # Drop it instead of writing an unusable tensor (and don't write
+                # the tensors either, so a later --skip_existing run does not
+                # pick them up).
+                print(f'Skipping {base_line}: alignment produced no phonemes')
+                n_skipped_phone += 1
+                continue
+            feats_ac = fe.extract_features_ac(wav_48k)
 
             # Encode raw spec/f0 into discrete RVQ codes with the 1_training
             # Generator checkpoint (channel-first spec, frame-rate f0).
@@ -418,6 +435,8 @@ def process_filelist(filelist_path,
     print(f'Kept {len(new_lines)} file(s) ({n_reused} reused); '
           f'omitted {n_skipped_silent} silent/near-silent clip(s)'
           + (f' below {min_rms_db:.1f} dBFS' if silence_filter else '')
+          + (f', {n_skipped_phone} clip(s) with no phonemes'
+             if n_skipped_phone else '')
           + (f'; rebuilt {n_invalid} unusable tensor set(s)'
              if skip_if_one_exists and n_invalid else '')
           + '.')
