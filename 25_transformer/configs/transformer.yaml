@@ -20,6 +20,7 @@
 #          v0.4 checkpoints have no memory_gain/memory_bias keys: use
 #          --transfer_from (partial load), NOT --resume_from, to warm-start.
 # - bump batch size to 24
+# v0.4.2 - heteronym fix
 exp_name: transformer_v0.4.1
 tensorboard_version: 0
 

@@ -164,20 +164,33 @@ active-frame fraction, all dBFS) is printed. Notes:
   dropping clips never shifts items out of train into val. If *nothing*
   survives, the script raises instead of writing empty filelists.
 - `--skip_existing` reuses tensors already in `--output_dir` instead of
-  re-running the ASR/aligner + codec. Reuse is per file (only clips with a
-  missing tensor are encoded) and the existing tensors are header-checked
-  (`existing_tensors_ok`: `phone_ids` non-empty 1-D, `spec_codes`/`pitch_codes`
-  2-D with equal, non-zero frame counts), so corrupt entries are rebuilt.
-  `FeatureExtractor` and the stage-1 `Generator` are built lazily — a pure
-  reuse run never loads either, although `--checkpoint` is still required.
+  re-running the ASR/aligner + codec. Reuse is per file *and per tensor*, and
+  each tensor is header-checked on its own (`key_shape_ok`: `phone_ids`
+  non-empty 1-D, `spec_codes`/`pitch_codes` 2-D with a non-zero frame count;
+  `code_lengths_agree` for the `T` they share), so a corrupt entry is rebuilt
+  rather than entering the filelist. `FeatureExtractor` and the stage-1
+  `Generator` are built lazily *and only as heavy as needed* — a codes-only run
+  never loads Qwen3-ASR, and RMVPE is built on first pitch use — so a pure
+  reuse run touches neither. `--checkpoint` is therefore only required when
+  code tensors are (re)built.
+- `--only phone_ids|spec_codes|pitch_codes` (shorthands `phones`, `codes`,
+  `all`) selects which tensors are (re)built; the others are reused as-is, and
+  a clip whose reused tensor is missing/unusable is skipped with a printed hint
+  rather than silently re-encoded. This is what makes the two common re-runs
+  cheap: `--only phones` after a phonemizer/dictionary change (no codec at
+  all; add `--phones_from transcript` to also skip audio + ASR) and
+  `--only codes` after a new stage-1 checkpoint (no ASR/aligner weights).
+  `spec_codes` and `pitch_codes` always move together — one `encode_codes`
+  call produces both and they must share `T`. `--force` rebuilds the `--only`
+  keys even when `--skip_existing` would reuse them.
 
 **Clips with no phonemes are dropped too.** When the ASR + forced alignment
 return an empty phone sequence (typically a 0.4–0.9 s interjection such as
 "hmm"), the codes are still valid but there is no text to condition on, so the
 clip could only train the stage-2 transformer as an *unconditional* sample. The
-guard sits right after `fe.extract(...)` and before the codes are encoded, so
+guard sits right after the phones are built and before the codes are encoded, so
 neither the filelist entry nor the tensors are written (the count is printed in
-the final summary). `existing_tensors_ok` also rejects such a tensor, so
+the final summary). The header checks reject an empty `phone_ids` too, so
 `--skip_existing` rebuilds and then re-drops it — i.e. a corpus that still
 contains them (e.g. `data/genshin_full_stage2`, 1.0 % of the clips) should be
 rebuilt with this guard before a fresh stage-2 run.
@@ -197,12 +210,14 @@ per-word call tags each word in isolation and always returns the same
 pronunciation (~1 % of the `25_stage2_base1` utterances are affected, mostly
 `use`/`used`/`close`/`read`). The fix, already wired in, is:
 
-- `FeatureExtractor.extract` tags the whole utterance once
-  (`HorsePhonemizer.tag_words` over the aligner's items) and passes each tag
-  down as `phonemize(word, tag=...)`, so the heteronym branch of g2p_en's
-  homograph table (`g2p_en.homograph2features`, re-implemented in
+- `FeatureExtractor.phonemize_items` (used by `extract`) tags the whole
+  utterance once (`HorsePhonemizer.tag_words` over the aligner's items) and
+  passes each tag down as `phonemize(word, tag=...)`, so the heteronym branch of
+  g2p_en's homograph table (`g2p_en.homograph2features`, re-implemented in
   `_homograph_pronunciation`) sees real context. `phonemize(text)` with
-  `tag=None` still reproduces the old context-free behaviour.
+  `tag=None` still reproduces the old context-free behaviour, and
+  `phonemize_sentence` (what `--phones_from transcript` uses) tags the whole
+  transcript at once.
 - `new_horsewords.clean` accepts POS-qualified keys (`USE/VB  Y UW1 Z`,
   `LEAD/VB  L IY1 D`) for the cases g2p_en *still* gets wrong even in context
   (its tagger is a small perceptron: "use the tool" is tagged `IN`, and `lead`
@@ -211,9 +226,21 @@ pronunciation (~1 % of the `25_stage2_base1` utterances are affected, mostly
   `USE/VB` covers `VB/VBD/VBP/VBZ`; POS-qualified > plain word > g2p_en.
 
 Because `phone_ids` are baked into the tensors, a phonemizer change only takes
-effect on a re-run that rebuilds them: `--skip_existing` accepts the old
-`phone_ids` (it only checks shape), so delete `*.phone_ids` (which makes that
-clip's whole tensor set get rebuilt) or point `--output_dir` elsewhere.
+effect on a run that rebuilds them — which is now cheap and touches nothing
+else:
+
+```bash
+# re-phonemize only; spec/pitch codes are reused and the codec is never loaded
+python 2_preprocess.py --filelist ... --output_dir data/base2 --only phones
+# same, but also skip audio + ASR: phonemize the filelist transcript directly
+python 2_preprocess.py --filelist ... --output_dir data/base2 \
+    --only phones --phones_from transcript
+```
+
+Both write `phone_ids` per clip from scratch (the `--only` keys are rebuilt by
+default; `--skip_existing` would instead reuse the old ones — combine it with
+`--force` if you want to keep the reuse contract for the other keys). The
+filelists are rewritten as usual, from the same seeded shuffle.
 
 ---
 
@@ -483,19 +510,27 @@ Notes:
    `commons.py`/`utils.py` — be careful *which* `commons` an import resolves to
    (`import commons` = repo root; `from modeling.vits import commons` =
    vendored).
-5. **`--skip_existing` / `skip_if_one_exists`:** in `2_preprocess.py` the
-   "already exists" check skips per file (it used to `return` from the *whole
-   loop* on the first hit, truncating the filelists) and appends the existing
-   tensors to the new filelist. Reused tensor sets are header-checked by
-   `existing_tensors_ok` (`mmap=True`, shapes only: non-empty `phone_ids`,
-   2-D `spec_codes`/`pitch_codes` with equal, non-zero `T`), so a truncated or
-   inconsistent file falls through and is rebuilt instead of silently entering
-   the filelist. When the silence filter is on (its default — see §3) the
-   reused clips are still level-checked, which loads the audio but re-extracts
-   nothing; if the source audio has disappeared the clip is kept as-is instead
-   of being dropped. The heavy `FeatureExtractor` and the stage-1 `Generator`
-   are built lazily, so a reuse-only run never constructs either (a bogus
-   `--checkpoint` is harmless in that case). `1_preprocess.py` likewise skips
+5. **`--skip_existing` / `--only` / `skip_if_one_exists`:** in `2_preprocess.py`
+   state is decided **per file and per tensor**, which is what lets one stage be
+   re-run without the others. Each tensor is header-checked on its own
+   (`tensor_shape` + `key_shape_ok`: non-empty 1-D `phone_ids`, 2-D
+   `spec_codes`/`pitch_codes` with a non-zero frame count) so a truncated file is
+   rebuilt instead of silently entering the filelist; the pair *reused* code
+   tensors is additionally cross-checked by `code_lengths_agree`. Selected
+   (`--only`) tensors are rebuilt unless `--skip_existing` finds them usable
+   (`--force` overrides), while unselected tensors are reused and a clip is
+   skipped with a hint if one of them is missing. A phonemizer change is
+   therefore `--only phones` (no codec, no `--checkpoint`) and a new stage-1
+   checkpoint is `--only codes` (no ASR/aligner weights). The old bug where the
+   "already exists" check `return`ed from the *whole loop* on the first hit
+   (truncating the filelists) must not come back. When the silence filter is on
+   (its default — see §3) reused clips are still level-checked, which loads the
+   audio but re-extracts nothing; if the source audio has disappeared the clip
+   is kept as-is instead of being dropped (only a clip that still needs work is
+   skipped). `FeatureExtractor` and the stage-1 `Generator` are built lazily and
+   only as heavy as needed (`load_qwen=need_qwen`, RMVPE on demand), so a
+   reuse-only run never constructs either and a bogus `--checkpoint` is harmless
+   in that case. `1_preprocess.py` likewise skips
    per file and, with `--skip_existing`, also re-checks the clip length, so
    re-running it over an already-extracted corpus only rewrites
    `train.txt`/`val.txt` and never builds the heavy `FeatureExtractor`.
@@ -589,6 +624,16 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 --checkpoint checkpoints/base_v0.4/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json
 python 2_training.py --config configs/transformer.yaml
+
+# Stage 2, one tensor stage at a time (see §3): re-phonemize only
+python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
+    --output_dir data/base2 --only phones          # reuses both code tensors
+python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
+    --output_dir data/base2 --only phones --phones_from transcript   # no audio/ASR
+# ...or re-encode only (new stage-1 checkpoint; no ASR/aligner weights)
+python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
+    --output_dir data/base2 --only codes \
+    --checkpoint checkpoints/base_v0.5/last.ckpt
 
 # Rewrite the stage-2 filelists only (no re-extraction), now also dropping
 # silent/near-silent clips and clips that are <5% non-silent frames. The

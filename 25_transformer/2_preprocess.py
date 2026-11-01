@@ -23,6 +23,12 @@ logging.getLogger().setLevel(logging.WARNING)
 # Tensors written per source file, in the order they appear in the filelist.
 FEATURE_KEYS = ['phone_ids', 'spec_codes', 'pitch_codes']
 
+# The three tensors come from two independent stages: the text side
+# (`phone_ids`, cheap, CPU) and the acoustic side (both code tensors, produced
+# together by one `Generator.encode_codes` call). `--only` exploits that.
+PHONE_KEY = 'phone_ids'
+CODE_KEYS = ('spec_codes', 'pitch_codes')
+
 # Window used by the silence filter. 20 ms spans a couple of periods even for
 # a low male voice (~60 Hz -> 16.7 ms), so a voiced frame scores close to its
 # true level instead of being split across two windows.
@@ -47,61 +53,104 @@ def feature_paths(output_dir, base_line, keys=FEATURE_KEYS):
         os.path.basename(base_line) + '.' + key)) for key in keys]
 
 
-def existing_tensors_ok(savepaths, keys=FEATURE_KEYS):
-    """Check that already-written stage-2 tensors are usable.
-
-    `--skip_existing` reuses tensors from a previous run without loading the
-    audio, so the only cheap way to notice a truncated/corrupt file is to
-    inspect its header. The checks mirror what ``dataset_codes.py`` and
-    ``Generator.infer_from_codes`` require:
-
-    * `phone_ids` is a non-empty 1-D long tensor,
-    * `spec_codes` / `pitch_codes` are 2-D ``(Q, T)`` with a non-zero `T`,
-    * both code tensors share the same `T` (AGENTS.md footgun 7).
-
-    ``mmap=True`` maps the file instead of reading it, so checking a whole
-    corpus is cheap.
+def tensor_shape(path, key):
+    """Header-read a single stage-2 tensor.
 
     Args:
-        savepaths: Tensor paths in `keys` order, as returned by
-            `feature_paths`.
-        keys: Tensor suffixes, in the order they appear in `savepaths`.
+        path: Tensor file written by this script.
+        key: Tensor suffix (`phone_ids` / `spec_codes` / `pitch_codes`), used
+            for the error message only.
 
     Returns:
-        ``(ok, reason)`` where `reason` is an empty string when `ok` is True
-        and a short human-readable explanation otherwise.
+        ``(shape, reason)``: ``shape`` is a tuple, or ``None`` with a short
+        human-readable ``reason`` when the file is missing/unreadable.
+        ``mmap=True`` maps the file instead of reading it, so checking a whole
+        corpus is cheap; filesystems without mmap fall back to a full load.
     """
-    shapes = {}
-    for key, path in zip(keys, savepaths):
+    if not os.path.exists(path):
+        return None, f'{key} missing'
+    try:
+        value = torch.load(path, map_location='cpu', weights_only=True,
+                           mmap=True)
+    except (RuntimeError, OSError, ValueError):
+        # Filesystems without mmap support (or an older save format).
         try:
-            value = torch.load(path, map_location='cpu', weights_only=True,
-                               mmap=True)
-        except (RuntimeError, OSError, ValueError):
-            # Filesystems without mmap support (or an older save format).
-            try:
-                value = torch.load(path, map_location='cpu',
-                                   weights_only=True)
-            except Exception as e:  # corrupt / truncated file
-                return False, f'unreadable {key} ({e})'
-        shapes[key] = tuple(value.shape)
+            value = torch.load(path, map_location='cpu', weights_only=True)
+        except Exception as e:  # corrupt / truncated file
+            return None, f'unreadable {key} ({e})'
+    return tuple(value.shape), ''
 
-    phone_shape = shapes.get('phone_ids', ())
-    if len(phone_shape) != 1 or phone_shape[0] == 0:
-        return False, f'phone_ids has shape {phone_shape}'
 
-    code_shapes = {}
-    for key in ('spec_codes', 'pitch_codes'):
-        shape = shapes.get(key, ())
-        if len(shape) != 2 or shape[1] == 0:
-            return False, f'{key} has shape {shape}'
-        code_shapes[key] = shape
+def key_shape_ok(key, shape):
+    """Does one tensor's header satisfy what stage 2 requires?
 
-    n_spec = code_shapes['spec_codes'][1]
-    n_pitch = code_shapes['pitch_codes'][1]
+    The checks mirror ``dataset_codes.py`` / ``Generator.infer_from_codes``.
+    Each tensor is validated on its own so ``--only`` can rebuild just the one
+    that is broken (the cross-tensor frame-count check lives in
+    `code_lengths_agree`).
+    """
+    if key == 'phone_ids':
+        return len(shape) == 1 and shape[0] > 0
+    return len(shape) == 2 and shape[0] > 0 and shape[1] > 0
+
+
+def code_lengths_agree(shapes):
+    """``(ok, reason)``: spec_codes and pitch_codes need the same frame count.
+
+    They come out of a single ``encode_codes`` call (AGENTS.md footgun 7), so a
+    mismatch means one of them is stale/truncated.
+    """
+    n_spec = shapes['spec_codes'][1]
+    n_pitch = shapes['pitch_codes'][1]
     if n_spec != n_pitch:
         return False, (f'spec_codes/pitch_codes frame counts differ '
                        f'({n_spec} vs {n_pitch})')
     return True, ''
+
+
+# `--only` shorthands: name -> tensors it selects.
+ONLY_ALIASES = {
+    'phone': ['phone_ids'],
+    'phones': ['phone_ids'],
+    'text': ['phone_ids'],
+    'code': ['spec_codes', 'pitch_codes'],
+    'codes': ['spec_codes', 'pitch_codes'],
+    'acoustic': ['spec_codes', 'pitch_codes'],
+}
+
+
+def parse_only(value):
+    """argparse type for ``--only``: which tensors to (re)build.
+
+    Accepts ``all`` (the default) or a comma-separated list of
+    ``phone_ids``/``spec_codes``/``pitch_codes`` plus the ``phones`` and
+    ``codes`` shorthands. The selection is returned in `FEATURE_KEYS` order.
+
+    ``spec_codes`` and ``pitch_codes`` are always selected together: one
+    ``encode_codes`` call produces both and they must keep the same frame
+    count, so rebuilding only one would leave an inconsistent pair.
+    """
+    text = str(value).strip().lower()
+    if text in ('', 'all', 'everything', 'both'):
+        return list(FEATURE_KEYS)
+    selected = set()
+    for token in text.replace('+', ',').split(','):
+        token = token.strip()
+        if not token:
+            continue
+        if token in ONLY_ALIASES:
+            selected.update(ONLY_ALIASES[token])
+        elif token in FEATURE_KEYS:
+            selected.add(token)
+        else:
+            raise argparse.ArgumentTypeError(
+                f'unknown tensor {token!r}; expected one of '
+                f'{", ".join(FEATURE_KEYS)} (shorthands: phones, codes, all)')
+    if selected & {'spec_codes', 'pitch_codes'}:
+        selected |= {'spec_codes', 'pitch_codes'}
+    if not selected:
+        raise argparse.ArgumentTypeError('--only selected no tensors')
+    return [key for key in FEATURE_KEYS if key in selected]
 
 
 def audio_level_stats(wav, sr, frame_ms=SILENCE_FRAME_MS,
@@ -214,8 +263,18 @@ def process_filelist(filelist_path,
     val_fraction=0.05, output_dir='data/preprocessed', shuffle_seed=42,
     skip_if_one_exists=False, checkpoint_path=None, config_path='configs/base.yaml',
     device=None, speaker_map_path=None, min_rms_db=DEFAULT_MIN_RMS_DB,
-    min_speech_frac=0.0):
+    min_speech_frac=0.0, only=None, force=False, phones_from='aligner'):
     """Extract stage-2 (phone_ids, spec_codes, pitch_codes) for a filelist.
+
+    The three tensors are produced by independent stages, and each one is
+    written, validated and reused *on its own*, so a change to one stage no
+    longer forces the others to be recomputed:
+
+    * ``phone_ids`` — phonemizer / dictionary changes (`--only phones`),
+      optionally from the transcript alone (`--phones_from transcript`: no
+      audio, no ASR, no GPU).
+    * ``spec_codes`` + ``pitch_codes`` — codec / Generator changes
+      (`--only codes`), which skip the ASR/aligner weights entirely.
 
     Args:
         filelist_path: ``audio_path|sid|transcription`` lines.
@@ -223,14 +282,17 @@ def process_filelist(filelist_path,
             `val_stage2.txt`; the rest goes to `train_stage2.txt`.
         output_dir: Where tensors and both filelists are written.
         shuffle_seed: Seed for the pre-split shuffle.
-        skip_if_one_exists: Reuse tensors already in `output_dir` instead of
-            re-extracting them. Reuse is decided per file (a missing tensor
-            only re-extracts that clip) and the tensors are header-checked
-            (see `existing_tensors_ok`), so unusable files are rebuilt. The
-            silence filter still runs, which loads the audio but performs no
-            feature extraction, so silent clips can be dropped from an
+        skip_if_one_exists: Never overwrite a usable tensor: `selected` keys
+            that already exist are reused instead of recomputed (combine with
+            `force` to redo one of them). Tensors are header-checked one by
+            one (`key_shape_ok` / `code_lengths_agree`), so a corrupt file is
+            rebuilt instead of silently entering the filelist. The silence
+            filter still runs, which loads the audio but performs no feature
+            extraction, so silent clips can be dropped from an
             already-encoded corpus.
-        checkpoint_path: Stage-1 checkpoint used (frozen) as the codec.
+        checkpoint_path: Stage-1 checkpoint used (frozen) as the codec. Only
+            needed when code tensors are (re)built; a phones-only run may omit
+            it.
         config_path: Stage-1 config matching `checkpoint_path`.
         device: Torch device for the Generator; defaults to cuda if present.
         speaker_map_path: JSON map canonicalising ids into the stage-1 space
@@ -238,14 +300,37 @@ def process_filelist(filelist_path,
         min_rms_db: Silence filter threshold in dBFS (`NO_DB_FLOOR` disables
             the filter). See `is_silent`.
         min_speech_frac: Also drop clips with fewer active frames than this.
+        only: Tensors to (re)build, in `FEATURE_KEYS` order; see `parse_only`.
+            ``None`` (default) rebuilds all three. Keys *not* listed are reused
+            from `output_dir` and the clip is skipped if one of them is
+            missing/unusable.
+        force: Rebuild the `only` tensors even when `skip_if_one_exists` would
+            reuse them.
+        phones_from: ``aligner`` (default) derives the words from the forced
+            alignment, exactly as a full run does. ``transcript`` phonemizes
+            the filelist transcript directly (`FeatureExtractor.
+            phonemize_text`), which needs no audio/ASR at all, but it cannot
+            tell that a clip has no speakable text and loses word boundaries.
 
     Clips whose ASR/forced alignment produce an empty phoneme sequence (very
-    short interjections, usually) are dropped: their codes are valid but there
-    is no text to condition on, so they would only train the transformer as an
-    unconditional sample.
+    short interjections, usually) are dropped when `phone_ids` is rebuilt: the
+    codes are valid but there is no text to condition on, so the clip could
+    only train the transformer as an unconditional sample. Codes are then not
+    written either, so a later `--skip_existing` run does not pick them up.
     """
-    if checkpoint_path is None:
-        raise ValueError('--checkpoint is required: path to a 1_training checkpoint')
+    if phones_from not in ('aligner', 'transcript'):
+        raise ValueError("phones_from must be 'aligner' or 'transcript', "
+                         f'got {phones_from!r}')
+    if isinstance(only, str):
+        only = parse_only(only)
+    selected = [key for key in FEATURE_KEYS
+                if key in set(only if only is not None else FEATURE_KEYS)]
+    if not selected:
+        raise ValueError('only=... selected no tensors')
+    if any(key in CODE_KEYS for key in selected) and checkpoint_path is None:
+        raise ValueError(
+            '--checkpoint is required to (re)build spec/pitch codes; a '
+            'phones-only run (--only phones) does not need it')
 
     with open(filelist_path, 'r', encoding='utf-8') as f:
         lines = [line.strip() for line in f.readlines()]
@@ -260,8 +345,11 @@ def process_filelist(filelist_path,
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     # `FeatureExtractor` pulls in Qwen3-ASR/forced aligner + RMVPE and the
     # Generator needs a checkpoint load, so both are built lazily: only when a
-    # clip actually has to be extracted. A `--skip_existing` run with the
-    # silence filter off therefore never touches either.
+    # clip actually has to be extracted, and only as heavy as needed
+    # (`need_qwen` below: a codes-only or transcript-only run skips the ASR
+    # weights, and RMVPE is built on first pitch use). A `--skip_existing` run
+    # that rebuilds nothing with the silence filter off therefore never touches
+    # either.
     fe = None
     net_g = None
 
@@ -277,8 +365,20 @@ def process_filelist(filelist_path,
     n_skipped_speaker = 0
     n_skipped_silent = 0
     n_skipped_phone = 0
+    n_skipped_missing = 0
     n_reused = 0
+    n_rebuilt = 0
     n_invalid = 0
+
+    reused_keys = [key for key in FEATURE_KEYS if key not in selected]
+    # Only the alignment needs Qwen; `phonemize_text` and the codec do not.
+    need_qwen = PHONE_KEY in selected and phones_from == 'aligner'
+    print('Tensors: ' + ', '.join(selected)
+          + (f' (rebuild/validate) | reuse as-is: {", ".join(reused_keys)}'
+             if reused_keys else ' (rebuild/validate)')
+          + (f' | phones from {phones_from}' if PHONE_KEY in selected else '')
+          + (' | skip usable' if skip_if_one_exists and not force else '')
+          + (' | force rebuild' if force else ''))
 
     # `--min_rms_db none` (NO_DB_FLOOR) turns the silence filter off.
     silence_filter = min_rms_db is not None and min_rms_db > NO_DB_FLOOR
@@ -317,41 +417,73 @@ def process_filelist(filelist_path,
         else:
             sid = int(sid)
 
-        savepaths = feature_paths(output_dir, base_line)
-        reuse = (skip_if_one_exists
-                 and all(os.path.exists(p) for p in savepaths))
-        if reuse:
-            # Reusing skips audio + extraction, so validate what is on disk;
-            # a corrupt/inconsistent file falls through and is rebuilt.
-            ok, reason = existing_tensors_ok(savepaths)
-            if not ok:
-                print(f'Ignoring existing tensors for {base_line}: {reason}')
-                n_invalid += 1
-                reuse = False
-        # A reused clip needs no audio unless the silence filter has to
-        # re-check it, which is what makes `--skip_existing` usable for
-        # retroactively dropping silent clips from an existing corpus.
-        if reuse and not silence_filter:
-            n_reused += 1
-            new_lines.append('|'.join(savepaths) + f'|{sid}')
-            continue
+        paths = dict(zip(FEATURE_KEYS, feature_paths(output_dir, base_line)))
 
-        if not os.path.exists(line):
-            if reuse:
-                # The tensors are usable but the source audio is gone, so the
-                # level check cannot be re-run; keep the clip rather than
-                # dropping an entry that is already encoded.
-                print(f'Audio not found for {base_line}; '
-                      'keeping existing tensors')
-                n_reused += 1
-                new_lines.append('|'.join(savepaths) + f'|{sid}')
+        # Decide per tensor what to do. Selected tensors are rebuilt unless
+        # --skip_existing finds them usable (--force overrides that); the
+        # others are reused as-is and must already be usable on disk.
+        shapes = {}
+        rebuild = []
+        unusable = []
+        for key in FEATURE_KEYS:
+            shape, reason = tensor_shape(paths[key], key)
+            ok = shape is not None and key_shape_ok(key, shape)
+            if key not in selected:
+                if ok:
+                    shapes[key] = shape
+                else:
+                    unusable.append(key)
                 continue
-            print(f'File not found: {line}')
+            if ok and skip_if_one_exists and not force:
+                shapes[key] = shape
+                continue
+            if shape is not None and not ok:
+                print(f'Rebuilding {base_line}: {reason}')
+                n_invalid += 1
+            rebuild.append(key)
+
+        if unusable:
+            print(f'Skipping {base_line}: {", ".join(unusable)} missing or '
+                  'unusable on disk (rebuild with --only '
+                  f'{",".join(unusable)})')
+            n_skipped_missing += 1
             continue
 
-        # 48 kHz is the stage-1 feature rate, and the once-per-clip level check
-        # is done on it too.
-        wav_48k, _ = librosa.load(line, sr=48000)
+        # Reused code tensors must still agree (footgun 7); a mismatch can only
+        # be fixed by re-encoding, which `--only codes` does.
+        if all(key in shapes for key in CODE_KEYS):
+            agree, reason = code_lengths_agree(shapes)
+            if not agree:
+                print(f'Skipping {base_line}: {reason} '
+                      '(rebuild with --only codes)')
+                n_skipped_missing += 1
+                continue
+
+        # Audio is needed for the silence check, for the codes and for the
+        # alignment. A transcript-only phone rebuild needs none of it.
+        needs_audio = (silence_filter
+                       or any(key in CODE_KEYS for key in rebuild)
+                       or (PHONE_KEY in rebuild and phones_from == 'aligner'))
+        if needs_audio and not os.path.exists(line):
+            if rebuild:
+                print(f'File not found: {line}')
+                n_skipped_missing += 1
+                continue
+            # The tensors are usable but the source audio is gone, so the level
+            # check cannot be re-run; keep the clip rather than dropping an
+            # entry that is already encoded.
+            print(f'Audio not found for {base_line}; '
+                  'keeping existing tensors')
+            n_reused += 1
+            new_lines.append('|'.join(paths[key] for key in FEATURE_KEYS)
+                             + f'|{sid}')
+            continue
+
+        wav_48k = None
+        if needs_audio:
+            # 48 kHz is the stage-1 feature rate, and the once-per-clip level
+            # check is done on it too.
+            wav_48k, _ = librosa.load(line, sr=48000)
 
         if silence_filter:
             silent, stats = is_silent(
@@ -364,81 +496,85 @@ def process_filelist(filelist_path,
                       f'{stats["active_frac"]:.1%} active frames')
                 n_skipped_silent += 1
                 continue
-            if reuse:
-                n_reused += 1
-                new_lines.append('|'.join(savepaths) + f'|{sid}')
-                continue
 
-        wav_16k, _ = librosa.load(line, sr=16000)
-        savepaths = []
+        if not rebuild:
+            # Nothing to recompute: everything on disk is reused. The audio may
+            # have been loaded above purely for the level check.
+            n_reused += 1
+            new_lines.append('|'.join(paths[key] for key in FEATURE_KEYS)
+                             + f'|{sid}')
+            continue
         try:
             if fe is None:
-                fe = FeatureExtractor(hp=hp)
-            if net_g is None:
-                net_g = load_generator(checkpoint_path, hp, device)
+                fe = FeatureExtractor(hp=hp, load_qwen=need_qwen)
 
-            feats, _ = fe.extract(wav_16k, transcription=transcr)
-            phone_ids = list(itertools.chain.from_iterable(
-                [f['phone_ids'] for f in feats]))
-            if not phone_ids:
-                # ASR/forced alignment produced nothing (typically a very short
-                # interjection).  The codes would be fine, but with no phonemes
-                # the clip can only train the transformer as an *unconditional*
-                # sample -- it teaches the model to predict codes from nothing.
-                # Drop it instead of writing an unusable tensor (and don't write
-                # the tensors either, so a later --skip_existing run does not
-                # pick them up).
-                print(f'Skipping {base_line}: alignment produced no phonemes')
-                n_skipped_phone += 1
-                continue
-            feats_ac = fe.extract_features_ac(wav_48k)
+            if PHONE_KEY in rebuild:
+                if phones_from == 'transcript':
+                    # Cheapest path: no audio, no ASR, no GPU.
+                    phone_ids = (fe.phonemize_text(transcr)
+                                 if str(transcr).strip() else [])
+                else:
+                    wav_16k, _ = librosa.load(line, sr=16000)
+                    items = fe.phonemize_items(
+                        fe.align(wav_16k, transcription=transcr))
+                    phone_ids = list(itertools.chain.from_iterable(
+                        [it['phone_ids'] for it in items]))
+                if not phone_ids:
+                    # ASR/forced alignment produced nothing (typically a very
+                    # short interjection).  The codes would be fine, but with no
+                    # phonemes the clip can only train the transformer as an
+                    # *unconditional* sample -- it teaches the model to predict
+                    # codes from nothing.  Drop it instead of writing an
+                    # unusable tensor (and don't write the codes either, if they
+                    # were part of this run), so a later --skip_existing run
+                    # does not pick them up.
+                    print(f'Skipping {base_line}: no phonemes')
+                    n_skipped_phone += 1
+                    continue
+                # phone_ids [n_phone]
+                torch.save(torch.tensor(phone_ids), paths[PHONE_KEY])
 
-            # Encode raw spec/f0 into discrete RVQ codes with the 1_training
-            # Generator checkpoint (channel-first spec, frame-rate f0).
-            spec = feats_ac['spec']  # [T, C]
-            f0 = feats_ac['f0'].float()  # [T]
-            spec_b = spec.transpose(0, 1).unsqueeze(0).to(device)  # [1, C, T]
-            spec_l = torch.tensor([spec.shape[0]], device=device)
-            f0_b = f0.unsqueeze(0).to(device)  # [1, T]
-            sid_b = torch.tensor([int(sid)], device=device)
-            with torch.no_grad():
-                spec_codes, pitch_codes = net_g.encode_codes(
-                    spec_b, spec_l, f0_b, sid_b)
-            # encode_codes returns (Q, B, T_ds); drop batch dim -> (Q, T_ds).
-            spec_codes = spec_codes.squeeze(1).cpu()
-            pitch_codes = pitch_codes.squeeze(1).cpu()
+            if any(key in CODE_KEYS for key in rebuild):
+                if net_g is None:
+                    net_g = load_generator(checkpoint_path, hp, device)
+                feats_ac = fe.extract_features_ac(wav_48k)
 
-            feats_n = {
-                'phone_ids': torch.tensor(phone_ids),
-                'spec_codes': spec_codes,
-                'pitch_codes': pitch_codes,
-            }
-            # phone_ids [n_phone]
-            # spec_codes [Q_spec, T_codes] (Q_spec = codec.codebook_num)
-            # pitch_codes [Q_pitch, T_codes] (Q_pitch = pitch_codec.codebook_num)
-            for key, value in feats_n.items():
-                savepath = os.path.join(output_dir,
-                    os.path.basename(base_line) + '.' + key)
-                savepath = win_longpath(savepath)
-                torch.save(value, savepath)
-                savepaths.append(savepath)
+                # Encode raw spec/f0 into discrete RVQ codes with the 1_training
+                # Generator checkpoint (channel-first spec, frame-rate f0).
+                spec = feats_ac['spec']  # [T, C]
+                f0 = feats_ac['f0'].float()  # [T]
+                spec_b = spec.transpose(0, 1).unsqueeze(0).to(device)  # [1, C, T]
+                spec_l = torch.tensor([spec.shape[0]], device=device)
+                f0_b = f0.unsqueeze(0).to(device)  # [1, T]
+                sid_b = torch.tensor([int(sid)], device=device)
+                with torch.no_grad():
+                    spec_codes, pitch_codes = net_g.encode_codes(
+                        spec_b, spec_l, f0_b, sid_b)
+                # encode_codes returns (Q, B, T_ds); drop batch dim -> (Q, T_ds):
+                # spec_codes [Q_spec, T_codes] (Q_spec = codec.codebook_num)
+                # pitch_codes [Q_pitch, T_codes] (Q_pitch = pitch_codec.codebook_num)
+                torch.save(spec_codes.squeeze(1).cpu(), paths['spec_codes'])
+                torch.save(pitch_codes.squeeze(1).cpu(), paths['pitch_codes'])
 
         except Exception as e:
             print(f'Error processing {line}: {e}')
             continue
 
-        newline = '|'.join(savepaths)+f'|{sid}'
-        new_lines.append(newline)
+        n_rebuilt += 1
+        new_lines.append('|'.join(paths[key] for key in FEATURE_KEYS) + f'|{sid}')
 
     if smap is not None and n_skipped_speaker:
         print(f'Skipped {n_skipped_speaker} file(s) with no speaker-map match')
-    print(f'Kept {len(new_lines)} file(s) ({n_reused} reused); '
+    print(f'Kept {len(new_lines)} file(s) '
+          f'({n_reused} reused, {n_rebuilt} updated); '
           f'omitted {n_skipped_silent} silent/near-silent clip(s)'
           + (f' below {min_rms_db:.1f} dBFS' if silence_filter else '')
           + (f', {n_skipped_phone} clip(s) with no phonemes'
              if n_skipped_phone else '')
-          + (f'; rebuilt {n_invalid} unusable tensor set(s)'
-             if skip_if_one_exists and n_invalid else '')
+          + (f', {n_skipped_missing} clip(s) with missing/unusable tensors'
+             if n_skipped_missing else '')
+          + (f'; rebuilt {n_invalid} unusable tensor(s)'
+             if n_invalid else '')
           + '.')
 
     # Split the *kept* items, not the raw line count: omitting clips must not
@@ -470,18 +606,39 @@ if __name__ == '__main__':
     parser.add_argument('--val_fraction', type=float, default=0.05)
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--shuffle_seed', type=int, default=42)
-    parser.add_argument('--checkpoint', type=str, required=True,
-        help='path to 1_training (lightning or Generator) checkpoint')
+    parser.add_argument('--checkpoint', type=str, default=None,
+        help='path to 1_training (lightning or Generator) checkpoint; only '
+             'needed when spec_codes/pitch_codes are (re)built, i.e. required '
+             'unless --only excludes them')
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--only', type=parse_only, default=list(FEATURE_KEYS),
+        help='tensors to (re)build: "all" (default), a comma-separated subset '
+             'of phone_ids,spec_codes,pitch_codes, or the shorthands '
+             '"phones" (= phone_ids) and "codes" (= spec_codes,pitch_codes, '
+             'always rebuilt together). Tensors not listed are reused as-is '
+             'from --output_dir. Examples: "--only phones" after a phonemizer '
+             'or dictionary change (no audio/ASR/codec), "--only codes" after '
+             'a new stage-1 checkpoint (no ASR/aligner weights).')
+    parser.add_argument('--force', action='store_true',
+        help='rebuild the --only tensors even if --skip_existing would reuse '
+             'them (with --skip_existing alone nothing is ever overwritten)')
+    parser.add_argument('--phones_from', type=str, default='aligner',
+        choices=['aligner', 'transcript'],
+        help='how phone_ids are produced: "aligner" (default) phonemizes the '
+             'forced-aligned words, exactly like a full run; "transcript" '
+             'phonemizes the filelist transcript directly, which needs no '
+             'audio, ASR or GPU but keeps clips the aligner would have left '
+             'empty and drops word boundaries')
     parser.add_argument('--speaker_map', type=str, default=None,
         help='JSON map canonicalising speaker ids to the stage-1 space '
              '(see speaker_map.py)')
     parser.add_argument('--skip_existing', action='store_true',
-        help='reuse tensors already present in --output_dir instead of '
-             're-extracting them; reuse is decided per file and the tensors '
-             'are shape-checked, so missing/corrupt clips are rebuilt. The '
-             'silence check still runs (audio only, no extraction).')
+        help='never overwrite a usable tensor: the --only tensors are reused '
+             'if they already exist (add --force to redo them). Every tensor '
+             'is shape-checked on its own, so missing/corrupt files are '
+             'rebuilt. The silence check still runs (audio only, no '
+             'extraction).')
     parser.add_argument('--min_rms_db', type=db_floor, default=DEFAULT_MIN_RMS_DB,
         help='drop clips that are silent or near-silent: a clip is skipped '
              'when the RMS of its loudest 20 ms frame is below this level in '
@@ -508,4 +665,7 @@ if __name__ == '__main__':
         skip_if_one_exists=args.skip_existing,
         min_rms_db=args.min_rms_db,
         min_speech_frac=args.min_speech_frac,
+        only=args.only,
+        force=args.force,
+        phones_from=args.phones_from,
     )
