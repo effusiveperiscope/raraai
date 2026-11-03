@@ -658,6 +658,14 @@ python modeling/generator.py      # constructs a Generator, runs infer
 # run next to a training job; --device cuda for speed)
 python test_stage2_conditioning.py \
     --checkpoint checkpoints/transformer_v0.4.1/last.ckpt --batches 4
+
+# Phonemization smoke test: both stage-2 paths (transcript-only vs aligner),
+# per-word word|tag|phones tables plus PASS/FAIL checks and a cross-path diff
+python test_phonemize.py                     # default sentences + test.wav (ASR)
+python test_phonemize.py --skip_audio        # transcript path only (no Qwen, CPU)
+python test_phonemize.py --skip_text --audio test.wav \
+    --transcript "Hey. you don't sound too excited."   # forced alignment
+python test_phonemize.py --skip_audio --text "Use it." --expect YUW1S  # pin output
 ```
 
 There is no test suite in this repo; validation is done by running the ad-hoc
@@ -669,3 +677,9 @@ usage. `test_stage2_conditioning.py` is its stage-2 counterpart: it reports the
 encoder-memory scale/spread, the per-layer cross-attention entropy and the
 teacher-forced loss with real vs shuffled vs random phonemes, and prints a
 DEAD/WEAK/HEALTHY verdict on the text conditioning (see §4).
+`test_phonemize.py` covers the text side instead: it runs both ``phone_ids``
+paths (`phonemize_text` = ``--phones_from transcript`` and
+`align` + `phonemize_items` = ``--phones_from aligner``), prints the per-word
+word / Penn tag / phones table, checks the tensor invariants (non-empty, no
+``[UNK]``, ids inside the vocab, ``decode(ids)`` round-trip) and diffs the two
+paths on the same utterance, exiting non-zero on failure.
