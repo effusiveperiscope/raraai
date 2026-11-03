@@ -119,6 +119,20 @@ data:
   segment_size: 8000
   win_length: 1536
   hop_length: 480
+  # Per-clip level normalisation applied to the audio *before* the stage-1
+  # features and the stage-2 codes are computed (features.extract_features_ac).
+  # Must match configs/base.yaml: 2_preprocess.py loads this block from
+  # --config, and codes encoded from a different level than the codec was
+  # trained on decode at the wrong loudness. Genshin is already peak-normalised
+  # to ~0 dBFS (median peak -0.2 dBFS, 62 % of clips within 0.5 dB of full
+  # scale), so `peak` is ~a no-op there; it matters for quieter corpora (the
+  # MLP filelists sit ~10 dB lower). `none` reproduces the tensors and
+  # checkpoints produced before this key existed.
+  audio_norm:
+    mode: peak        # none | peak | rms
+    target_db: -1.0   # dBFS the reference is scaled to (keep < 0: tanh decoder)
+    max_gain_db: 30.0 # cap on boosting (a click/noise peak must not be +40 dB)
+    frame_ms: 20.0    # window for mode: rms
 
 # -------------------------------------------------------- stage-1 model ---
 # Only needed for the (optional) audio sampling during validation: the

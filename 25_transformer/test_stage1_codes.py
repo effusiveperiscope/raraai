@@ -234,6 +234,13 @@ def process_file(path: str, fe: FeatureExtractor, net_g: Generator, hp,
         print(f'  warning: {duration:.1f}s of audio is processed in one piece; '
               f'consider --max_seconds to bound memory')
 
+    # The reconstruction comes out at the level the tensors were built with
+    # (`data.audio_norm`), so compare it against the input at that same level:
+    # measuring a normalised synthesis against a *raw* quiet input would report
+    # the gain as a mel error. Normalising is idempotent, so the subsequent
+    # `extract_features_ac` (which applies it too) is unaffected.
+    wav, gain_db = fe.normalize_audio(wav, sampling_rate=sr)
+
     feats = fe.extract_features_ac(wav)
     spec = feats['spec']  # (T, C)
     f0_ref = feats['f0'].float().numpy()  # (T,)
@@ -262,6 +269,7 @@ def process_file(path: str, fe: FeatureExtractor, net_g: Generator, hp,
         'file': os.path.abspath(path),
         'seconds_in': round(duration, 3),
         'seconds_out': round(audio.size / sr, 3),
+        'audio_gain_db': round(float(gain_db), 2),
         'spec_frames': n_frames,
         'code_frames': n_codes,
         'spec_codes': code_stats(spec_codes_np, int(hp.codec.codebook_size)),
@@ -335,6 +343,7 @@ def print_result(index: int, total: int, result: dict) -> None:
           f'{result["code_frames"]} code frames')
     print(code_line('spec', result['spec_codes']))
     print(code_line('pitch', result['pitch_codes']))
+    print(f'  input gain: {result["audio_gain_db"]:+.2f} dB (data.audio_norm)')
     print(f'  mel L1: {_fmt(result["mel_l1_db"], ".2f")} dB | '
           f'f0 MAE: {_fmt(result["f0_mae_cents"], ".1f")} cents | '
           f'f0 RMSE: {_fmt(result["f0_rmse_hz"], ".1f")} Hz')

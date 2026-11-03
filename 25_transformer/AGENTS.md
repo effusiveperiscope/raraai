@@ -269,6 +269,55 @@ Two config files exist with **non-overlapping responsibilities**:
 
 Use conda env raraai25 for environment with dependencies including GPU pytorch.
 
+### Audio level normalisation (preprocessing, both stages)
+
+`features.FeatureExtractor.extract_features_ac` levels every clip **before** it
+computes the stage-1 `wave`/`spec`/`f0` and, because `2_preprocess.py` uses the
+same extractor, before the stage-2 codes are encoded. So one setting keeps both
+stages (and the codec's training and inference inputs) at the same operating
+point. It is controlled by an optional `data.audio_norm` block, present in
+`configs/base.yaml` **and** `configs/transformer.yaml` (they must match — codes
+encoded at a different level than the codec was trained on decode at the wrong
+loudness):
+
+```yaml
+data:
+  audio_norm:
+    mode: peak        # none | peak | rms
+    target_db: -1.0   # dBFS the reference is scaled to
+    max_gain_db: 30.0 # cap on boosting (never on attenuation)
+    frame_ms: 20.0    # window for mode: rms
+```
+
+Notes:
+
+- `none` reproduces the historical behaviour, i.e. every tensor and checkpoint
+  produced before this key existed was built from raw audio. `peak` scales the
+  loudest sample to `target_db`; `rms` scales the loudest `frame_ms` window
+  (a closer proxy for perceived loudness, and less sensitive to a single click,
+  without a `pyloudnorm` dependency).
+- Keep `target_db` **below 0**: the stage-1 decoder ends in `tanh`, so a target
+  at full scale is unreachable and would bias the output layer. `max_gain_db`
+  stops a clip whose peak is a click or a noise blip from being boosted by tens
+  of dB; near-silent input is returned unchanged.
+- The gain is **not** stored on disk, and it is applied inside
+  `extract_features_ac`, so `--skip_existing` cannot detect a changed setting.
+  Changing it requires rebuilding the stage-1 tensors (their `spec`/`wave` were
+  built at the old level; `1_preprocess.py` has no `--force`, so use a fresh
+  `--output_dir`) and then `2_preprocess.py --only codes --force`. The
+  `phone_ids` are unaffected.
+- `f0` is gain-invariant, so pitch tracking and the pitch codec are unchanged.
+- `2_preprocess.py`'s silence filter still runs on the **raw** audio before
+  `extract_features_ac`, so normalising does not resurrect quiet/noisy clips
+  that the level check is meant to drop.
+- `normalize_waveform`/`normalize_audio` are idempotent, which is why
+  `test_stage1_codes.py` can normalise the input for its metrics and then still
+  feed it to `extract_features_ac`; it prints the applied gain.
+- Measured reference points: Genshin is already peak-normalised to ~0 dBFS
+  (median peak −0.2 dBFS, 62 % of clips within 0.5 dB of full scale), so
+  `peak`/`-1.0` changes it by well under 1 dB; the MLP filelists are ~10 dB
+  quieter (median peak −10.7, RMS −28.3 dBFS).
+
 ### Codebook loss weighting (stage 2)
 
 The per-codebook cross-entropies are **not** averaged uniformly. `CodeTransformer`

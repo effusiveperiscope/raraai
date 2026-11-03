@@ -30,12 +30,103 @@ def _f0_span(f0, start_time, end_time, hop=160, sr=16000):
     return f0[start_frame:end_frame].astype(np.float64, copy=True)
 
 
+# Defaults for the optional ``data.audio_norm`` block in configs/base.yaml.
+# ``mode: none`` reproduces the historical behaviour (raw audio), which is what
+# every stage-1/stage-2 tensor and checkpoint produced before this key existed
+# was built with.
+AUDIO_NORM_DEFAULTS = {
+    'mode': 'none',
+    'target_db': -1.0,
+    'max_gain_db': 30.0,
+    'frame_ms': 20.0,
+}
+
+# Levels below this are treated as digital silence: normalising them would only
+# amplify the noise floor (or divide by ~0).
+SILENCE_LEVEL = 1e-8
+
+
+def normalize_waveform(wav, mode='none', target_db=-1.0, max_gain_db=30.0,
+                       frame_ms=20.0, sampling_rate=48000):
+    """Scale one clip to a fixed level. Returns ``(wav, gain_db)``.
+
+    This is applied by `FeatureExtractor.extract_features_ac`, i.e. to the
+    audio that produces the stage-1 ``.wave``/``.spec`` tensors and -- through
+    ``2_preprocess.py``, which uses the same extractor -- the stage-2 code
+    tensors, so both stages see the same operating point. The pitch contour is
+    gain-invariant, so only ``wave`` and ``spec`` change.
+
+    Args:
+        wav: 1-D mono float waveform in [-1, 1] (48 kHz for stage 1).
+        mode: ``'none'`` (identity), ``'peak'`` (loudest sample) or ``'rms'``
+            (loudest `frame_ms` window). Mirrors ``data.audio_norm.mode``.
+        target_db: Level the reference is scaled *to*, in dBFS. Keep this below
+            0: the stage-1 decoder ends in ``tanh``, so a target at full scale
+            is not reachable.
+        max_gain_db: Never boost by more than this, so a clip whose peak is a
+            single click (or a noise blip) is not amplified by 40 dB. The cap
+            only limits boosting, never attenuation.
+        frame_ms: Window length used by ``mode='rms'``.
+        sampling_rate: Sample rate of `wav`; only used by ``mode='rms'``.
+
+    Returns:
+        ``(wav, gain_db)`` where `wav` is the scaled waveform (same dtype,
+        clipped to [-1, 1]) and `gain_db` is the gain applied. ``mode='none'``,
+        near-silent input and a gain within 1e-4 of unity (float rounding) all
+        return the input unchanged with ``gain_db = 0.0``. The function is
+        idempotent: applying it to an already-normalised clip yields
+        ``gain_db = 0.0``.
+
+    Raises:
+        ValueError: `mode` is not one of ``none``/``peak``/``rms``.
+    """
+    wav = np.asarray(wav)
+    if mode in (None, 'none') or wav.size == 0:
+        return wav, 0.0
+
+    if mode == 'peak':
+        level = float(np.max(np.abs(wav)))
+    elif mode == 'rms':
+        frame = max(1, int(round(float(frame_ms) * 1e-3 * sampling_rate)))
+        usable = (wav.size // frame) * frame
+        if usable >= frame:
+            frames = np.asarray(wav[:usable], dtype=np.float64)
+            level = float(np.sqrt(
+                np.mean(frames.reshape(-1, frame) ** 2, axis=1)).max())
+        else:
+            level = float(np.sqrt(np.mean(
+                np.asarray(wav, dtype=np.float64) ** 2)))
+    else:
+        raise ValueError("data.audio_norm.mode must be 'none', 'peak' or "
+                         f"'rms', got {mode!r}")
+
+    if not np.isfinite(level) or level < SILENCE_LEVEL:
+        return wav, 0.0
+
+    target = 10.0 ** (float(target_db) / 20.0)
+    gain = min(target / level, 10.0 ** (float(max_gain_db) / 20.0))
+    # A gain this close to unity is float rounding (e.g. a clip that is already
+    # at `target_db`): return the input untouched so the function is *exactly*
+    # idempotent and preprocessing never rewrites audio for ~1e-8 dB.
+    if abs(gain - 1.0) < 1e-4:
+        return wav, 0.0
+    # Clip defensively: target_db >= 0 (or float rounding at full scale) could
+    # otherwise leave samples outside the [-1, 1] range the decoder's tanh
+    # output lives in.
+    out = np.clip(wav * gain, -1.0, 1.0)
+    return out.astype(wav.dtype, copy=False), float(20.0 * math.log10(gain))
+
+
 class FeatureExtractor:
     def __init__(self, hp, device="cuda:0",
         load_qwen=True):
         self.dtype = torch.bfloat16
         self.device = device
         self.hp = hp
+        # Gain applied by the last `extract_features_ac` / `normalize_audio`
+        # call, in dB (0.0 when `data.audio_norm.mode` is `none`). The gain is
+        # not written to disk, so this is the only record of it.
+        self.last_gain_db = 0.0
 
         # ``None`` means "not loaded": only ``align()`` needs the ASR /
         # forced-aligner weights, so code that only wants spec/f0 or phones
@@ -82,6 +173,50 @@ class FeatureExtractor:
         if self._rmvpe_model is None:
             self._rmvpe_model = RMVPEModel(device=self.device, is_half=True)
         return self._rmvpe_model
+
+    def audio_norm_settings(self):
+        """The ``data.audio_norm`` block as a plain dict with defaults filled in.
+
+        A config without the key (or without a ``data`` block) resolves to
+        ``mode: 'none'``, i.e. the historical raw-audio behaviour.
+        """
+        settings = dict(AUDIO_NORM_DEFAULTS)
+        try:
+            data_cfg = self.hp.get('data', None)
+        except (AttributeError, TypeError):
+            data_cfg = None
+        cfg = data_cfg.get('audio_norm', None) if data_cfg is not None else None
+        if cfg is not None:
+            for key in settings:
+                if key in cfg:
+                    settings[key] = cfg[key]
+        return settings
+
+    def normalize_audio(self, data, sampling_rate=None):
+        """Apply the configured ``data.audio_norm`` to one clip.
+
+        Args:
+            data: 1-D mono waveform at `sampling_rate` (48 kHz for stage 1).
+            sampling_rate: Rate of `data`; defaults to
+                ``hp.data.sampling_rate``. Only used by ``mode='rms'``.
+
+        Returns:
+            ``(wav, gain_db)``; the gain is also stored on
+            ``self.last_gain_db`` for logging.
+        """
+        if sampling_rate is None:
+            # `.get`, not `getattr`: OmegaConf raises ConfigAttributeError for a
+            # missing key, which `getattr`'s default does not swallow.
+            try:
+                data_cfg = self.hp.get('data', None)
+            except (AttributeError, TypeError):
+                data_cfg = None
+            sampling_rate = int(data_cfg.get('sampling_rate', 48000)
+                                if data_cfg is not None else 48000)
+        wav, gain_db = normalize_waveform(
+            data, sampling_rate=sampling_rate, **self.audio_norm_settings())
+        self.last_gain_db = gain_db
+        return wav, gain_db
 
     def extract_spec(self, data_16k):
         data_16k = torch.from_numpy(data_16k).unsqueeze(0)
@@ -275,6 +410,11 @@ class FeatureExtractor:
         return out, f0
 
     def extract_features_ac(self, data_48k):
+        # Level-normalise once, up front: `wave` is the stage-1 GAN target and
+        # `spec` is what the (frozen) codec sees in stage 2, so both must be on
+        # the same scale. The pitch contour is gain-invariant. See
+        # `data.audio_norm` in configs/base.yaml (default: `none`).
+        data_48k, _ = self.normalize_audio(data_48k)
         data_16k = librosa.resample(data_48k, orig_sr=48000, target_sr=16000)
         ret = {
             'wave': torch.from_numpy(data_48k),
