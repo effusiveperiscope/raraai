@@ -411,6 +411,7 @@ def process_filelist(filelist_path,
             resolved = speaker_map_lib.resolve_sid(
                 smap, path=base_line, raw_sid=int(sid))
             if resolved is None:
+                print(f"Skipped line {base_line} due to no sid resolution")
                 n_skipped_speaker += 1
                 continue
             sid = resolved
