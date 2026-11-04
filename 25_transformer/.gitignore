@@ -3,5 +3,7 @@ peaks
 filelists
 data
 logs
+archived_logs/
+archived_checkpoints/
 test_out
 *.wav

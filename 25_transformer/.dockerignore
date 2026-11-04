@@ -7,6 +7,8 @@
 # --- generated / large artefacts --------------------------------------------
 data/
 logs/
+archived_logs/
+archived_checkpoints/
 checkpoints/
 test_out/
 peaks/
