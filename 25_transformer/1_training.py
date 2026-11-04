@@ -60,6 +60,9 @@ class TrainModule(pl.LightningModule):
         self.net_dp = net_dp
         self.config = config
         self.pitch_only = bool(config.train.get('pitch_only', False))
+        # Same value the Trainer gets as log_every_n_steps; used to skip the
+        # per-step bookkeeping of the auxiliary metrics (see training_step).
+        self.log_interval = max(1, int(config.train.get('log_interval', 50)))
 
     def setup(self, stage=None):
         hp = self.config
@@ -71,7 +74,8 @@ class TrainModule(pl.LightningModule):
                             mel_fmin=hp.data.mel_fmin,
                             mel_fmax=hp.data.mel_fmax,
                             center=False,
-                            device=self.device)
+                            device=self.device,
+                            check_range=bool(hp.train.get('stft_range_check', False)))
         self.stft_criterion = MultiResolutionSTFTLoss(self.device, eval(hp.mrd.resolutions))
         self.f0_stft = STFTLoss(self.device, 
             fft_size=512, shift_size=50, win_length=200, window="hann_window")
@@ -115,6 +119,54 @@ class TrainModule(pl.LightningModule):
 
     def on_train_start(self):
         self.test()
+        self._maybe_compile_dec()
+
+    def _maybe_compile_dec(self):
+        """Optionally ``torch.compile`` the NSF decoder (``train.compile_dec``).
+
+        Only ``net_g.dec`` is compiled. Measured on a 5060 Ti at batch 32:
+        the decoder is ~12 % of a step and runs ~1.14x faster compiled, while
+        ``net_d`` compiles cleanly to ~1.0x (it is cuFFT/cuDNN bound, its
+        spectrogram STFT cannot run in bf16) and ``net_g`` as a whole only
+        reaches ~1.1x because of 6 dynamo graph breaks (tensor-index slicing in
+        ``rand_slice_segments_with_pitch`` and the quantiser's EMA buffers).
+
+        Notes:
+        * The compile target is ``dec.forward``, not the module: wrapping the
+          module would prepend ``_orig_mod.`` to every decoder key in
+          ``state_dict()`` and make the checkpoints incompatible.
+        * Called from ``on_train_start`` (after the initial ``test()``), so the
+          audio logged at train start is produced by the eager path and the
+          model is already on the device.
+        * The warm-up call pays the ~15 s compilation up front, and turns a
+          compile failure into a printed fallback to eager instead of dying at
+          step 0. Its RNG side effects are undone, so ``compile_dec: true`` and
+          ``false`` differ only in speed.
+        """
+        if not bool(self.config.train.get('compile_dec', False)):
+            return
+        hp = self.config
+        seg = hp.data.segment_size // hp.data.hop_length
+        spk = torch.zeros(1, hp.vits.gin_channels, device=self.device)
+        x = torch.zeros(1, hp.vits.inter_channels, seg, device=self.device)
+        f0 = torch.full((1, seg), 200.0, device=self.device)
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all()
+        try:
+            compiled = torch.compile(self.net_g.dec.forward, dynamic=True)
+            # The Trainer runs `bf16-mixed`; compile under the same autocast so
+            # the first real step does not trigger a second specialisation.
+            with torch.autocast(device_type=self.device.type,
+                                dtype=torch.bfloat16):
+                compiled(spk, x, f0)
+            self.net_g.dec.forward = compiled
+            print('torch.compile: net_g.dec.forward')
+        except Exception as exc:
+            print(f'torch.compile failed for net_g.dec, keeping eager: {exc}')
+        finally:
+            torch.set_rng_state(cpu_rng)
+            if torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(cuda_rng)
 
     def on_train_epoch_end(self):
         self.test()
@@ -314,6 +366,20 @@ class TrainModule(pl.LightningModule):
                 fake_audio.squeeze(1), audio.squeeze(1), voiced_mask_mel=voiced_mask_smooth)
             stft_loss = (sc_loss + mag_loss) * hp.train.c_stft
 
+            # --- ONE discriminator pass over real audio for the whole step ---
+            # The real branch is needed twice: its feature maps are the target of
+            # the generator's feature-matching loss, and its scores are the
+            # "real" term of the discriminator loss below. Running it once and
+            # sharing the result removes a full forward+backward of net_d per
+            # step (~190 ms at batch 32). `loss_g` only back-propagates through
+            # `disc_fake` -- the real features are detached below, so this graph
+            # stays alive untouched until the D update, which therefore needs no
+            # `retain_graph`.
+            disc_real = self.net_d(audio)
+            # Detached: feat_loss needs these as a target only. Leaving the graph
+            # attached would make loss_g's backward traverse (and then free) it.
+            disc_real_feats = [[f.detach() for f in feats] for feats, _ in disc_real]
+
             # Generator Loss
             disc_fake = self.net_d(fake_audio)
             score_loss = 0.0
@@ -322,9 +388,8 @@ class TrainModule(pl.LightningModule):
             score_loss = score_loss / len(disc_fake)
 
             # Feature Loss
-            disc_real = self.net_d(audio)
             feat_loss = 0.0
-            for (feat_fake, _), (feat_real, _) in zip(disc_fake, disc_real):
+            for (feat_fake, _), feat_real in zip(disc_fake, disc_real_feats):
                 for fake, real in zip(feat_fake, feat_real):
                     feat_loss += torch.mean(torch.abs(fake - real))
             feat_loss = feat_loss / len(disc_fake)
@@ -340,15 +405,21 @@ class TrainModule(pl.LightningModule):
         c_pitch_adv = self.config.train.get('c_pitch_adv', 1.0)
         c_pitch_feat = self.config.train.get('c_pitch_feat', 1.0)
 
+        # Same single-pass trick as the main discriminator: one pass over the
+        # real pitch contour serves the generator's pitch feature-matching loss
+        # and the pitch-D update below.
+        pitch_disc_real = self.net_dp(pitch_real, voiced=pitch_voiced)
+        pitch_disc_real_feats = [[f.detach() for f in feats]
+                                 for feats, _ in pitch_disc_real]
+
         pitch_disc_fake = self.net_dp(pitch_fake, voiced=pitch_voiced)
         pitch_score_loss = 0.0
         for (_, score_fake) in pitch_disc_fake:
             pitch_score_loss += torch.mean(torch.pow(score_fake - 1.0, 2))
         pitch_score_loss = pitch_score_loss / len(pitch_disc_fake)
 
-        pitch_disc_real = self.net_dp(pitch_real, voiced=pitch_voiced)
         pitch_feat_loss = 0.0
-        for (feat_fake, _), (feat_real, _) in zip(pitch_disc_fake, pitch_disc_real):
+        for (feat_fake, _), feat_real in zip(pitch_disc_fake, pitch_disc_real_feats):
             for fake, real in zip(feat_fake, feat_real):
                 pitch_feat_loss += torch.mean(torch.abs(fake - real))
         pitch_feat_loss = pitch_feat_loss / len(pitch_disc_fake)
@@ -372,11 +443,12 @@ class TrainModule(pl.LightningModule):
             sched_g.step()
 
         # Discriminator Loss (main audio discriminator — skipped in pitch-only
-        # mode, where net_d is frozen and does not participate).
+        # mode, where net_d is frozen and does not participate). The real pass is
+        # the one taken above: the generator step does not touch net_d, so those
+        # scores are current, and that graph has not been backwarded yet.
         loss_d = None
         if not pitch_only:
             disc_fake = self.net_d(fake_audio.detach())
-            disc_real = self.net_d(audio)
             loss_d = 0.0
             for (_, score_fake), (_, score_real) in zip(disc_fake, disc_real):
                 loss_d += torch.mean(torch.pow(score_real - 1.0, 2))
@@ -389,9 +461,8 @@ class TrainModule(pl.LightningModule):
                 optim_d.step()
                 sched_d.step()
 
-        # Pitch Discriminator Loss
+        # Pitch Discriminator Loss (real scores reused from the pass above)
         pitch_disc_fake = self.net_dp(pitch_fake.detach(), voiced=pitch_voiced)
-        pitch_disc_real = self.net_dp(pitch_real, voiced=pitch_voiced)
         loss_dp = 0.0
         for (_, score_fake), (_, score_real) in zip(pitch_disc_fake, pitch_disc_real):
             loss_dp += torch.mean(torch.pow(score_real - 1.0, 2))
@@ -429,10 +500,21 @@ class TrainModule(pl.LightningModule):
             return None
         
         prog_bar_set = {'loss_g', 'loss_d'}
+        # `self.log` in training_step is per-step only (Lightning's default is
+        # on_epoch=False), and the TensorBoard writer itself throttles to
+        # log_every_n_steps. So the auxiliary scalars only need to be logged on
+        # the steps Lightning would actually write, which keeps the step curves
+        # identical while dropping ~15 metric bookkeepings on the other steps.
+        every = self.log_interval
+        batches = self.trainer.num_training_batches
+        log_aux = ((batch_idx + 1) % every == 0) or (batch_idx + 1 >= batches)
         for k,v in ret.items():
             if v is None:
                 continue
-            self.log(k, v, prog_bar=k in prog_bar_set, logger=True)
+            on_bar = k in prog_bar_set
+            if not (on_bar or log_aux):
+                continue
+            self.log(k, v, prog_bar=on_bar, logger=True)
         return ret
 
     def validation_step(self, batch, batch_idx):
@@ -534,7 +616,10 @@ def train(config,
     train_dataloader = train_dataset.loader(
         batch_size=config.train.batch_size, shuffle=True, num_workers=num_workers,
             persistent_workers=num_workers > 0,
-            pin_memory=config.train.get('pin_memory', False))
+            pin_memory=config.train.get('pin_memory', False),
+            # Every step then has the same shapes, which is what keeps a
+            # compiled decoder (train.compile_dec) at a single specialisation.
+            drop_last=config.train.get('drop_last', True))
     val_dataloader = val_dataset.loader(
         batch_size=config.train.batch_size, shuffle=False, num_workers=num_workers, 
             persistent_workers=num_workers > 0,

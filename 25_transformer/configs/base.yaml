@@ -126,3 +126,18 @@ train:
   val_filelist: data/genshin_full_stage1/val.txt
   max_steps: 3e7
   cosine_anneal_end: 2e6
+  # --- speed knobs (no effect on the model or the losses) --------------------
+  # torch.compile the NSF decoder only. It is ~12 % of a step and measures
+  # ~1.14x compiled; net_d compiles cleanly but gains ~0 (cuFFT/cuDNN bound) and
+  # net_g as a whole only reaches ~1.1x (6 dynamo graph breaks), so nothing else
+  # is compiled. See AGENTS.md §4.
+  compile_dec: true
+  # Drop the final, partial batch: keeps every step at identical shapes (one
+  # torch.compile specialisation) and discards <= batch_size clips per epoch.
+  drop_last: true
+  # TacotronSTFT.mel_spectrogram asserts |wav| <= 1 by default, which costs a
+  # GPU->CPU sync per call (twice per step). The generator output is tanh-bounded
+  # and the targets are level-normalised below full scale, so training skips it.
+  # Set true to restore the data sanity check (a failing assert on the target
+  # audio makes step() skip that batch).
+  stft_range_check: false

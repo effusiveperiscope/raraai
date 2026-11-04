@@ -318,6 +318,76 @@ Notes:
   `peak`/`-1.0` changes it by well under 1 dB; the MLP filelists are ~10 dB
   quieter (median peak −10.7, RMS −28.3 dBFS).
 
+### Stage-1 step cost, single-pass critics, and torch.compile
+
+An audited step of `1_training.py` at `batch_size: 32` (`base_v0.4.7d`,
+0.805 s/step on a 5060 Ti) splits roughly:
+
+| component | ms |
+|---|---|
+| `enc_q` + `codec` fwd+bwd (the dataset hands over 8 s of spec, `T=800`) | 136 |
+| `dec` (NSF) fwd+bwd (`segment_size/hop_length` = 16 frames = 0.16 s) | 99 |
+| discriminator work **as originally written** (4 fwd + 3 graph-bwds) | 511 |
+| pitch discriminator, mel + multi-res STFT, 3 × AdamW, Lightning/data | ~57 |
+
+The discriminator dominated because `step()` called `net_d` **four** times per
+iteration: `d(fake)` and `d(audio)` for the generator losses, then
+`d(fake.detach())` and `d(audio)` again for the D loss, with the G-phase
+backward traversing both graphs. Since then:
+
+- **One real pass per step.** `step()` computes `disc_real = net_d(audio)` once,
+  uses its feature maps (`.detach()`ed — they are only a target for the
+  feature-matching loss) for the generator loss and its scores for the D loss.
+  `loss_g` now back-propagates through `disc_fake` only, so the real graph is
+  still intact when the D update runs and no `retain_graph` is needed. The
+  weights are identical in both uses (the generator step does not touch
+  `net_d`), so the losses are bit-identical and the generator's gradient is
+  unchanged; the only difference is that the gradients `loss_g` used to push
+  into `net_d` (thrown away by `optim_d.zero_grad()` a few lines later) are
+  never computed. `net_dp` gets the same treatment. Measured: 511 → 324 ms for
+  the discriminator work, 0.848 → 0.709 s/step end to end. **If you add another
+  loss that reads discriminator output, take it from `disc_real` /
+  `disc_real_feats` instead of calling `net_d` again.**
+- **`train.compile_dec`** (default `true` in `configs/base.yaml`) wraps
+  `net_g.dec.forward` in `torch.compile(..., dynamic=True)` from
+  `on_train_start` (after the initial `test()`). Only the decoder: it is ~12 %
+  of a step and runs 1.14x compiled, while `net_d` compiles cleanly (1 graph, 0
+  breaks) to **1.0x** — it is bound by its fp32 cuFFT spectrogram STFTs (that
+  is why `Discriminator.forward` casts with `x.float()`; `cuFFT doesn't support
+  tensor of type: BFloat16`) and cuDNN convs — and `net_g` as a whole only
+  reaches 1.1x (7 graphs, 6 breaks: 4 × "Dynamic slicing with Tensor arguments"
+  from `rand_slice_segments_with_pitch`, 2 resume-point breaks in the
+  quantiser's EMA buffer updates). Details that matter:
+  - It patches `dec.forward`, **not** the module. `torch.compile(module)` returns
+    an `OptimizedModule` whose `_orig_mod` child renames every decoder key in
+    `state_dict()` (`net_g.dec._orig_mod.*`), which breaks checkpoint loading.
+    Verified: 497 keys before and after, no `_orig_mod`, values untouched, and
+    a fresh `Generator` loads the compiled-state `state_dict` with no mismatch.
+  - The warm-up call compiles up front (~15-100 s) and a failure there falls
+    back to eager with a printed message instead of dying at step 0. Its RNG
+    side effects are undone, so `compile_dec: true`/`false` differ only in speed.
+  - `dynamic=True` because validation batches have a different `T` (val skips
+    `RandomSubsample`); `train.drop_last: true` keeps training at one shape.
+- **`train.stft_range_check`** (default `false`) drops the `assert |x| <= 1`
+  guards in `TacotronSTFT.mel_spectrogram`/`linear_spectrogram` — each is a full
+  reduction plus a GPU→CPU sync, and training calls it twice per step. The
+  generator output is tanh-bounded and the targets are level-normalised below
+  full scale, so the guard is only a data sanity check; `check_range=True`
+  (the `TacotronSTFT` default) restores it. Note the `except AssertionError:
+  return None` in `step()` ("mel_real error, skip") can therefore no longer fire
+  — set `stft_range_check: true` if you are debugging a corpus with over-range
+  samples.
+- **Metric gating.** `training_step` only calls `self.log` for the auxiliary
+  scalars on the steps Lightning would write anyway
+  (`(batch_idx + 1) % log_every_n_steps == 0`, matching `should_update_logs`);
+  `self.log` in `training_step` is `on_step=True, on_epoch=False`, so nothing
+  that is aggregated per epoch is lost. `loss_g`/`loss_d` (progress bar) are
+  logged every step.
+
+PyTorch updates these numbers; the way to re-measure is a short run of the same
+config for the current code and for `git stash`ed code, then median
+`Δt/Δstep` from the `loss_g` scalars in the TensorBoard events.
+
 ### Codebook loss weighting (stage 2)
 
 The per-codebook cross-entropies are **not** averaged uniformly. `CodeTransformer`

@@ -34,7 +34,7 @@ from librosa.filters import mel as librosa_mel_fn
 class TacotronSTFT(torch.nn.Module):
     def __init__(self, filter_length=512, hop_length=160, win_length=512,
                  n_mel_channels=80, sampling_rate=16000, mel_fmin=0.0,
-                 mel_fmax=None, center=False, device='cpu'):
+                 mel_fmax=None, center=False, device='cpu', check_range=True):
         super(TacotronSTFT, self).__init__()
         self.n_mel_channels = n_mel_channels
         self.sampling_rate = sampling_rate
@@ -44,6 +44,12 @@ class TacotronSTFT(torch.nn.Module):
         self.fmin = mel_fmin
         self.fmax = mel_fmax
         self.center = center
+        # The `|x| <= 1` guards below are a data sanity check, not something the
+        # STFT needs. Each one is a full reduction plus a GPU->CPU sync, so
+        # stage-1 training (which calls mel_spectrogram twice per step: once on
+        # the tanh-bounded generator output, once on the normalised target)
+        # turns them off via `train.stft_range_check: false`.
+        self.check_range = check_range
 
         mel = librosa_mel_fn(
             sr=sampling_rate, n_fft=filter_length, n_mels=n_mel_channels, fmin=mel_fmin, fmax=mel_fmax)
@@ -55,8 +61,9 @@ class TacotronSTFT(torch.nn.Module):
         self.register_buffer('hann_window', hann_window)
 
     def linear_spectrogram(self, y):
-        assert (torch.min(y.data) >= -1)
-        assert (torch.max(y.data) <= 1)
+        if self.check_range:
+            assert (torch.min(y.data) >= -1)
+            assert (torch.max(y.data) <= 1)
 
         y = torch.nn.functional.pad(y.unsqueeze(1),
                                     (int((self.n_fft - self.hop_size) / 2), int((self.n_fft - self.hop_size) / 2)),
@@ -78,8 +85,9 @@ class TacotronSTFT(torch.nn.Module):
         -------
         mel_output: torch.FloatTensor of shape (B, n_mel_channels, T)
         """
-        assert(torch.min(y.data) >= -1)
-        assert(torch.max(y.data) <= 1)
+        if self.check_range:
+            assert(torch.min(y.data) >= -1)
+            assert(torch.max(y.data) <= 1)
 
         y = torch.nn.functional.pad(y.unsqueeze(1),
                                     (int((self.n_fft - self.hop_size) / 2), int((self.n_fft - self.hop_size) / 2)),
