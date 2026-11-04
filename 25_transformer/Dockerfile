@@ -76,7 +76,10 @@ ENV PYTHONUNBUFFERED=1 \
 # --------------------------------------------------------------------------
 # build-essential: pyworld has no cp312 linux wheel and is built from sdist.
 # ffmpeg + libsndfile1 + sox: librosa / soundfile / the `sox` bindings used by
-# qwen-asr.  The rest is the shell tooling one wants on a rented box.
+# qwen-asr.  zstd + curl + tar + util-linux(flock): `docker/fetch_shards.sh`
+# streams the sharded stage-1 dataset (`curl | zstd -dc | tar -x`), so the
+# image must be able to decompress `.tar.zst` without a pip dependency.
+# The rest is the shell tooling one wants on a rented box.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         aria2 \
         build-essential \
@@ -95,8 +98,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tmux \
         tzdata \
         unzip \
+        util-linux \
         vim \
         wget \
+        zstd \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p "${HF_HOME}" "${NLTK_DATA}" "${TORCH_HOME}"
 

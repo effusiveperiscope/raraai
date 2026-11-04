@@ -61,6 +61,8 @@ modeling/
 vits_extend/         STFT / multi-resolution STFT losses
 filelists_1/         Stage-1 source filelists
 filelists_2/         Stage-2 source filelists
+docker/              vast.ai image helpers (prefetch_models.py, fetch_shards.sh,
+                     boot/), see DOCKER.md
 data/                Preprocessed features + generated train/val filelists
 checkpoints/         Per-experiment model checkpoints (gitignored)
 logs/                TensorBoard logs (gitignored)
@@ -790,6 +792,12 @@ Notes:
 ## 7. Useful commands
 
 ```bash
+# Fetch the published stage-1 tensors (1204 .tar.zst shards, ~325 GB extracted)
+# on a fresh vast.ai box; streams curl | zstd -dc | tar -x into /data, resumable.
+# `--link-project .` symlinks data/genshin_full_stage1 -> <dest> for the configs.
+docker/fetch_shards.sh --dest /data/genshin_full_stage1 --link-project .
+docker/fetch_shards.sh --dry-run --dest /data/genshin_full_stage1   # plan only
+
 # Stage-1 preprocessing / training
 python 1_preprocess.py --filelist filelists_1/base_linux.txt --output_dir data/base
 python 1_training.py --config configs/base.yaml            # auto-resumes last.ckpt

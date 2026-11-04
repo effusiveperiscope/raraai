@@ -35,9 +35,11 @@ Build arguments:
 
 Pick the image in **Edit Image & Config → Image Path**, and:
 
-* **Disk**: ≥ 100 GB. The image is ~11 GB to pull and ~30 GB unpacked (most of
-  it the `vastai/pytorch` base, which vast.ai hosts already have cached), plus
-  room for datasets and checkpoints.
+* **Disk**: ≥ 100 GB for the image + code. The **full stage-1 corpus needs
+  ~325 GB on top of that** (§5) — attach a volume big enough for
+  `/data/genshin_full_stage1` if you intend to train stage 1 on all of Genshin.
+  The image is ~11 GB to pull and ~30 GB unpacked (most of it the
+  `vastai/pytorch` base, which vast.ai hosts already have cached).
 * **Ports**: `-p 22:22 -p 8080:8080 -p 6006:6006` if you want SSH, Jupyter and
   TensorBoard exposed (the vast.ai portal normally opens them for you).
 * **Launch mode**: SSH or Jupyter — the base image sets both up, no `onstart`
@@ -94,7 +96,65 @@ TensorBoard is already running in the base image against
 `TENSORBOARD_LOG_DIR=/workspace/25_transformer/logs`, so Lightning runs appear
 in the portal's TensorBoard tab without extra setup.
 
-## 5. Keeping data across instances
+## 5. Datasets: the sharded stage-1 Genshin tensors
+
+The stage-1 corpus is published as **1204 `.tar.zst` shards** (~226 MB each,
+~268 GB compressed) in a Backblaze bucket, mirrored at
+`https://ai.nirik.net/genshin_shards_stage1`. `docker/fetch_shards.sh` streams
+them onto a volume:
+
+```bash
+cd /workspace/25_transformer
+
+# everything onto the /data volume (8 parallel streams, ~325 GB extracted)
+docker/fetch_shards.sh --dest /data/genshin_full_stage1 \
+                       --link-project /workspace/25_transformer
+```
+
+That single command is the whole recipe; it is safe to re-run and safe to
+interrupt. What it does and why:
+
+* **Streams, never stages.** Each shard is `curl … | zstd -dc | tar -x -C
+  <dest>`, so no tarball is ever written. A staged download+extract would need
+  ~600 GB (`268 GB` tarballs + `325 GB` tensors); streaming needs ~325 GB, which
+  is what makes a 400 GB volume sufficient (the traffic is the same — a `.zst`
+  of float tensors only compresses ~1.2x — but the write+read of 268 GB is not).
+* **`--jobs N`** shards are in flight at once (default 8). A single stream is
+  limited by one TCP connection; 8 are limited by your link, not by the
+  decompressor. Progress, throughput and ETA are printed per finished shard.
+  Measured against this mirror: one stream ≈ 28 MB/s, 8 streams ≈ 40 MB/s
+  aggregate, i.e. **~2 h for the whole 268 GB** — raise `--jobs` if your link
+  has more headroom.
+* **Resume.** A shard is marked done in `<dest>/.shards/done/` only after the
+  whole pipeline exited 0. Re-running skips finished shards and redoes the rest,
+  so a dead instance costs at most `--jobs` shards. A half-extracted shard is
+  simply re-extracted (`tar -x` overwrites).
+* **Preflight + verification.** `manifest.tsv` (fetched once, cached in
+  `<dest>/.shards/`) makes the free-space check exact and drives a final pass
+  over all 318 k entries comparing on-disk sizes with the manifest. A truncated
+  tensor is reported *with its shard*, which is the failure mode that
+  `1_preprocess.py --skip_existing` would otherwise accept (it only validates
+  length/shape headers). Re-run those shards with `--shards N,M`.
+* **`--link-project DIR`** creates `DIR/data/genshin_full_stage1 -> <dest>`, so
+  `configs/base.yaml` (`data/genshin_full_stage1/train.txt`) resolves without
+  touching the config. The name is fixed by the filelist contents — the `train.txt`/
+  `val.txt` shipped inside `shard-1203` list paths like
+  `data/genshin_full_stage1/<basename>.wav.wave`.
+* `--shards 0-3`, `--dry-run`, `--force`, `--manifest FILE`, `--retries`,
+  `--no-verify`, `--no-disk-check` and `--url` cover the rest;
+  `docker/fetch_shards.sh --help` documents them.
+
+Then, unchanged:
+
+```bash
+python 1_training.py --config configs/base.yaml
+```
+
+The stage-2 corpus (`.phone_ids`/`.spec_codes`/`.pitch_codes`) is **not** part
+of these shards — it is produced locally from a stage-1 checkpoint with
+`2_preprocess.py`, so it needs a GPU box (see `AGENTS.md` §3).
+
+## 6. Keeping data across instances
 
 The image contains **code only**. Datasets (`data/…`), checkpoints and logs are
 created at runtime. To persist them, attach a vast.ai volume and either mount it
@@ -123,7 +183,7 @@ A late boot stage (`/etc/vast_boot.d/90-25-transformer-perms.sh`) re-applies
 runtime is lost when the instance is destroyed. For a long-lived cache, set
 `HF_HOME=/workspace/hf-cache` in the instance's environment variables instead.
 
-## 6. Notes / troubleshooting
+## 7. Notes / troubleshooting
 
 * **Driver too old**: `nvidia-smi` failing / torch reporting no CUDA device on a
   CUDA 13 image means the host driver is < 580. Rebuild with
@@ -139,3 +199,15 @@ runtime is lost when the instance is destroyed. For a long-lived cache, set
   prefetch layer.
 * **Rebuilding after a code change**: only the `COPY .` layer and below are
   invalidated; the dependency and model-prefetch layers are reused.
+* **`docker/fetch_shards.sh` reports HTTP 521/503**: those come from Cloudflare,
+  i.e. the origin behind `ai.nirik.net` is down or still warming up, not from
+  this script — it retries (`--retries`, exponential backoff to 60 s) and
+  resumes where it stopped. Check with
+  `curl -sI https://ai.nirik.net/genshin_shards_stage1/shard-0000.tar.zst`.
+* **`zstd: command not found`**: the image was built before `zstd` was added to
+  the `apt-get` list in `Dockerfile` — rebuild, or
+  `apt-get install -y zstd` in the running instance.
+* **`fetch_shards.sh: another fetch_shards.sh is already running`**: a second
+  invocation against the same `--dest` would corrupt the resumable state
+  (`.shards/.selected.txt`, the per-shard markers). Let the first one finish,
+  or kill it (`pkill -f fetch_shards.sh`); the lock file itself needs no cleanup.
