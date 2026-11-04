@@ -88,7 +88,7 @@ mpd:
   use_spectral_norm: false
 mrd:
   lReLU_slope: 0.2
-  resolutions: '[(1024, 120, 600), (2048, 240, 1200), (4096, 480, 2400), (512, 50,
+  resolutions: '[(1024, 120, 600), (2048, 240, 1200), (512, 50,
     240)]'
   use_spectral_norm: false
 gen:

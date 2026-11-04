@@ -13,7 +13,7 @@ class ScaleDiscriminator(torch.nn.Module):
             weight_norm(nn.Conv1d(64, 256, 41, 4, groups=16, padding=20)),
             weight_norm(nn.Conv1d(256, 1024, 41, 4, groups=64, padding=20)),
             weight_norm(nn.Conv1d(1024, 1024, 41, 4, groups=256, padding=20)),
-            weight_norm(nn.Conv1d(1024, 1024, 5, 1, padding=2)),
+            weight_norm(nn.Conv1d(1024, 1024, 5, 1, groups=4, padding=2)),
         ])
         self.conv_post = weight_norm(nn.Conv1d(1024, 1, 3, 1, padding=1))
 

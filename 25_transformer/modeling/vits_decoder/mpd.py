@@ -19,9 +19,9 @@ class DiscriminatorP(nn.Module):
             norm_f(nn.Conv2d(64, 128, (kernel_size, 1), (stride, 1), padding=(kernel_size // 2, 0))),
             norm_f(nn.Conv2d(128, 256, (kernel_size, 1), (stride, 1), padding=(kernel_size // 2, 0))),
             norm_f(nn.Conv2d(256, 512, (kernel_size, 1), (stride, 1), padding=(kernel_size // 2, 0))),
-            norm_f(nn.Conv2d(512, 1024, (kernel_size, 1), 1, padding=(kernel_size // 2, 0))),
+            norm_f(nn.Conv2d(512, 512, (kernel_size, 1), 1, padding=(kernel_size // 2, 0))),
         ])
-        self.conv_post = norm_f(nn.Conv2d(1024, 1, (3, 1), 1, padding=(1, 0)))
+        self.conv_post = norm_f(nn.Conv2d(512, 1, (3, 1), 1, padding=(1, 0)))
 
     def forward(self, x):
         fmap = []
