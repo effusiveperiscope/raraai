@@ -175,6 +175,9 @@ RUN find "${APP_DIR}" -name '__pycache__' -type d -prune -exec rm -rf {} + \
 COPY docker/boot/90-25-transformer-perms.sh /etc/vast_boot.d/
 RUN chmod +x /etc/vast_boot.d/90-25-transformer-perms.sh
 
+# Download and install rclone using the official script
+RUN curl https://rclone.org/install.sh | bash
+
 # Runtime cwd.
 # NOTE: `HorsePhonemizer` opens `new_horsewords.clean` by relative path and
 # every script resolves `configs/…`, `data/…`, `checkpoints/…` against the cwd,
