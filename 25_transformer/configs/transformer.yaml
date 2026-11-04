@@ -21,7 +21,13 @@
 #          --transfer_from (partial load), NOT --resume_from, to warm-start.
 # - bump batch size to 24
 # v0.4.2 - transcription heteronym fix
-exp_name: transformer_v0.4.2
+# v0.5   - end-of-utterance token: the model learns to STOP instead of always
+#          emitting exactly train.sample_frames frames (transformer.eos_token).
+#          Changes the embedding/head shapes (v + 1 -> v + 2 per codebook), so
+#          v0.4.x checkpoints cannot be resumed into it -- warm-start with
+#          --transfer_from (modeling.transformer.expand_state_dict_with_eos
+#          pads the old rows in) or start fresh.
+exp_name: transformer_v0.5
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -72,6 +78,9 @@ transformer:
   # what produced the runaway dimension in the first place.  Initialisation
   # only: no extra parameters, no state_dict change.
   residual_scale: true
+
+  # End-of-utterance class (v0.5)
+  eos_token: true
 
   # Coarse-to-fine loss weighting over the K = 8 spec + 2 pitch codebooks
   # (order: spec0..spec7, pitch8, pitch9).  The optimised loss is
@@ -262,3 +271,20 @@ train:
   # Number of *other* speakers to re-render each sample with. 0 disables the
   # speaker-conditioning probe; requires >= 2 distinct sids in the val set.
   speaker_probe: 2
+  # Out-of-distribution text probe (OOD). Every sampling pass also
+  # autoregressively generates `ood_samples` held-out sentence(s) for
+  # `ood_frames` code frames -- deliberately *longer* than the val items
+  # above, which are capped at their own `code_len` (<= sample_frames), so the
+  # decoder has to extrapolate past the length it ever saw (repetition and
+  # spectral/pitch drift show up there first). There is no ground truth for
+  # unseen text, so only the generated side is logged:
+  #   ood/text_*            the transcript (TensorBoard text tab)
+  #   ood/{i}/codes_*       generated spec/pitch codebook heatmaps
+  #   ood/audio_* ood/pitch_* ood/mel_*   decoded by the stage-1 Generator
+  # Phonemisation is CPU-only (FeatureExtractor with load_qwen=False, i.e. no
+  # ASR/aligner weights) and cached after the first pass; failures are logged
+  # and never interrupt training. Set ood_samples: 0 to disable.
+  ood_samples: 1
+  ood_frames: 512           # 512 code frames = 5.12 s (100 Hz frame rate)
+  ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
+  ood_sid: null             # null -> speaker of the first sampled val item

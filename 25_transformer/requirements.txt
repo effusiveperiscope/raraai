@@ -1,0 +1,51 @@
+# Python dependencies for 25_transformer (stage 1: VITS/NSF Generator + RVQ
+# codecs + discriminators, stage 2: CodeTransformer).
+#
+# torch / torchaudio are deliberately NOT listed: they come from the
+# `vastai/pytorch` base image (Dockerfile: ARG VAST_BASE), which ships a torch
+# build matched to the CUDA line of the image (>= 2.9, needed for
+# `torch.optim.Muon` in 2_training.py). Pinning them here would either
+# downgrade that build or force a many-GB reinstall from PyPI.
+# `pip check` after installation is the quick sanity test for the remainder.
+#
+# Versions mirror the conda env `raraai25` this project is developed in
+# (python 3.12 + torch 2.14 + cu130). Loosen a pin only if a wheel is missing
+# for the base image's python version.
+
+# --- core numerics / plotting ------------------------------------------------
+numpy==2.5.3
+scipy==1.18.1
+numba==0.68.0
+matplotlib==3.11.2
+Pillow==12.3.0            # commons.matplotlib_to_tensorboard
+einops==0.8.2
+tqdm==4.70.1
+omegaconf==2.3.0
+
+# --- audio ------------------------------------------------------------------
+librosa==1.0.0
+soundfile==0.14.0
+pyworld==0.3.5            # stage-1 f0 handling (sdist: needs build-essential)
+
+# --- text front end (features.py / horsephonemizer.py) ----------------------
+nltk==3.10.3              # POS tagging: HorsePhonemizer.tag_words
+g2p-en==2.1.0             # ARPAbet G2P + heteronym table
+transformers==4.57.6      # AutoTokenizer (therealvul/g2pen_tokenizer_clean)
+tokenizers==0.22.2
+safetensors==0.8.0
+huggingface_hub==0.36.2
+accelerate==1.12.0
+
+# --- ASR + forced alignment + pitch (feature extraction) --------------------
+qwen-asr==0.0.6           # Qwen3-ASR-0.6B / Qwen3-ForcedAligner-0.6B
+ppp-svc-helper==0.3.18    # svc_helper.pitch.rmvpe (RMVPEModel)
+
+# --- training loop ----------------------------------------------------------
+pytorch-lightning==2.6.6
+torchmetrics==1.9.0
+tensorboard==2.21.0       # pl.loggers.TensorBoardLogger
+tensorboardX==2.6.5
+
+# --- misc -------------------------------------------------------------------
+datatia==0.5.0            # dataset_ac
+PyQt5==5.15.11            # ultimate_xc (imported for its excepthook side effect)

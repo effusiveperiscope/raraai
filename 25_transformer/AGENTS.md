@@ -391,6 +391,51 @@ Notes:
 - Setting `memory_norm: temporal` needs **no** re-preprocessing: it only
   changes how the encoder output is normalised at train time.
 
+### End-of-utterance token (stage 2, v0.5)
+
+By default the decoder can only ever be asked for a fixed number of frames, so
+every utterance is padded/truncated to `max_frames` (too long == trailing
+babble, too short == clipped words). `transformer.eos_token: true` gives every
+codebook **one extra output class** at index `vocab_size + 1` (pad/BOS stays at
+`vocab_size`) and teaches the model where a clip ends:
+
+- **Training** — `CodeTransformer._append_eos` appends one EOS frame at frame
+  `code_lengths[b]` (i.e. right after the last real frame) to *every* codebook's
+  stream, and this happens **before** `build_delay_pattern`, so "emit EOS" is a
+  normal next-token target in each book (codebook `k`'s EOS lands in column
+  `n + k`). It is only added for samples flagged `complete` — `dataset_codes`
+  reports whether the item ended at the clip's real end; random mid-clip crops
+  (the usual training case) get no EOS, otherwise the model would learn to stop
+  after `train.max_frames` frames.
+- **Inference** — `generate` stops at the first EOS from codebook 0 (it leads
+  the delay pattern, so its column index *is* the frame count), still decodes
+  the `K - 1` delay-tail columns, trims the result to the predicted lengths and
+  handles a ragged batch by **repeating each shorter sample's last frame**, never
+  the pad id (`vocab_size` is out of range for the stage-1 codec). `max_frames`
+  becomes an upper bound, and `generate(..., return_lengths=True)` returns the
+  per-sample frame counts. `stop_on_eos=False` restores the old fixed-length
+  behaviour; the EOS class is masked in book 0 then, and in *every* book except
+  the leading one always (only book 0 decides the end, and an EOS id in the
+  output would be an out-of-range codec index).
+- **Checkpoints** — the extra class widens all codebook embeddings and heads
+  (`v + 1 -> v + 2` rows, plus one bias element per head), so an EOS-less
+  checkpoint can **not** be `--resume_from`'d (Lightning's strict load fails on
+  ~30 shapes, and the optimizer state is positional). `2_training.py` calls
+  `check_eos_layout` and raises a `SystemExit` with that message — also for the
+  reverse direction (EOS checkpoint, `eos_token: false`), which has no helper.
+  Warm-start with `--transfer_from` instead: `expand_state_dict_with_eos` pads
+  the old rows (and biases) with zeros, so only the new EOS class is fresh (a
+  neutral logit, ~`1/(v+2)` probability, which then has to be learned).
+- **Logging** — the new `sample/gen_frames_{j}`, `probe/gen_frames` and
+  `ood/gen_frames_{i}` scalars show how many frames the model chose; for
+  `ood` that is the interesting number, because the probe deliberately allows
+  more frames than any val item.
+- Toggling it needs **no** re-preprocessing (codes are unchanged) — only a new
+  `exp_name` (`2_training.py:train` refuses to resume an EOS-less checkpoint
+  into it). `dataset_codes` always emits `complete`, so an EOS-less model
+  simply ignores it.
+
+
 ### Optimizers & manual optimization (stage 2)
 
 `TrainModule` splits the parameters between **two optimizers**:
@@ -531,6 +576,18 @@ Notes:
   "is the speaker conditioning doing anything" signals). Pitch curves come
   from `Generator.infer_from_codes(..., return_pitch=True)`, which returns f0
   in Hz at the audio frame rate (`sampling_rate / hop_length`).
+  Each sampling pass also runs an **out-of-distribution text probe**
+  (`train.ood_samples`, default 1; `0` disables): `DEFAULT_OOD_TEXTS` (or
+  `train.ood_texts`) is phonemized on CPU via
+  `FeatureExtractor.phonemize_text` with `load_qwen=False` — no ASR/aligner
+  weights, ids cached after the first pass — and decoded autoregressively for
+  `train.ood_frames` (default `4 * sample_frames` = 512) frames, i.e.
+  deliberately longer than the val clips, which are capped at their own
+  `code_len`. There is no target for unseen text, so only the generated side
+  is logged: `ood/text_*`, `ood/{i}/codes_{spec,pitch}`, and (with a stage-1
+  Generator) `ood/audio_*`, `ood/pitch_*`, `ood/mel_*`. Speaker is
+  `train.ood_sid` or the first sampled val item's; failures are printed and
+  never interrupt training.
 
 ---
 
@@ -645,6 +702,18 @@ Notes:
     is re-extracted, and the val set stays ~identical (the shuffle is seeded
     with `--shuffle_seed 42`, and the 5 % split is the tail of the shuffled
     kept list, so dropping a few clips shifts only a handful of members).
+13. **`transformer.eos_token` changes the parameter shapes**, so it is the one
+    stage-2 switch that a `--resume_from` cannot absorb: every codebook
+    embedding/head (weights *and* bias) grows by a row. `2_training.py` calls
+    `check_eos_layout`, which exits with instructions in **both** directions
+    (EOS-less -> EOS needs a new `exp_name` + `--transfer_from`, EOS -> EOS-less
+    has no helper at all). Without that, Lightning's strict load would fail on
+    ~30 tensors, and a `--transfer_from` would silently re-initialise them —
+    `load_state_dict_mismatch` only reports shape mismatches, it does not fix
+    them. `--transfer_from` runs `expand_state_dict_with_eos`, which zero-pads
+    the old rows so only the new EOS class is fresh.
+    `dataset_codes` emits the `complete` flag unconditionally, so EOS-less
+    models and their configs need no change (see §4).
 
 ---
 

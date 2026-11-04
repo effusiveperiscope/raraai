@@ -14,7 +14,11 @@ with
 The collator pads to the longest item in the batch and additionally reports
 ``phone_lengths`` and ``code_lengths`` (number of valid code frames).  The
 transformer uses those lengths to build the delay pattern and its loss mask,
-so padded entries never contribute.
+so padded entries never contribute.  It also reports ``complete``, a boolean
+per item: ``True`` when the (possibly cropped) segment still ends where the
+clip ends, so the transformer may put an end-of-utterance target there
+(``transformer.eos_token``); random training crops are usually mid-clip and
+must not get one.
 """
 
 from __future__ import annotations
@@ -84,8 +88,18 @@ class CodeDataset(Dataset):
         return [it["sid"] for it in self.items]
 
     def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor):
+        """Cut the item to ``max_frames`` and report whether its end survived.
+
+        Returns ``(spec, pitch, complete)``.  ``complete`` is ``True`` when the
+        kept window still contains the last frame of the clip, i.e. the segment
+        is the true end of the utterance rather than a mid-clip random crop.
+        The transformer only places an end-of-utterance target on ``complete``
+        items (see ``CodeTransformer._append_eos``): an EOS in the middle of a
+        clip would teach the model to fall silent after ``max_frames``.
+        """
         n = min(spec.shape[1], pitch.shape[1])
         spec, pitch = spec[:, :n], pitch[:, :n]
+        complete = True
         if self.max_frames is not None and n > self.max_frames:
             if self.is_train:
                 start = self.rng.randint(0, n - self.max_frames)
@@ -93,7 +107,8 @@ class CodeDataset(Dataset):
                 start = 0
             spec = spec[:, start : start + self.max_frames]
             pitch = pitch[:, start : start + self.max_frames]
-        return spec, pitch
+            complete = start + self.max_frames >= n
+        return spec, pitch, complete
 
     def __getitem__(self, index: int) -> dict:
         item = self.items[index]
@@ -102,7 +117,7 @@ class CodeDataset(Dataset):
         pitch = torch.load(item["pitch_codes"], weights_only=True).long()
         spec = spec.reshape(spec.shape[0], -1)
         pitch = pitch.reshape(pitch.shape[0], -1)
-        spec, pitch = self._crop_frames(spec, pitch)
+        spec, pitch, complete = self._crop_frames(spec, pitch)
 
         if self.max_phone_length is not None and phone_ids.numel() > self.max_phone_length:
             phone_ids = phone_ids[: self.max_phone_length]
@@ -112,6 +127,7 @@ class CodeDataset(Dataset):
             "spec_codes": spec,
             "pitch_codes": pitch,
             "sid": item["sid"],
+            "complete": complete,
         }
 
 
@@ -143,6 +159,7 @@ class CodeCollator:
         )
         code_lengths = torch.zeros(len(batch), dtype=torch.long)
         sids = torch.zeros(len(batch), dtype=torch.long)
+        complete = torch.zeros(len(batch), dtype=torch.bool)
 
         for i, x in enumerate(batch):
             p = x["phone_ids"]
@@ -156,6 +173,7 @@ class CodeCollator:
             pitch_codes[i, :, :n] = pitch[:, :n]
             code_lengths[i] = n
             sids[i] = x["sid"]
+            complete[i] = bool(x.get("complete", True))
 
         return {
             "phone_ids": phone_ids,
@@ -164,4 +182,7 @@ class CodeCollator:
             "spec_codes": spec_codes,
             "pitch_codes": pitch_codes,
             "code_lengths": code_lengths,
+            # True where this segment ends the clip -> the transformer adds an
+            # EOS target there (no-op unless transformer.eos_token is set).
+            "complete": complete,
         }

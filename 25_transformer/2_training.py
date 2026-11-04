@@ -26,12 +26,22 @@ import pytorch_lightning as pl
 from commons import (load_state_dict_mismatch, load_submodule_prefix,
                      matplotlib_to_tensorboard)
 from dataset_codes import CodeCollator, CodeDataset
-from modeling.transformer import CodeTransformer
+from modeling.transformer import CodeTransformer, expand_state_dict_with_eos
 
 import ultimate_xc
 import logging
 # Something above this is setting DEBUG but I don't know what
 logging.getLogger().setLevel(logging.WARNING)
+
+
+# Held-out text used by the out-of-distribution sampling probe (see
+# ``TrainModule._log_ood_generation``). These sentences do not occur in the
+# training filelists, so they exercise the phoneme encoder on unseen wording.
+# Override with ``train.ood_texts`` in configs/transformer.yaml.
+DEFAULT_OOD_TEXTS = [
+    "The quick brown fox jumps over the lazy dog while the orchestra "
+    "rehearses a brand new symphony in the courtyard.",
+]
 
 
 def load_generator(checkpoint_path, config, device):
@@ -87,6 +97,57 @@ def plot_code_comparison_figure(gt, pred, pad_id, title, row_labels):
     # heatmaps after tight_layout.
     fig.subplots_adjust(left=0.08, right=0.88, top=0.92, bottom=0.09,
                         hspace=0.28)
+    fig.colorbar(im, cax=fig.add_axes([0.90, 0.15, 0.02, 0.7]))
+    return fig
+
+
+def plot_generated_codes_figure(codes, pad_id, title, row_labels):
+    """One codebook heatmap for a generated sequence.
+
+    Used by the OOD probe, where there is no target code stream to put next to
+    the prediction (``plot_code_comparison_figure`` needs both).
+
+    Args:
+        codes: (K, T) integer code tensor.
+        pad_id: code index used for padding (rendered blank).
+        title: figure title.
+        row_labels: per-row y labels, e.g. ``["book 0", ...]``.
+    """
+    arr = codes.detach().float().cpu().numpy()
+    arr = np.ma.masked_array(arr, mask=(arr == float(pad_id)))
+
+    k = arr.shape[0]
+    fig, ax = plt.subplots(figsize=(10, 0.38 * k + 1.4))
+    im = ax.imshow(arr, aspect="auto", interpolation="nearest", cmap="viridis",
+                   vmin=0, vmax=max(int(pad_id) - 1, 1))
+    ax.set_yticks(np.arange(k))
+    ax.set_yticklabels(row_labels, fontsize=7)
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel("code frame")
+    fig.subplots_adjust(left=0.08, right=0.88, top=0.90, bottom=0.12)
+    fig.colorbar(im, cax=fig.add_axes([0.90, 0.15, 0.02, 0.7]))
+    return fig
+
+
+def plot_mel_figure(audio, sampling_rate, hop_length, title, n_mels=80,
+                    n_fft=2048):
+    """Single log-mel spectrogram (OOD samples have no target to compare)."""
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if audio.size < n_fft:
+        audio = np.pad(audio, (0, n_fft - audio.size))
+
+    mel = librosa.feature.melspectrogram(
+        y=audio, sr=sampling_rate, n_fft=n_fft, hop_length=hop_length,
+        n_mels=n_mels, power=2.0)
+    db = librosa.power_to_db(mel, ref=np.max)
+
+    fig, ax = plt.subplots(figsize=(10, 2.6))
+    im = ax.imshow(db, aspect="auto", origin="lower", cmap="magma",
+                   vmin=-80, vmax=0)
+    ax.set_xlabel("frame")
+    ax.set_ylabel("mel bin")
+    ax.set_title(title, fontsize=9)
+    fig.subplots_adjust(left=0.08, right=0.88, top=0.88, bottom=0.16)
     fig.colorbar(im, cax=fig.add_axes([0.90, 0.15, 0.02, 0.7]))
     return fig
 
@@ -234,6 +295,13 @@ class TrainModule(pl.LightningModule):
             config.train.get("text_delta_batches", 0) or 0)
         self._reset_text_delta()
 
+        # Out-of-distribution text probe (see `_log_ood_generation`). The
+        # phoneme ids are built lazily, on first use, and cached: the first
+        # sampling pass pays a one-off CPU phonemization cost, later epochs
+        # reuse the ids. `_ood_phone_ids` holds `[(text, ids), ...]`; an empty
+        # list means "tried and unavailable" (never retried, never fatal).
+        self._ood_phone_ids = None
+
     def _reset_text_delta(self):
         """Clear the per-epoch accumulators of the text-conditioning probe."""
         self._text_delta_sum = 0.0
@@ -366,20 +434,30 @@ class TrainModule(pl.LightningModule):
                 if s not in candidates:
                     candidates.append(s)
 
+        # Speaker for the OOD probe: the first sampled val item's voice, so the
+        # generated speech is in a voice the model has actually seen.
+        ood_sid = None
+
         for j, batch in enumerate(itertools.islice(self.test_dataloader, n)):
             batch = {k: (v.to(self.device) if torch.is_tensor(v) else v)
                      for k, v in batch.items()}
             code_len = int(batch["code_lengths"][0].item())
             gen_frames = max(1, min(frames, code_len))
 
-            codes = self.net.generate(
+            codes, gen_lens = self.net.generate(
                 batch["phone_ids"], batch["phone_lengths"], batch["sid"],
                 max_frames=gen_frames, temperature=temperature, top_k=top_k,
-            )  # (B, K, gen_frames)
+                return_lengths=True,
+            )  # (B, K, n) with n <= gen_frames when EOS stopped it early
+            n_gen = int(codes.shape[-1])
+            if self.net.eos_token:
+                # How many frames the model decided to produce (max over the
+                # batch): with EOS this is the "did it learn to stop?" signal.
+                self._add_scalar(f"sample/gen_frames_{j}", gen_lens.max())
 
             # Ground truth for the same item (spec rows, then pitch rows).
             gt = torch.cat([batch["spec_codes"][0], batch["pitch_codes"][0]],
-                           dim=0)[:, :gen_frames]
+                           dim=0)[:, :n_gen]
 
             self._log_code_maps(j, gt, codes[0])
 
@@ -391,6 +469,19 @@ class TrainModule(pl.LightningModule):
                 probe = [own] + [s for s in candidates if s != own][:probe_n]
                 self._log_speaker_probe(j, batch, probe, gen_frames,
                                         temperature, top_k)
+
+            if ood_sid is None:
+                ood_sid = batch["sid"][:1]
+
+        # Held-out text, generated *longer* than any val item: unlike the
+        # samples above (capped at `code_len`), this has to keep decoding past
+        # the length the model ever saw, which is where autoregressive
+        # degradation (repetition, drift) shows up first.
+        if ood_sid is not None:
+            try:
+                self._log_ood_generation(ood_sid, temperature, top_k)
+            except Exception as e:  # sampling must never break training
+                print(f"OOD generation failed: {e}")
 
         if self.logger is not None:
             self.logger.experiment.flush()
@@ -494,10 +585,19 @@ class TrainModule(pl.LightningModule):
         phone_lengths = batch["phone_lengths"].repeat(b)
         sid_t = torch.tensor(sids, dtype=torch.long, device=self.device)
 
-        codes = self.net.generate(phone_ids, phone_lengths, sid_t,
-                                  max_frames=gen_frames,
-                                  temperature=temperature, top_k=top_k)
+        codes, lens = self.net.generate(phone_ids, phone_lengths, sid_t,
+                                        max_frames=gen_frames,
+                                        temperature=temperature, top_k=top_k,
+                                        return_lengths=True)
+        if self.net.eos_token:
+            # Trim to the shortest stream: past its own end each row would be
+            # the repeat-filled last frame (see CodeTransformer.generate), which
+            # would show up as a spurious *difference* between speakers.
+            codes = codes[:, :, : int(lens.min())]
         diff = (codes[1:] != codes[:1]).float()  # (B-1, K, T)
+        if self.net.eos_token:
+            # Only meaningful with EOS: otherwise every stream is `gen_frames`.
+            self._add_scalar("probe/gen_frames", lens.max())
         self._add_scalar("probe/spec_code_change_frac", diff[:, :n_spec].mean())
         self._add_scalar("probe/pitch_code_change_frac", diff[:, n_spec:].mean())
 
@@ -533,6 +633,155 @@ class TrainModule(pl.LightningModule):
                 deltas.append((f0[i][both] - f0[0][both]).abs().mean())
         if deltas:
             self._add_scalar("probe/f0_delta_hz", torch.stack(deltas).mean())
+
+    # ------------------------------------------------------------------ #
+    # Out-of-distribution text probe
+    # ------------------------------------------------------------------ #
+    def _ood_texts(self):
+        """Texts used by the OOD probe (``train.ood_texts`` or the default)."""
+        texts = self.config.train.get("ood_texts", None)
+        if texts is None:
+            return list(DEFAULT_OOD_TEXTS)
+        return [str(t) for t in texts if str(t).strip()]
+
+    def _build_ood_phone_ids(self, texts):
+        """Phonemize the OOD texts once and cache the ids.
+
+        Uses ``FeatureExtractor.phonemize_text`` -- the same path as
+        ``2_preprocess.py --phones_from transcript`` -- with
+        ``load_qwen=False``, so this never pulls the ASR / forced-aligner
+        weights into the training process. A failure (or an empty
+        phonemization) is cached as an empty list: the probe is optional and
+        must not be retried every epoch.
+
+        Returns:
+            ``[(text, ids), ...]``; empty when nothing could be phonemized.
+        """
+        if self._ood_phone_ids is not None:
+            return self._ood_phone_ids
+        try:
+            from features import FeatureExtractor
+
+            # CPU + no Qwen: phonemize_text needs only g2p_en and the g2pen
+            # tokenizer, which keeps the GPU free for training.
+            extractor = FeatureExtractor(self.config, device="cpu",
+                                         load_qwen=False)
+            items = []
+            for text in texts:
+                ids = [int(i) for i in extractor.phonemize_text(text)]
+                if ids:
+                    items.append((text, ids))
+                else:
+                    print(f"OOD text produced no phonemes, skipped: {text!r}")
+            del extractor
+        except Exception as e:  # optional probe: never break training
+            print(f"Could not phonemize OOD text: {e}")
+            items = []
+        self._ood_phone_ids = items
+        return items
+
+    def _log_generated_code_maps(self, prefix, pred):
+        """Generated-only codebook heatmaps (one figure per spec/pitch group)."""
+        n_spec = self.net.spec_codebook_num
+        groups = (
+            ("spec", pred[:n_spec], self.net.vocab_sizes[0]),
+            ("pitch", pred[n_spec:], self.net.vocab_sizes[-1]),
+        )
+        for name, p, pad in groups:
+            if p.shape[0] == 0:
+                continue
+            labels = [f"book {i}" for i in range(p.shape[0])]
+            self._add_image(
+                f"{prefix}/codes_{name}",
+                plot_generated_codes_figure(
+                    p, pad, f"OOD {name} codes @ step {self.global_step}",
+                    labels))
+
+    @torch.no_grad()
+    def _log_ood_generation(self, sid, temperature, top_k):
+        """Autoregressively generate held-out text, longer than any val item.
+
+        The val samples above are capped at the item's own ``code_len``, so
+        they never test what the decoder does once it runs past the length it
+        saw.  This probe phonemizes text that is not in the training data and
+        decodes ``train.ood_frames`` frames (default 4x ``sample_frames``),
+        which forces it to keep going well beyond that point -- where
+        autoregressive failure modes (repetition, spectral/pitch drift) appear.
+
+        There is no ground truth for unseen text, so only the generated side is
+        logged: ``ood/text_*`` (the transcript), ``ood/codes_{spec,pitch}``
+        heatmaps and -- with a stage-1 Generator -- ``ood/audio_*``,
+        ``ood/pitch_*`` and ``ood/mel_*``.
+
+        Args:
+            sid: (1,) tensor with the speaker id (usually the first sampled
+                val item's, or ``train.ood_sid`` when that is set).
+            temperature, top_k: decoding knobs, shared with the val samples.
+        """
+        limit = int(self.config.train.get("ood_samples", 1) or 0)
+        if limit <= 0:
+            return
+        items = self._build_ood_phone_ids(self._ood_texts())
+        if not items:
+            return
+
+        # `generate` builds an (max_frames + K - 1)-long sequence, so the
+        # positional encoding is the hard upper bound.
+        max_positions = int(self.config.transformer.get("max_positions", 4096))
+        frames = int(self.config.train.get("ood_frames", 0) or 0)
+        if frames <= 0:
+            frames = 4 * int(self.config.train.get("sample_frames", 128))
+        frames = max(1, min(frames, max_positions - self.net.codebook_num + 1))
+
+        sid_cfg = self.config.train.get("ood_sid", None)
+        if sid_cfg is not None:
+            sid = torch.tensor([int(sid_cfg)], dtype=torch.long,
+                               device=self.device)
+
+        for i, (text, ids) in enumerate(items[:limit]):
+            phone_ids = torch.tensor(ids, dtype=torch.long,
+                                     device=self.device).unsqueeze(0)
+            phone_lengths = torch.tensor([len(ids)], dtype=torch.long,
+                                         device=self.device)
+            codes, lens = self.net.generate(
+                phone_ids, phone_lengths, sid, max_frames=frames,
+                temperature=temperature, top_k=top_k, return_lengths=True,
+            )  # (1, K, n)
+            codes = codes[0]  # (K, n)
+            n_gen = int(codes.shape[-1])
+            if self.net.eos_token:
+                # The whole point of the probe is to run past the trained
+                # length; with EOS the model may instead decide to stop, so log
+                # the length it chose (`frames` is only the upper bound).
+                self._add_scalar(f"ood/gen_frames_{i}", lens.max())
+
+            if self.logger is not None:
+                self.logger.experiment.add_text(
+                    f"ood/text_{i}", text, global_step=self.global_step)
+            print(f"OOD sample {i}: {len(ids)} phonemes -> {n_gen} code "
+                  f"frames: {text}")
+            self._log_generated_code_maps(f"ood/{i}", codes)
+
+            if self.net_g is None:
+                continue
+            try:
+                audio, f0 = self._decode_codes(codes, sid)
+            except Exception as e:  # sampling is optional
+                print(f"OOD synthesis failed: {e}")
+                continue
+            sr = int(self.config.data.sampling_rate)
+            hop = int(self.config.data.hop_length)
+            self._add_audio(f"ood/audio_{i}", audio, sr)
+            self._add_image(
+                f"ood/pitch_{i}",
+                plot_pitch_curves_figure(
+                    [("generated", f0)], hop, sr,
+                    f"OOD f0 @ step {self.global_step}"))
+            self._add_image(
+                f"ood/mel_{i}",
+                plot_mel_figure(
+                    audio, sr, hop,
+                    f"OOD log-mel @ step {self.global_step}"))
 
     # ------------------------------------------------------------------ #
     # Train / val
@@ -794,6 +1043,42 @@ def parse_args():
     return config, args
 
 
+def check_eos_layout(state_dict, net, source):
+    """Fail loudly when a checkpoint's EOS layout disagrees with ``net``.
+
+    ``transformer.eos_token`` decides whether each codebook has one extra EOS
+    class, so switching it changes the codebook embedding/head shapes.  A
+    ``--resume_from`` cannot absorb that (Lightning's strict load would fail on
+    ~30 tensors and the optimizer state is positional), and a ``--transfer_from``
+    can only grow an EOS-less checkpoint (``expand_state_dict_with_eos`` has no
+    way to *shrink* one), so both paths call this first.
+
+    Args:
+        state_dict: checkpoint tensors, keyed with the ``net.`` prefix.
+        net: the model being loaded into.
+        source: checkpoint path, for the error message.
+    """
+    key = "net.decoder.embeds.0.weight"
+    w = state_dict.get(key)
+    want = net.vocab_sizes[0] + 1 + int(net.eos_token)
+    if w is None or w.shape[0] == want:
+        return
+    has_eos = w.shape[0] == want + 1
+    if not has_eos:
+        advice = (f"Either set transformer.eos_token to false, or start a new "
+                  f"exp_name and warm-start with --transfer_from {source} "
+                  f"(which pads the old rows with zeros and trains the new EOS "
+                  f"class from scratch).")
+    else:
+        advice = (f"This checkpoint was trained *with* EOS, so set "
+                  f"transformer.eos_token to true (there is no helper to drop "
+                  f"the EOS class again).")
+    raise SystemExit(
+        f"ERROR: {source} has {key} with {w.shape[0]} rows, but this model "
+        f"needs {want} (EOS class in the checkpoint: {has_eos}; "
+        f"transformer.eos_token here: {net.eos_token}).  {advice}")
+
+
 def train(config, resume_from=None, transfer_from=None):
     net = CodeTransformer(config)
     print(net.describe())
@@ -804,6 +1089,10 @@ def train(config, resume_from=None, transfer_from=None):
     if resume_from is not None:
         print(f"Resuming from lightning checkpoint: {resume_from}")
         d = torch.load(resume_from, map_location="cpu", weights_only=False)
+        # ``transformer.eos_token`` changes the codebook embedding/head shapes;
+        # exit with instructions instead of letting Lightning fail (or, worse,
+        # letting ``--transfer_from`` silently reinitialise 30 tensors).
+        check_eos_layout(d.get("state_dict", {}), net, resume_from)
         # Lightning restores optimizer states positionally
         # (``zip(self.optimizers, checkpoint["optimizer_states"])``), so a
         # checkpoint written by the old single-AdamW code would silently leave
@@ -822,6 +1111,13 @@ def train(config, resume_from=None, transfer_from=None):
         print(f"Transferring from checkpoint: {transfer_from}")
         state = torch.load(transfer_from, map_location="cpu", weights_only=False)
         state = state.get("state_dict", state)
+        # An EOS-less checkpoint's codebook embeddings/heads are one row too
+        # narrow: pad them instead of letting load_state_dict_mismatch skip (and
+        # therefore re-init) all 30 of them.  ``check_eos_layout`` afterwards
+        # catches what the helper cannot fix (an EOS checkpoint going into an
+        # EOS-less config).
+        state = expand_state_dict_with_eos(net, state)
+        check_eos_layout(state, net, transfer_from)
         load_submodule_prefix(net, "net.", state)
     else:
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")

@@ -1,0 +1,36 @@
+# Build context guard: keep the image small and reproducible.
+#
+# Everything here is either generated (datasets, checkpoints, logs, caches) or
+# too large to bake into an image. `data/` and `checkpoints/` are re-created at
+# runtime -- mount them (or a whole volume at /workspace) on vast.ai.
+
+# --- generated / large artefacts --------------------------------------------
+data/
+logs/
+checkpoints/
+test_out/
+peaks/
+pretrain/
+*.ckpt
+*.safetensors
+*.out
+speaker_map_genshin.json
+
+# --- python caches ----------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- vcs / editors ----------------------------------------------------------
+.git/
+.gitignore
+.github/
+.vscode/
+*.swp
+
+# --- docker files themselves are not needed inside the image ----------------
+Dockerfile
+.dockerignore
+DOCKER.md

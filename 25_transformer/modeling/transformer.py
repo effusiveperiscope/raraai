@@ -37,6 +37,29 @@ A special start column (the per-codebook pad/BOS embedding, exactly like
 MusicGen where ``bos_token_id == pad_token_id``) is prepended and the usual
 ``inputs = seq[..., :-1]`` / ``targets = seq[..., 1:]`` next-token split is
 applied, so codebook ``k`` only ever needs the ``T + K - 1`` column context.
+
+End of utterance (``transformer.eos_token``)
+--------------------------------------------
+Without an EOS class the model can only ever be asked for a fixed number of
+frames: ``generate`` runs ``max_frames`` steps and *nothing inside the model*
+decides when the sentence is over (the only non-code class is the pad/BOS
+index, which is masked to ``-inf`` at sampling and is the cross-entropy
+``ignore_index``, so it cannot double as a stop token).
+
+With ``eos_token: true`` every codebook gets one extra output class at index
+``vocab_size + 1`` (pad/BOS stays at ``vocab_size``) and the targets gain a
+trailing EOS frame, so the decoder learns where the utterance ends.  At
+inference ``generate`` stops at the first EOS emitted by codebook 0 -- it leads
+the delay pattern, so its column index *is* its frame index -- keeps decoding
+the ``K - 1`` tail columns the other codebooks still need, and returns the
+codes trimmed to the predicted length.
+
+The EOS target is only added for clips that actually reach their end:
+``dataset_codes`` reports a per-item ``complete`` flag, because random training
+crops are usually mid-clip and an EOS there would teach the model to fall silent
+after ``max_frames``.  Enabling the key changes the parameter shapes (see
+``expand_state_dict_with_eos``), so it needs a fresh run or a ``--transfer_from``
+warm start -- a ``--resume_from`` of an EOS-less checkpoint cannot work.
 """
 
 from __future__ import annotations
@@ -218,7 +241,9 @@ class DelayCodebookDecoder(nn.Module):
     Each codebook has its own embedding table and output head because the
     spectrogram codebooks and pitch codebooks have different vocabulary
     sizes.  Every codebook gets one extra "pad/start" index equal to its
-    vocabulary size (mirroring MusicGen's ``bos == pad`` token).
+    vocabulary size (mirroring MusicGen's ``bos == pad`` token) and -- with
+    ``eos=True``, i.e. ``transformer.eos_token`` -- a second extra class at
+    ``vocab_size + 1`` for end-of-utterance.
 
     ``residual_scale`` scales the initial weights of the three residual output
     projections (``self_attn.out_proj``, ``multihead_attn.out_proj``,
@@ -240,12 +265,17 @@ class DelayCodebookDecoder(nn.Module):
         n_speakers: int = 0,
         speaker_cond: bool = True,
         residual_scale: bool = True,
+        eos: bool = False,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
         self.num_codebooks = len(self.vocab_sizes)
         self.hidden_size = hidden_size
         self.speaker_cond = bool(speaker_cond)
+        # ``vocab_size`` is the pad/BOS class; ``vocab_size + 1`` is EOS and
+        # only exists when the model was trained with ``transformer.eos_token``.
+        self.eos = bool(eos)
+        self.num_classes = [v + 1 + int(self.eos) for v in self.vocab_sizes]
 
         # Decoder-side speaker conditioning.  The encoder already puts `sid`
         # into the memory, but relying on cross-attention alone is fragile:
@@ -262,7 +292,7 @@ class DelayCodebookDecoder(nn.Module):
             self.spk_emb = None
 
         self.embeds = nn.ModuleList(
-            [nn.Embedding(v + 1, hidden_size) for v in self.vocab_sizes]
+            [nn.Embedding(c, hidden_size) for c in self.num_classes]
         )
         self.pos = SinusoidalPositionalEncoding(hidden_size, max_positions)
         layer = nn.TransformerDecoderLayer(
@@ -276,7 +306,7 @@ class DelayCodebookDecoder(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(layer, n_layers, norm=nn.LayerNorm(hidden_size))
         self.heads = nn.ModuleList(
-            [nn.Linear(hidden_size, v + 1) for v in self.vocab_sizes]
+            [nn.Linear(hidden_size, c) for c in self.num_classes]
         )
 
         if residual_scale and n_layers > 0:
@@ -353,6 +383,10 @@ class CodeTransformer(nn.Module):
         n_speakers = int(_get_cfg(tcfg, "n_speakers", 512))
         decoder_speaker_cond = bool(
             _get_cfg(tcfg, "decoder_speaker_cond", True))
+        # End-of-utterance class (see the module docstring).  Off by default:
+        # it changes the embedding/head shapes, so a checkpoint trained without
+        # it cannot be resumed into a model built with it.
+        eos_token = bool(_get_cfg(tcfg, "eos_token", False))
         # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
         memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
         residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
@@ -372,6 +406,10 @@ class CodeTransformer(nn.Module):
         ] * pitch_codebook_num
         # Per-codebook pad/start index (== vocabulary size, cf. MusicGen bos==pad).
         self.pad_ids = list(self.vocab_sizes)
+        # Per-codebook end-of-utterance index (== vocabulary size + 1), or None
+        # when this model was built without EOS.  See the module docstring.
+        self.eos_token = eos_token
+        self.eos_ids = ([v + 1 for v in self.vocab_sizes] if eos_token else None)
         self.hidden_size = hidden_size
         self.n_speakers = n_speakers
         self.decoder_speaker_cond = decoder_speaker_cond
@@ -407,6 +445,7 @@ class CodeTransformer(nn.Module):
             n_speakers=n_speakers,
             speaker_cond=decoder_speaker_cond,
             residual_scale=residual_scale,
+            eos=eos_token,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
@@ -467,6 +506,69 @@ class CodeTransformer(nn.Module):
         col = torch.tensor(self.pad_ids, device=device, dtype=dtype).view(1, -1, 1)
         return col.expand(batch_size, -1, 1).contiguous()
 
+    def _append_eos(
+        self,
+        codes: torch.Tensor,  # (B, K, T) long
+        code_lengths: Optional[torch.Tensor] = None,  # (B,) long
+        complete: Optional[torch.Tensor] = None,  # (B,) bool
+    ):
+        """Put one EOS frame at the end of each *complete* sample's streams.
+
+        The EOS lands at frame ``code_lengths[b]`` (i.e. directly after the last
+        real frame) for every codebook -- the delay pattern takes care of
+        spreading it to codebook ``k``'s column ``n + k``.  Samples whose
+        segment does not reach the end of the clip (``complete=False``, the
+        usual case for random training crops) get no EOS: their code stream
+        simply stops, which is exactly what the model should learn there.
+
+        Everything stays vectorised on-device (no ``.item()``/``if tensor``), so
+        this adds no GPU->CPU sync to the training step.
+
+        Args:
+            codes: ``(B, K, T)`` real codes (padding value irrelevant).
+            code_lengths: ``(B,)`` valid frames per sample; ``None`` means all
+                ``T`` frames are real.
+            complete: ``(B,)`` bool, ``True`` where the segment ends the clip.
+
+        Returns:
+            ``(codes_with_eos, new_code_lengths)``: ``(B, K, T_out)`` and
+            ``(B,)``, where ``T_out = max(code_lengths + complete)`` -- at most
+            ``T + 1``, and never ``T + 1`` when nothing in the batch is
+            complete, so no pure-padding column is kept.
+        """
+        B, K, T = codes.shape
+        device = codes.device
+        if code_lengths is None:
+            code_lengths = torch.full((B,), T, device=device, dtype=torch.long)
+        code_lengths = code_lengths.to(device).long().clamp(min=1, max=T)
+        if complete is None:
+            complete = torch.ones(B, dtype=torch.bool, device=device)
+        else:
+            complete = complete.to(device).bool().reshape(-1)
+
+        lens = code_lengths + complete.long()  # +1 frame where EOS is added
+        T_out = int(lens.max())  # no pure-padding column for short batches
+        out = codes.new_zeros((B, K, T_out))
+        keep = min(T, T_out)
+        out[:, :, :keep] = codes[:, :, :keep]
+
+        # out[b, k, code_lengths[b]] = eos_ids[k] for complete samples, and left
+        # untouched for truncated ones (gather + where, so no data-dependent
+        # control flow).  The gather index is redirected to 0 for the truncated
+        # rows: their write is a no-op either way, but their length *can* equal
+        # ``T_out`` (a full ``max_frames`` crop that is not the clip's end, in a
+        # batch whose longest complete stream is one frame shorter), which would
+        # otherwise index one past the last column.
+        src = torch.where(complete, code_lengths, torch.zeros_like(code_lengths))
+        rows = torch.arange(B, device=device)[:, None]
+        cols = torch.arange(K, device=device)[None, :]
+        idx = src[:, None].expand(B, K)
+        eos = torch.tensor(self.eos_ids, device=device,
+                           dtype=codes.dtype).view(1, K).expand(B, K)
+        out[rows, cols, idx] = torch.where(complete[:, None],
+                                           eos, out[rows, cols, idx])
+        return out, lens
+
     # ------------------------------------------------------------------ #
     # Core computation
     # ------------------------------------------------------------------ #
@@ -515,8 +617,14 @@ class CodeTransformer(nn.Module):
         code_lengths: Optional[torch.Tensor] = None,
         sid: Optional[torch.Tensor] = None,  # (B,) long
         epoch: Optional[int] = None,
+        complete: Optional[torch.Tensor] = None,  # (B,) bool, for EOS
     ) -> dict:
         """Delayed next-token loss over all codebooks.
+
+        With ``transformer.eos_token`` enabled, an EOS frame is appended to each
+        sample's streams *before* the delay pattern is built, so "emit EOS" is
+        just another next-token target and the delayed alignment is unchanged
+        (see ``_append_eos``).  Only samples flagged ``complete`` get one.
 
         Per-codebook cross-entropies are combined as
         ``loss = sum_k w_k * CE_k / sum_k w_k`` with ``w = loss_weights(epoch)``
@@ -544,6 +652,8 @@ class CodeTransformer(nn.Module):
             the effective weights used for this batch, for logging.
         """
         B, K, T = codes.shape
+        if self.eos_token:
+            codes, code_lengths = self._append_eos(codes, code_lengths, complete)
         delayed = self.build_delay_pattern(codes, code_lengths)  # (B, K, L)
         L = delayed.shape[2]
         start = self._pad_column(B, codes.device)
@@ -552,7 +662,7 @@ class CodeTransformer(nn.Module):
         inputs = seq[..., :L]
         targets = seq[..., 1:]
 
-        # list of (B, L, v+1)
+        # list of (B, L, v + 1) -- or (B, L, v + 2) with the EOS class
         logits = self.decoder(inputs, memory, memory_mask, sid=sid)
 
         losses, accs, entropies = [], [], []
@@ -574,7 +684,9 @@ class CodeTransformer(nn.Module):
                 probs = F.softmax(flat_logits[valid], dim=-1).mean(0)
                 ent = -(probs.clamp_min(1e-9).log() * probs).sum()
                 # `probs.size(-1)` includes the pad class, which is never a
-                # target, so the attainable maximum is log(vocab - 1).
+                # target, so the attainable maximum is log(vocab - 1).  With EOS
+                # the end-of-utterance class is included in the mass (it is a
+                # real, if rare, target), so the normaliser stays as is.
                 entropies.append(
                     ent / math.log(max(probs.size(-1) - 1, 2)))
             else:  # degenerate batch (everything masked)
@@ -626,24 +738,29 @@ class CodeTransformer(nn.Module):
         pitch_codes: torch.Tensor,
         code_lengths: Optional[torch.Tensor] = None,
         epoch: Optional[int] = None,
+        complete: Optional[torch.Tensor] = None,
     ) -> dict:
         """Training forward pass: phonemes + speaker -> spec/pitch code loss.
 
         ``epoch`` only selects the codebook weighting schedule (see
         :meth:`loss_weights`); it does not affect the model's computation.
+        ``complete`` (``(B,)`` bool) marks the samples whose segment reaches the
+        end of the clip and therefore get an EOS target (no-op unless
+        ``transformer.eos_token`` is set).
         """
         memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
         return self.code_loss(
-            memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch)
+            memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch,
+            complete=complete)
 
     def compute_batch_loss(self, batch: dict,
                            epoch: Optional[int] = None) -> dict:
         """Convenience wrapper used by the Lightning module.
 
         Expects ``phone_ids``, ``phone_lengths``, ``sid``, ``spec_codes``,
-        ``pitch_codes`` and an optional ``code_lengths`` entry.  ``epoch``
-        drives the codebook weight curriculum.
+        ``pitch_codes`` and optional ``code_lengths`` / ``complete`` entries.
+        ``epoch`` drives the codebook weight curriculum.
         """
         return self.forward(
             phone_ids=batch["phone_ids"],
@@ -653,6 +770,7 @@ class CodeTransformer(nn.Module):
             pitch_codes=batch["pitch_codes"],
             code_lengths=batch.get("code_lengths"),
             epoch=epoch,
+            complete=batch.get("complete"),
         )
 
     # ------------------------------------------------------------------ #
@@ -667,15 +785,44 @@ class CodeTransformer(nn.Module):
         max_frames: int,
         temperature: float = 1.0,
         top_k: Optional[int] = None,
-    ) -> torch.Tensor:
-        """Autoregressively sample ``(B, K, max_frames)`` delayed codes.
+        stop_on_eos: Optional[bool] = None,
+        return_lengths: bool = False,
+    ):
+        """Autoregressively sample ``(B, K, n)`` delayed codes.
 
         The returned tensor has the spec codebooks first (``spec_codebook_num``
         rows) followed by the pitch codebooks, matching the layout used for
         training.  Uses the same delay pattern as :meth:`code_loss`.
+
+        When the model was trained with EOS (``transformer.eos_token``) and
+        ``stop_on_eos`` is left at ``None``/``True``, decoding stops at the first
+        EOS predicted by codebook 0 -- it leads the delay pattern, so its column
+        index *is* its frame index -- and the result is trimmed to the predicted
+        length.  ``n`` is then what the model chose (``max_frames`` is only an
+        upper bound); without EOS ``n == max_frames``, as before.
+
+        The ``K - 1`` columns that fill the *other* codebooks' delay tails are
+        still decoded after the stop.  Frames past a *shorter* sample's end in a
+        batch are filled by repeating that sample's last frame, never the pad id
+        (``vocab_size`` is out of range for the stage-1 codec).  For the same
+        reason the EOS class is masked in every codebook except the leading one:
+        only codebook 0 terminates the utterance, so the returned codes are
+        always in ``[0, vocab_size)``.
+
+        Args:
+            max_frames: hard upper bound on the number of code frames.
+            temperature, top_k: decoding knobs (``top_k=None`` disables).
+            stop_on_eos: ``None`` -> ``self.eos_token``.  Ignored when the model
+                was built without EOS.
+            return_lengths: also return the ``(B,)`` per-sample frame counts.
+
+        Returns:
+            ``(B, K, n)`` codes, or ``(codes, lengths)`` if ``return_lengths``.
         """
         was_training = self.training
         self.eval()
+        use_eos = self.eos_token if stop_on_eos is None else bool(stop_on_eos)
+        use_eos = use_eos and self.eos_token
         try:
             memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
             B = phone_ids.shape[0]
@@ -685,6 +832,9 @@ class CodeTransformer(nn.Module):
 
             seq = self._pad_column(B, device)
             cols = []
+            # Column at which codebook 0 emitted EOS == the predicted frame
+            # count.  ``L`` is the "still running" sentinel, never a column index.
+            stop_col = torch.full((B,), L, dtype=torch.long, device=device)
             for i in range(L):
                 logits = self.decoder(seq, memory, memory_mask, sid=sid)
                 col = []
@@ -693,6 +843,14 @@ class CodeTransformer(nn.Module):
                     # Never emit the pad/start class as a real token.
                     lg = lg.clone()
                     lg[..., self.pad_ids[k]] = float("-inf")
+                    # Only codebook 0 decides where the utterance ends (it
+                    # leads the delay pattern), and every book shares that
+                    # length.  Mask the EOS class in the other books -- and in
+                    # book 0 too when stopping is disabled -- so an EOS id can
+                    # never end up in the output: it is one above the codebook
+                    # size, i.e. out of range for the stage-1 codec.
+                    if self.eos_token and (k > 0 or not use_eos):
+                        lg[..., self.eos_ids[k]] = float("-inf")
                     if top_k is not None:
                         kth = torch.topk(lg, min(top_k, lg.size(-1)), dim=-1).values[..., -1:]
                         lg = torch.where(lg < kth, torch.full_like(lg, float("-inf")), lg)
@@ -705,13 +863,45 @@ class CodeTransformer(nn.Module):
                 pad = torch.tensor(self.pad_ids, device=device).view(1, K)
                 col = torch.where(valid.view(1, K), col, pad)
 
+                if use_eos and i < max_frames:
+                    # Codebook 0 leads the pattern (frame == column), so its EOS
+                    # is the utterance end.  Record only the first one.
+                    hit = (col[:, 0] == self.eos_ids[0]) & (stop_col == L)
+                    stop_col = torch.where(hit, torch.full_like(stop_col, i), stop_col)
+
                 seq = torch.cat([seq, col.unsqueeze(-1)], dim=2)
                 cols.append(col)
 
-            cols = torch.stack(cols, dim=2)  # (B, K, L)
-            out = cols.new_zeros((B, K, max_frames))
+                # Each codebook needs its own tail: codebook k's frame t lives in
+                # column t + k, so frame ``stop - 1`` in the last book needs
+                # column ``stop + K - 2``.  Running samples keep the bound at
+                # ``L + K - 2``, which the loop never reaches.
+                if use_eos and i >= int((stop_col + K - 2).max()):
+                    break
+
+            cols = torch.stack(cols, dim=2)  # (B, K, <=L)
+            if use_eos:
+                # At least one frame, so callers never see a zero-length clip.
+                lengths = stop_col.clamp(min=1, max=max_frames)
+            else:
+                lengths = torch.full((B,), max_frames, dtype=torch.long,
+                                     device=device)
+            n = int(lengths.max())
+            out = cols.new_zeros((B, K, n))
             for k in range(K):
-                out[:, k, :] = cols[:, k, k : k + max_frames]
+                take = min(n, cols.shape[2] - k)
+                if take > 0:
+                    out[:, k, :take] = cols[:, k, k : k + take]
+            if use_eos:
+                for b in range(B):
+                    # Repeat the last frame rather than leaving pad ids behind:
+                    # the pad id equals the codebook size, which the stage-1
+                    # codec would index out of range on.
+                    l = int(lengths[b])
+                    if l < n:
+                        out[b, :, l:] = out[b, :, l - 1 : l]
+            if return_lengths:
+                return out, lengths
             return out
         finally:
             if was_training:
@@ -727,8 +917,53 @@ class CodeTransformer(nn.Module):
             f"CodeTransformer(hidden={self.hidden_size}, codebooks="
             f"{self.spec_codebook_num} spec + {self.pitch_codebook_num} pitch, "
             f"speaker={spk}, memory_norm={self.memory_norm}, "
-            f"residual_scale={self.residual_scale}, params={n / 1e6:.2f}M)"
+            f"residual_scale={self.residual_scale}, eos={self.eos_token}, "
+            f"params={n / 1e6:.2f}M)"
         )
+
+
+def expand_state_dict_with_eos(model: "CodeTransformer", state_dict: dict,
+                               prefix: str = "net.") -> dict:
+    """Grow EOS-less ``v + 1`` codebook weights to this model's ``v + 2`` layout.
+
+    Enabling ``transformer.eos_token`` widens every codebook embedding and output
+    head by one row (and each head's bias by one element), so
+    :func:`commons.load_state_dict_mismatch` would *skip the whole tensor* when
+    warm-starting from an EOS-less checkpoint -- silently re-initialising all
+    input embeddings and output heads, i.e. much of what the stage-2 model knows
+    about codes.
+
+    This returns a copy of ``state_dict`` whose matching entries are padded with
+    one extra zero row (zero bias for the EOS class), so the old rows load and
+    only the new EOS class is fresh.  Zero (not a copy of another row) is
+    deliberate: the EOS *logit* then starts at the head's own bias, i.e. 0, an
+    unremarkable ``1/(v+2)`` probability instead of inheriting the pad class's
+    logit, which would make a fresh model stop at frame 0.
+
+    Args:
+        model: the (EOS-enabled) model being loaded into.
+        state_dict: checkpoint state dict, with or without ``prefix``.
+        prefix: key prefix used by the checkpoint (``"net."`` for Lightning
+            stage-2 checkpoints, ``""`` for a bare ``CodeTransformer``).
+
+    Returns:
+        A new dict; the input is returned unchanged when the model has no EOS
+        class or nothing matches (so a stale/other checkpoint still loads).
+    """
+    if not getattr(model, "eos_token", False):
+        return state_dict
+    out = dict(state_dict)
+    for k, vocab in enumerate(model.vocab_sizes):
+        names = (f"embeds.{k}.weight", f"heads.{k}.weight", f"heads.{k}.bias")
+        for name in names:
+            for key in (prefix + f"decoder.{name}", f"decoder.{name}"):
+                src = out.get(key)
+                if src is None or src.shape[0] != vocab + 1:
+                    continue
+                grown = src.new_zeros((vocab + 2, *src.shape[1:]))
+                grown[: vocab + 1] = src
+                out[key] = grown
+    return out
 
 
 if __name__ == "__main__":
