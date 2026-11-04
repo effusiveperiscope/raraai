@@ -24,7 +24,7 @@ class VectorQuantize(nn.Module):
         self,
         dim: int,
         codebook_size: int,
-        decay=0.8,
+        decay=0.99,
         commitment=1.0,
         eps=1e-5,
         n_embed=None,
@@ -59,7 +59,18 @@ class VectorQuantize(nn.Module):
     def laplace_smoothing(self, x, n_categories, eps=1e-5):
         return (x + eps) / (x.sum() + n_categories * eps)
 
-    def forward(self, input):
+    def forward(self, input, weight=None):
+        """Quantise ``input`` and return (quantized, commitment_loss, perplexity).
+
+        Args:
+            input: ``(..., dim)`` latent to quantise.
+            weight: optional per-frame weight, ``input.shape[:-1]``. When given
+                the commitment loss is a *weighted* mean instead of a plain one,
+                so callers can down-weight frames whose reconstruction is not
+                actually supervised (the pitch path's unvoiced frames). Passing
+                ``None`` reproduces the original unweighted ``F.mse_loss``
+                exactly, so the spectrogram path is unaffected.
+        """
         dtype = input.dtype
         flatten = input.reshape(-1, self.dim)
         dist = (
@@ -83,7 +94,19 @@ class VectorQuantize(nn.Module):
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
             self.embed.data.copy_(embed_normalized)
 
-        loss = F.mse_loss(quantize.detach(), input) * self.commitment
+        if weight is None:
+            loss = F.mse_loss(quantize.detach(), input) * self.commitment
+        else:
+            # `input` is (..., dim); one weight per frame, broadcast over the
+            # code dim, and divide by (sum of weights * dim) so the result is a
+            # per-element weighted mean (== the unweighted value when w == 1).
+            w = weight
+            if w.dim() == input.dim() - 1:
+                w = w.unsqueeze(-1)
+            w = w.to(dtype).expand_as(input)
+            denom = w.sum().clamp_min(self.eps)
+            loss = (((quantize.detach() - input) ** 2) * w).sum() / denom
+            loss = loss * self.commitment
         quantize = input + (quantize - input).detach()
 
         avg_probs = torch.mean(embed_onehot, dim=0)
@@ -117,13 +140,13 @@ class ResidualVQ(nn.Module):
             [VectorQuantize(**kwargs) for _ in range(num_quantizers)]
         )
 
-    def forward(self, x):
+    def forward(self, x, weight=None):
         quantized_out = 0.0
         residual = x
         all_losses = []
         all_perplexities = []
         for layer in self.layers:
-            quantized, loss, perplexity = layer(residual)
+            quantized, loss, perplexity = layer(residual, weight=weight)
             # Issue: https://github.com/lucidrains/vector-quantize-pytorch/issues/33
             # We found considering only the 1st layer VQ's graident results in better performance
             # residual = residual - quantized.detach() # considering all layers' graidents
@@ -173,17 +196,19 @@ class Quantizer(nn.Module):
         code_dim: int,
         codebook_num: int,
         codebook_size: int,
+        ema_decay: float = 0.99,
     ):
         super().__init__()
         self.codebook = ResidualVQ(
-            dim=code_dim, num_quantizers=codebook_num, codebook_size=codebook_size
+            dim=code_dim, num_quantizers=codebook_num,
+            codebook_size=codebook_size, decay=ema_decay,
         )
 
     def initial(self):
         self.codebook.initial()
 
-    def forward(self, z):
-        zq, vqloss, perplexity = self.codebook(z.transpose(2, 1))
+    def forward(self, z, weight=None):
+        zq, vqloss, perplexity = self.codebook(z.transpose(2, 1), weight=weight)
         zq = zq.transpose(2, 1)
         return zq, vqloss, perplexity
 
@@ -551,6 +576,7 @@ class VevoRepCodec(nn.Module):
         dec_block_kernel_size=3,
         dropout=0.1,
         gin_channels=256,
+        quantizer_decay=0.99,
     ):
         super().__init__()
 
@@ -589,13 +615,14 @@ class VevoRepCodec(nn.Module):
         )
 
         self.quantizer = Quantizer(
-            code_dim=code_dim, codebook_num=codebook_num, codebook_size=codebook_size
+            code_dim=code_dim, codebook_num=codebook_num,
+            codebook_size=codebook_size, ema_decay=quantizer_decay,
         )
 
         self.g_proj = nn.Linear(
             gin_channels, code_dim)
 
-    def forward(self, x, do_uq=True, g=None):
+    def forward(self, x, do_uq=True, g=None, weight=None):
         """
         Forward pass through the VevoRepCodec.
 
@@ -603,6 +630,11 @@ class VevoRepCodec(nn.Module):
             x (Tensor): Input tensor of shape (B, T, input_channels)
                 where B = batch size, input_channels = number of channels
                 in the input features, and T = temporal length.
+            do_uq (bool): Also decode the pre-quantization latent.
+            g (Tensor): Speaker embedding for the codec's FiLM conditioning.
+            weight (Tensor): Optional ``(B, T')`` per-frame weight forwarded to
+                the quantizer's commitment loss. ``None`` keeps the original
+                unweighted behaviour (the spectrogram path uses that).
 
         Returns:
             Tuple:
@@ -624,7 +656,7 @@ class VevoRepCodec(nn.Module):
         x = rearrange(x, "b t c -> b c t")
         x = self.encoder(x)
         z = self.projector(x)
-        zq, vqloss, perplexity = self.quantizer(z)
+        zq, vqloss, perplexity = self.quantizer(z, weight=weight)
         g = self.g_proj(g)
         yq = self.decoder(zq, g)
         yq = rearrange(yq, "b c t -> b t c")

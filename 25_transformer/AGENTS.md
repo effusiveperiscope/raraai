@@ -417,6 +417,101 @@ PyTorch updates these numbers; the way to re-measure is a short run of the same
 config for the current code and for `git stash`ed code, then median
 `Δt/Δstep` from the `loss_g` scalars in the TensorBoard events.
 
+### Pitch codec loss balance (stage 1, v0.6)
+
+The pitch codec (2 RVQ books over a 64-wide latent at 1/4 the frame rate) is
+**0.1 % of the Generator's parameters** (128 k encoder + 226 k decoder vs 33 M),
+and until v0.6 it was effectively trained by the adversarial critic alone.
+
+Measured on `base_v0.5` (45 k steps) by taking `torch.autograd.grad` of each
+term in `step()` separately, with the *old* coefficients
+(`c_pitch_adv = c_pitch_feat = 1.0`), the share of gradient energy was:
+
+| loss term | pitch-encoder | pitch-decoder |
+|---|---|---|
+| `pitch_score_loss` (adv) | 74.5 % | 80.8 % |
+| `pitch_feat_loss` (feat-match) | 23.2 % | 19.2 % |
+| `pitch_uv_loss` (BCE) | 0.96 % | 0.01 % |
+| `pitch_uv_frame_loss` | 0.78 % | 0.00 % |
+| `pitch_q_recon_loss` | 0.32 % | **0.0003 %** |
+| `p_vqloss` (commitment) | 0.21 % | 0.00 % |
+| `pitch_dec_loss` (f0 MSE) | 0.01 % | **0.00005 %** |
+
+The two reconstruction terms delivered 0.0003 % of the decoder's gradient, so
+the output head's **gain was never constrained**. The consequence is visible in
+the checkpoint, not in the loss curves: on 40 val clips `f0_hat` tracks the
+contour shape (`corr(log f0, log f0_hat) = 0.73`) but the whole contour is
+shrunk towards its mean —
+
+- per-clip level regression `decoded = 0.481 x target` (R² = 0.978; between-clip
+  spread 922 → 449 cents, within-clip 480 → 329 cents),
+- median f0 error **508 cents**, of which **~490 is a per-clip constant offset**
+  (187 cents remain after removing it).
+
+This hid behind healthy-looking curves: `pitch_dec_loss` sat at 0.0017 and
+`pitch_q_recon_loss` fell smoothly from 0.078 to 0.011 while the pitch was 2x
+too flat. Stage-1 audio does not reveal it either, because `forward()` defaults
+to `use_pitch_recon=False` and feeds the NSF decoder the *true* f0 — but stage 2
+decodes f0 straight from the codes (`infer_from_codes`), so every speaker would
+come out pulled towards ~180 Hz.
+
+What v0.6 changes:
+
+- **Reconstruction losses are normalised** by the target's own weighted variance
+  (a "1 - R²"), in `1_training.py`. The raw masked MSE is O(1e-3) because
+  log-pitch is normalised to ~[0, 1], three orders of magnitude below the
+  adversarial terms; normalising lets `c_pitch_dec`/`c_pitch_q` be O(1) like
+  `c_mel`/`c_stft` instead of needing ~1e3 (to reach a 50/50 split against the
+  old critic weights you would have needed `c_pitch_dec ≈ 1400`).
+- **`c_pitch_adv` / `c_pitch_feat` are 0.5**, and the hard-coded `* 2` on
+  `pitch_feat_loss` moved into `c_pitch_feat`. Measured split with the shipped
+  values: **64 % reconstruction / 36 % critic on the decoder, ~100 %
+  reconstruction on the encoder**. At random init the critic's gradient is
+  ~400x smaller than at 45 k steps, so the split starts at ~100 % reconstruction
+  and the critic grows into its share — the codec learns to reconstruct first.
+  To re-measure, replicate the loss set and take per-term `autograd.grad` norms.
+- **Unvoiced frames are soft-weighted, not masked** (`train.c_pitch_qr_uv`,
+  default 0.5, the pitch analogue of `c_qr_uv`). `pitch_q_recon_loss` used a
+  hard mask, which left the codec's 64-d *decoder* output on ~85 % of all
+  frames unsupervised: measured reconstruction error 0.0008 on voiced frames vs
+  0.0132 on unvoiced (17x). The same weight is threaded into the quantiser's
+  commitment loss (an optional `weight` argument on
+  `VevoRepCodec`/`Quantizer`/`ResidualVQ`/`VectorQuantize`; `None` reproduces
+  the old unweighted `F.mse_loss`, which is what the spectrogram path still
+  uses) so both terms refer to the same frames. Note the *commitment* is not
+  unvoiced-dominated (0.0032 there vs 0.0040 voiced), so this weighting is
+  mainly about consistency — the 17x gap is in the reconstruction.
+- **`codec.ema_decay` / `pitch_codec.ema_decay` default to 0.99** (was a
+  hard-coded 0.8, i.e. a ~5-batch memory). Measured with 0.8, a codebook lost
+  50 % (pitch book0) to 90 % (pitch book1) of its content every 20 steps — the
+  encoder was chasing a moving target, and it is the most likely cause of
+  `val_p_vqloss` *rising* from 0.0012 to 0.0056 over the `base_v0.5` run. It is
+  a Python float, not a buffer, so it is not in the checkpoint and does not
+  change any shape.
+
+`_pitch_codec_forward` also forces `pq_up` to exactly `t_full` frames. `t_pad`
+is computed from the *spectrogram* path's frame count, but the pitch path's
+upsample lands on `4 * floor(T_ds)` using its own
+`(downsample_kernel - down_factor)` floor, so the old `[..., :-t_pad]` trim
+returned `f0_hat` `t_pad` frames short of `f0_target` whenever `t_pad != 0`
+(measured 1802 vs 1804). Training never hit it (`segment_size // hop_length` =
+800 ≡ 0 mod 4 ⇒ `t_pad == 0`), but `infer(use_pitch_recon=True)` on
+arbitrary-length audio did.
+
+**None of this is visible in the logged scalars**, which is the real lesson:
+`pitch_dec_loss` is a masked MSE that can look converged while the contour is
+2x too flat. The cheap guard is the per-clip **level regression slope** of
+decoded level against target level, which should be ≈ 1.0 (it was 0.481). Also
+do not chase `p_perplexity`: on *voiced* frames the books are healthy
+(60/128 and 70/128); the low headline number is unvoiced frames collapsing onto
+~2 codes, which is correct by design.
+
+Toggling any of it needs **no re-preprocessing** to change the *config*, but the
+codec weights change, so a fresh `exp_name` is required (v0.6) and the stage-2
+codes must be re-extracted with the new checkpoint.
+
+### Codebook loss weighting (stage 2)
+
 ### Codebook loss weighting (stage 2)
 
 The per-codebook cross-entropies are **not** averaged uniformly. `CodeTransformer`
@@ -762,6 +857,11 @@ Notes:
      in `freeze_non_pitch`'s trainable set) before relying on predicted voicing.
    - No voicing mask needs to be stored on disk for stage 2: the information
      lives in the pitch codes and is decoded by the head.
+   - The pitch codec's *reconstruction* terms were gradient-starved until v0.6,
+     so a pre-v0.6 checkpoint's `pitch_uv_proj` and `pitch_out_proj` are trained
+     but its decoded f0 is shrunk ~2x towards the mean. `--pitch_only` does not
+     fix that on its own (the pitch loss mix is identical in pitch-only mode);
+     see "Pitch codec loss balance (stage 1, v0.6)" in §4.
 10. **Stage-2 `decoder_speaker_cond` changes the parameter set.** The decoder
     now has its own speaker embedding (`transformer.decoder_speaker_cond:
     true`, default). Checkpoints trained without it (`transformer_v0.1`) do

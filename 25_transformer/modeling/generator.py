@@ -49,7 +49,12 @@ class Generator(nn.Module):
             code_dim=hp.codec.code_dim,
             codebook_size=hp.codec.codebook_size,
             codebook_num=hp.codec.codebook_num,
-            gin_channels=hp.vits.gin_channels
+            gin_channels=hp.vits.gin_channels,
+            # EMA decay of the codebook update. The historical default (0.8,
+            # i.e. a ~5-batch memory) was measured to rewrite 50-90 % of a
+            # codebook's content every 20 steps, so the encoder was chasing a
+            # moving target. 0.99 is the usual value.
+            quantizer_decay=float(_get_cfg(hp.codec, "ema_decay", 0.99)),
         )
         self.dec = MyGeneratorNSF(hp=hp)
         self.spk_emb = nn.Embedding(hp.vits.max_spk_count, hp.vits.gin_channels)
@@ -116,6 +121,7 @@ class Generator(nn.Module):
             codebook_size=p_codebook_size,
             codebook_num=p_codebook_num,
             gin_channels=hp.vits.gin_channels,
+            quantizer_decay=float(_get_cfg(pitch_codec_cfg, "ema_decay", 0.99)),
         )
         # Overlapping transposed conv back to the decoder frame rate.
         # With kernel_size == stride this layer is exactly block-diagonal: the
@@ -159,6 +165,16 @@ class Generator(nn.Module):
         # Decision threshold on sigmoid(uv_logit) used at inference.
         self.pitch_uv_threshold = float(_get_cfg(
             _get_cfg(hp, "train", None), "pitch_uv_threshold", 0.5))
+        # Weight applied to unvoiced frames in the pitch reconstruction and
+        # quantiser commitment losses (`train.c_pitch_qr_uv`, mirroring the
+        # spectrogram path's `train.c_qr_uv`). Unvoiced frames are exactly zero,
+        # so hard-masking them out left the codec's 64-d *decoder* output on
+        # ~85 % of all frames unsupervised -- measured 0.0008 reconstruction
+        # error on voiced frames vs 0.0132 on unvoiced. (`0` restores the hard
+        # mask; the commitment itself is not unvoiced-dominated, so weighting it
+        # is mainly what keeps the two terms referring to the same frames.)
+        self.pitch_qr_uv_weight = float(_get_cfg(
+            _get_cfg(hp, "train", None), "c_pitch_qr_uv", 0.5))
 
     def freeze_non_pitch(self):
         """Freeze every parameter except the pitch path components.
@@ -235,13 +251,37 @@ class Generator(nn.Module):
             # Same down_factor as the spec path -> same code rate.
             px = self._pitch_downsample_conv(f0_target)  # (B, H, T_ds)
             px_ds = rearrange(px, "b c t -> b t c")
+            # Per-frame weight for the quantiser's commitment loss, shared with
+            # `pitch_q_recon_loss` in 1_training.py. Unvoiced frames are exactly
+            # zero and collapse onto a couple of codes, so the codec's output
+            # there is only weakly constrained; weighting them the same way in
+            # both terms keeps them referring to the same frames.
+            voiced_w = torch.where(
+                f0_target > 0,
+                torch.ones_like(f0_target),
+                torch.full_like(f0_target, self.pitch_qr_uv_weight),
+            )
+            voiced_w_ds = F.interpolate(
+                voiced_w, size=px_ds.shape[1], mode='area').squeeze(1)
             pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
-                px_ds, do_uq=False, g=g)
+                px_ds, do_uq=False, g=g, weight=voiced_w_ds)
             pq_ds = pq
             pq_ct = rearrange(pq, "b t c -> b c t")
             pq_up = self.pitch_upsample(pq_ct)
-            if t_pad > 0:
-                pq_up = pq_up[..., : pq_up.shape[-1] - t_pad]
+            # Force the upsampled contour onto exactly `t_full` frames. The
+            # transposed conv lands on 4 * floor(T_ds), and T_ds comes from the
+            # pitch path's own (downsample_kernel - down_factor) floor, so the
+            # result is `t_full + t_pad` only when `t_pad` was derived from the
+            # *pitch* length. `t_pad` actually comes from the spectrogram path,
+            # so whenever it is non-zero the old `[..., :-t_pad]` trim returned
+            # `f0_hat` t_pad frames short of `f0_target` (measured 1802 vs 1804
+            # at t_pad=2). Training never hit it (segment/hop = 800 == 0 mod 4
+            # => t_pad == 0), but infer(use_pitch_recon=True) on arbitrary
+            # lengths did.
+            if pq_up.shape[-1] > t_full:
+                pq_up = pq_up[..., :t_full]
+            elif pq_up.shape[-1] < t_full:
+                pq_up = F.pad(pq_up, (0, t_full - pq_up.shape[-1]))
             f0_hat = self.pitch_out_proj(pq_up).squeeze(1)  # (B, T_full)
             p_uv_logits = self.pitch_uv_proj(pq_up).squeeze(1)  # (B, T_full)
             return (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,

@@ -310,16 +310,40 @@ class TrainModule(pl.LightningModule):
         # reconstruct the (log-normalized) f0 contour. Only voiced frames
         # carry pitch, so mask the MSE to f0_target > 0.
         # f0_hat / f0_target: (B, T_full) log-normalized pitch.
+        #
+        # Both pitch reconstruction losses are reported NORMALISED by the
+        # target's own weighted variance, i.e. as the fraction of unexplained
+        # variance (1 - R^2). The raw masked MSE is O(1e-3) because log-pitch is
+        # normalised to ~[0, 1], which put it ~3 orders of magnitude below the
+        # adversarial terms: at c_pitch_adv = c_pitch_feat = 1.0 the pitch critic
+        # supplied 99.99 % of the pitch decoder's gradient, and the codec
+        # converged to a contour shrunk ~2x towards its mean (level regression
+        # slope 0.48 against a target of 1.0, 508 cents median f0 error of which
+        # ~490 was a per-clip offset). Normalising makes c_pitch_dec/c_pitch_q
+        # comparable to the mel/STFT weights instead of needing ~1e3.
         pitch_voiced = (f0_target > 0).float()
         pitch_denom = pitch_voiced.sum().clamp_min(1.0)
         pitch_dec_loss = ((f0_hat - f0_target) ** 2 * pitch_voiced).sum() / pitch_denom
+        pitch_dec_mean = (f0_target * pitch_voiced).sum() / pitch_denom
+        pitch_dec_var = (((f0_target - pitch_dec_mean) ** 2) * pitch_voiced).sum() / pitch_denom
+        pitch_dec_loss = pitch_dec_loss / pitch_dec_var.detach().clamp_min(1e-6)
+
         # Pitch code-space reconstruction (mirrors q_recon_loss for spec).
+        # Unvoiced frames used to be hard-masked out, which left the codec's
+        # 64-d decoder output on ~85 % of all frames unsupervised (measured
+        # 0.0008 reconstruction error on voiced frames vs 0.0132 on unvoiced).
+        # Soft-weight them like q_recon_loss instead.
+        c_pitch_qr_uv = self.config.train.get('c_pitch_qr_uv', 0.5)
         pitch_voiced_ds = F.interpolate(
             pitch_voiced.unsqueeze(1),
-            size=pq_ds.shape[1]).transpose(1, 2)  # (B, T_ds, 1)
-        pitch_q_recon_loss = (F.mse_loss(pq_ds, px_ds,
-            reduction='none') * pitch_voiced_ds).sum() / (
-                pitch_voiced_ds.sum().clamp_min(1.0))
+            size=pq_ds.shape[1], mode='area').transpose(1, 2)  # (B, T_ds, 1)
+        pitch_q_w = pitch_voiced_ds + (1.0 - pitch_voiced_ds) * c_pitch_qr_uv
+        pitch_q_denom = (pitch_q_w.sum() * pq_ds.shape[-1]).clamp_min(1e-6)
+        pitch_q_recon_loss = ((pq_ds - px_ds) ** 2 * pitch_q_w).sum() / pitch_q_denom
+        pitch_q_mean = (px_ds * pitch_q_w).sum() / pitch_q_denom
+        pitch_q_var = (((px_ds - pitch_q_mean) ** 2) * pitch_q_w).sum() / pitch_q_denom
+        pitch_q_recon_loss = pitch_q_recon_loss / pitch_q_var.detach().clamp_min(1e-6)
+
         c_pitch_dec = self.config.train.get('c_pitch_dec', 1.0)
         c_pitch_q = self.config.train.get('c_pitch_q', 1.0)
         pitch_dec_loss = pitch_dec_loss * c_pitch_dec
@@ -423,7 +447,8 @@ class TrainModule(pl.LightningModule):
             for fake, real in zip(feat_fake, feat_real):
                 pitch_feat_loss += torch.mean(torch.abs(fake - real))
         pitch_feat_loss = pitch_feat_loss / len(pitch_disc_fake)
-        pitch_feat_loss = pitch_feat_loss * 2
+        # The 2x that used to live here now belongs in train.c_pitch_feat, so
+        # that every pitch loss weight is visible in one place in the config.
 
         # Loss
         if pitch_only:

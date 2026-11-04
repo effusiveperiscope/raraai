@@ -17,7 +17,12 @@
 # 0.4.7d - segment size had no audible effect, resetting.
 # - modify q_recon_loss to also work on unvoiced frames
 # 0.5 - oops lost checkpoint.
-exp_name: base_v0.5
+# 0.6 - pitch codec loss rebalance (no re-preprocess needed for the *config*,
+#       but the codec changes so the codes must be re-extracted): pitch
+#       reconstruction losses normalised by the target variance, unvoiced
+#       frames soft-weighted instead of hard-masked, EMA decay 0.8 -> 0.99,
+#       and a t_pad length fix in _pitch_codec_forward.
+exp_name: base_v0.6
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -53,11 +58,18 @@ codec:
   code_dim: 1024
   codebook_size: 64
   codebook_num: 8
+  # EMA decay of the codebook update (VectorQuantize). The historical default
+  # was 0.8, i.e. a ~5-batch memory, which was measured to rewrite 50-90 % of a
+  # codebook's content every 20 steps -- the encoder was chasing a moving
+  # target. 0.99 is the usual value. Not part of the checkpoint (no shape
+  # change), and irrelevant at inference.
+  ema_decay: 0.99
 pitch_codec:
   hidden_channels: 64
   code_dim: 128
   codebook_size: 128
   codebook_num: 2
+  ema_decay: 0.99
   # Overlapping analysis conv, kernel > stride with same parity. Restores the
   # block centre and output length (floor(T/4)) while giving each code 2 frames
   # of cross-block context and a low-pass before the 4x decimation. Changes the
@@ -108,12 +120,31 @@ train:
   c_mel: 1.0
   c_stft: 9
   c_qr_uv: 0.5
+  # Pitch reconstruction losses are now NORMALISED by the target's own weighted
+  # variance (a "1 - R^2"), so these are O(1) like c_mel/c_stft instead of
+  # O(1e-3). The pitch critic is therefore a regulariser on top of the
+  # reconstruction rather than its driver: at c_pitch_adv = c_pitch_feat = 1.0
+  # (the old values) it supplied 99.99 % of the pitch decoder's gradient, and
+  # the decoded contour converged shrunk ~2x towards its mean (level regression
+  # slope 0.48 against a target of 1.0, 508 cents median f0 error, ~490 of it a
+  # per-clip offset). With these values the measured split is 64 % reconstruction
+  # / 36 % critic on the decoder and ~100 % reconstruction on the encoder. The
+  # reconstruction share only grows as the codec improves, so the critic refines
+  # a contour that already tracks the target instead of defining it.
   c_pitch_dec: 1.0
-  c_pitch_q: 0.5
-  c_pitch_adv: 1.0
-  c_pitch_feat: 1.0
+  c_pitch_q: 1.0
+  c_pitch_adv: 0.5
+  c_pitch_feat: 0.5
   c_pitch_uv: 1.0
   c_pitch_uv_frame: 0.1
+  # Weight on UNVOICED frames in the pitch reconstruction and quantiser
+  # commitment losses -- the pitch analogue of c_qr_uv. Unvoiced frames are
+  # exactly zero, so hard-masking them out left the codec's 64-d *decoder*
+  # output on ~85 % of all frames unsupervised: measured 0.0008 reconstruction
+  # error on voiced frames vs 0.0132 on unvoiced (17x). `0` restores the old
+  # hard mask. (The commitment itself is not unvoiced-dominated -- 0.0032 there
+  # vs 0.0040 voiced -- so this mainly keeps the two terms on the same frames.)
+  c_pitch_qr_uv: 0.5
   pitch_uv_threshold: 0.5
   eps: 1e-7
   lr: 1e-4

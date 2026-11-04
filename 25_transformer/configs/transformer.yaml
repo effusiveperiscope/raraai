@@ -107,11 +107,16 @@ codec:
   code_dim: 1024
   codebook_size: 64
   codebook_num: 8
+  # Must match configs/base.yaml (see AGENTS.md). Only affects EMA codebook
+  # updates in train mode, so it is irrelevant for validation-time sampling,
+  # but keeping the blocks identical avoids silent drift.
+  ema_decay: 0.99
 pitch_codec:
   hidden_channels: 64
   code_dim: 128
   codebook_size: 128
   codebook_num: 2
+  ema_decay: 0.99
   # Must match configs/base.yaml exactly: validation-time sampling rebuilds the
   # stage-1 Generator from this block.
   downsample_kernel: 8
