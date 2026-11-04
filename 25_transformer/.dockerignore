@@ -1,15 +1,19 @@
 # Build context guard: keep the image small and reproducible.
 #
 # Everything here is either generated (datasets, checkpoints, logs, caches) or
-# too large to bake into an image. `data/` and `checkpoints/` are re-created at
+# too large to bake into an image. `data/` and `checkpoints*/` are re-created at
 # runtime -- mount them (or a whole volume at /workspace) on vast.ai.
 
 # --- generated / large artefacts --------------------------------------------
 data/
 logs/
+logs_stage1/
+logs_stage2/
 archived_logs/
 archived_checkpoints/
 checkpoints/
+checkpoints_stage1/
+checkpoints_stage2/
 test_out/
 peaks/
 pretrain/

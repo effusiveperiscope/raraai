@@ -17,7 +17,7 @@ both f0 contours for offline inspection.
 
 Usage:
     python test_stage1_codes.py test.wav \
-        --checkpoint checkpoints/base_v0.4.6/last.ckpt --sid 0
+        --checkpoint checkpoints_stage1/base_v0.4.6/last.ckpt --sid 0
 
 Notes:
     * The Generator is built from ``--config`` (default ``configs/base.yaml``);

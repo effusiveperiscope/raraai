@@ -4,9 +4,10 @@
 #
 # That stage copies with `cp -ru`, which creates the destination files as root
 # with the source mode masked by the boot umask: a 0777 directory in the image
-# lands as 0755, and `user` then cannot create checkpoints/, logs/ or data/
-# inside it.  Fixing the modes after the copy is cheaper and more robust than
-# trying to encode them in the image.
+# lands as 0755, and `user` then cannot create checkpoints_stage1/,
+# checkpoints_stage2/, logs_stage1/, logs_stage2/ or data/ inside it.  Fixing
+# the modes after the copy is cheaper and more robust than trying to encode them
+# in the image.
 #
 # This file is SOURCED by boot_default.sh (see its "stages are SOURCED" comment
 # next to the /etc/vast_boot.d loop), so it must not `set -e`, `exit`, or leave

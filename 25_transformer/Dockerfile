@@ -185,8 +185,9 @@ RUN curl https://rclone.org/install.sh | bash
 
 # Runtime cwd.
 # NOTE: `HorsePhonemizer` opens `new_horsewords.clean` by relative path and
-# every script resolves `configs/…`, `data/…`, `checkpoints/…` against the cwd,
-# so the project must be run from its own directory (`/workspace/25_transformer`).
+# every script resolves `configs/…`, `data/…`, `checkpoints*/…`, `logs*/…`
+# against the cwd, so the project must be run from its own directory
+# (`/workspace/25_transformer`).
 # /workspace itself stays empty on purpose: the vast.ai boot stage only copies
 # /opt/workspace-internal/<item> into $WORKSPACE when that target does not exist
 # yet (/etc/vast_boot.d/36-sync-workspace.sh), so pre-creating

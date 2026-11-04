@@ -557,6 +557,15 @@ def train(config,
     transfer_from=None,
     r22_ckpt=None):
     hp = config
+    # Stage 1 and stage 2 keep entirely separate output trees, so wiping one
+    # stage's checkpoints/logs can never take the other stage's progress with it
+    # (stage-1 GAN runs are months long). Everything below must go through
+    # `checkpoints_dir` / `log_dir` -- never a literal 'checkpoints' / 'logs'.
+    checkpoints_dir = 'checkpoints_stage1'
+    # Optional override: `train.log_dir` in configs/base.yaml defaults to
+    # 'logs_stage1'.
+    log_dir = config.train.get('log_dir', 'logs_stage1')
+
     net_g = Generator(hp=hp)
     net_d = Discriminator(hp=hp)
     pitch_disc_cfg = config.get('pitch_discriminator', {})
@@ -566,9 +575,9 @@ def train(config,
         kernel_size=int(pitch_disc_cfg.get('kernel_size', 5)),
         delta_scale=float(pitch_disc_cfg.get('delta_scale', 50.0)))
 
-    if os.path.exists(f'checkpoints/{config.exp_name}/last.ckpt'):
+    if os.path.exists(f'{checkpoints_dir}/{config.exp_name}/last.ckpt'):
         print('Detected interrupted training - resuming from last.ckpt')
-        resume_from = f'checkpoints/{config.exp_name}/last.ckpt'
+        resume_from = f'{checkpoints_dir}/{config.exp_name}/last.ckpt'
     if resume_from is not None:
         print('Resuming from lightning checkpoint: {}'.format(resume_from))
         d = torch.load(resume_from, map_location='cpu', weights_only=False)
@@ -604,9 +613,11 @@ def train(config,
         net_g=net_g, net_d=net_d, net_dp=net_dp, config=config)
 
     logger = pl.loggers.TensorBoardLogger(
-        config.train.get('log_dir', 'logs'), name=config.exp_name,
+        log_dir, name=config.exp_name,
         version=config.get('tensorboard_version', 0)
     )
+    print('Checkpoints: {}'.format(f'{checkpoints_dir}/{config.exp_name}'))
+    print('TensorBoard: {}'.format(logger.log_dir))
     print("Loading data...")
     train_dataset = dataset_ac(config.train.train_filelist, is_train=True)
     val_dataset = dataset_ac(config.train.val_filelist, is_train=False)
@@ -628,20 +639,20 @@ def train(config,
 
     val_checkpoint_callback = pl.callbacks.ModelCheckpoint(
         monitor='val_loss',
-        dirpath=f'checkpoints/{config.exp_name}',
+        dirpath=f'{checkpoints_dir}/{config.exp_name}',
         filename='best-checkpoint',
         save_top_k=config.train.keep_ckpts,
         mode='min',
     )
 
     default_last_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=f'checkpoints/{config.exp_name}',
+        dirpath=f'{checkpoints_dir}/{config.exp_name}',
         filename='last',
-        every_n_epochs=1,
+        every_n_train_steps=1000,
         save_top_k=-1,
     )
     default_interval_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=f'checkpoints/{config.exp_name}',
+        dirpath=f'{checkpoints_dir}/{config.exp_name}',
         filename='model-{step:06d}',
         every_n_train_steps=200000,
         save_top_k=-1,
@@ -650,7 +661,7 @@ def train(config,
     if config.train.get('save_interval') is not None:
         interval_checkpoint_callback = pl.callbacks.ModelCheckpoint(
             every_n_epochs=config.train.save_interval,
-            dirpath=f'checkpoints/{config.exp_name}',
+            dirpath=f'{checkpoints_dir}/{config.exp_name}',
             filename='interval-checkpoint-{epoch:04d}',
             save_top_k=-1,
         )

@@ -122,7 +122,12 @@ train:
   keep_ckpts: 2
   num_workers: 6
   pin_memory: True
-  log_dir: logs
+  # Stage-1 TensorBoard root (`logs_stage1/{exp_name}/version_0`). Stage 2 writes
+  # to `logs_stage2/` so the two stages never share a tree: wiping stage 2's
+  # logs must not touch a months-long stage-1 run. 1_training.py's fallback is
+  # the same value, so keeping this key set correctly only matters if you point
+  # it somewhere else (e.g. a bigger disk).
+  log_dir: logs_stage1
   train_filelist: data/genshin_full_stage1/train.txt
   val_filelist: data/genshin_full_stage1/val.txt
   max_steps: 3e7

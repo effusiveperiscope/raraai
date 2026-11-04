@@ -64,8 +64,10 @@ filelists_2/         Stage-2 source filelists
 docker/              vast.ai image helpers (prefetch_models.py, fetch_shards.sh,
                      boot/), see DOCKER.md
 data/                Preprocessed features + generated train/val filelists
-checkpoints/         Per-experiment model checkpoints (gitignored)
-logs/                TensorBoard logs (gitignored)
+checkpoints_stage1/  Stage-1 checkpoints, per experiment (gitignored)
+logs_stage1/         Stage-1 TensorBoard runs (gitignored)
+checkpoints_stage2/  Stage-2 checkpoints, per experiment (gitignored)
+logs_stage2/         Stage-2 TensorBoard runs (gitignored)
 ```
 
 `modeling/{vits,rvc,vits_decoder}` and `vits_extend/` are **vendored /
@@ -132,7 +134,7 @@ python speaker_map.py \
 python 2_preprocess.py \
     --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 \
-    --checkpoint checkpoints/base_v0.4/last.ckpt \
+    --checkpoint checkpoints_stage1/base_v0.4/last.ckpt \
     --config configs/base.yaml \
     --speaker_map speakers.json
 
@@ -266,8 +268,33 @@ Two config files exist with **non-overlapping responsibilities**:
 > that produced the codes. Changing these numbers requires re-running
 > `2_preprocess.py`.
 
-`exp_name` drives checkpoint and TensorBoard paths:
-`checkpoints/{exp_name}/` and `logs/{exp_name}/`.
+`exp_name` drives checkpoint and TensorBoard paths, and **each stage owns its
+own tree**:
+
+| stage | checkpoints | TensorBoard |
+|---|---|---|
+| 1 (`1_training.py`) | `checkpoints_stage1/{exp_name}/` | `logs_stage1/{exp_name}/` |
+| 2 (`2_training.py`) | `checkpoints_stage2/{exp_name}/` | `logs_stage2/{exp_name}/` |
+
+The split is deliberate: a stage-1 GAN run is months long, so `rm -rf`-ing a
+failed stage-2 experiment must never be able to take it with it (and vice
+versa). The roots are literals in the two `train()` functions
+(`checkpoints_dir` / `log_dir`) — never reintroduce a bare `'checkpoints'` or
+`'logs'` path there. The only knob is `train.log_dir` in the config, which
+defaults to (and in the shipped configs is set to) the stage's own root, so a
+stale `log_dir: logs` in an old config would silently merge the stages again;
+`train()` prints the resolved checkpoint and TensorBoard paths at startup so
+this is visible on the first line of a run. `exp_name` colliding across stages
+is fine (`base_v0.5` and `transformer_v0.5` would still land in different
+trees).
+
+**This does not move existing runs.** Checkpoints and logs written before the
+split live in `checkpoints/` and `logs/`; `1_training.py` / `2_training.py`
+only look in their own tree, so a pre-split run is *not* auto-resumed and
+starts from scratch in the new location. Either move it (`mv
+checkpoints/base_v0.5 checkpoints_stage1/base_v0.5`, same for `logs/`) or pass
+`--resume_from checkpoints/base_v0.5/last.ckpt` (the rest of the run then
+continues into `checkpoints_stage1/`).
 
 Use conda env raraai25 for environment with dependencies including GPU pytorch.
 
@@ -615,7 +642,8 @@ Notes:
   uses `bf16-mixed`.
 - **`mp.set_start_method('spawn', force=True)`** appears at the top of both
   training `__main__` blocks and is required on Linux; don't remove it.
-- **Logging:** `logs/` holds TensorBoard runs (`train.log_interval` controls
+- **Logging:** `logs_stage1/` and `logs_stage2/` hold the TensorBoard runs (one
+  tree per stage — see §4; `train.log_interval` controls
   step logging). Validation audio for stage 2 is optionally logged by loading a
   frozen stage-1 Generator (`train.generator_checkpoint`); it is non-fatal if
   the checkpoint is missing, and every visual/audio log is skipped without a
@@ -786,6 +814,27 @@ Notes:
     the old rows so only the new EOS class is fresh.
     `dataset_codes` emits the `complete` flag unconditionally, so EOS-less
     models and their configs need no change (see §4).
+14. **The two stages write to separate checkpoint/log trees**
+    (`checkpoints_stage1/` + `logs_stage1/` for `1_training.py`,
+    `checkpoints_stage2/` + `logs_stage2/` for `2_training.py`). This is the
+    point of the split: stage-1 runs are months long, so deleting a failed
+    stage-2 experiment must never be able to reach them. Consequences:
+    - The paths are set by `checkpoints_dir` / `log_dir` at the top of each
+      `train()`. Adding a new `ModelCheckpoint` (or any other writer) **must**
+      use those variables, not a literal `'checkpoints'`/`'logs'` — a single
+      stray literal puts that artefact back in the shared tree.
+    - `train.log_dir` in the config overrides only the TensorBoard root; the
+      shipped configs set it to `logs_stage1` / `logs_stage2`. A config left
+      with `log_dir: logs` silently writes both stages' runs into `logs/`.
+    - Pre-split artefacts stay where they are. Both scripts only auto-resume
+      from their own tree, so an old run needs `mv checkpoints/<exp>
+      checkpoints_stage1/<exp>` (and the `logs/` equivalent) or an explicit
+      `--resume_from checkpoints/<exp>/last.ckpt`.
+    - Anything that *consumes* a checkpoint by path (`2_preprocess.py
+      --checkpoint`, `test_stage1_codes.py`, `train.generator_checkpoint` in
+      `configs/transformer.yaml`) is unaffected: those take a full path, so
+      update it when you move a stage-1 run. Consumers *inside* `2_training.py`
+      must read the stage-1 tree, never their own.
 
 ---
 
@@ -803,7 +852,9 @@ python 1_preprocess.py --filelist filelists_1/base_linux.txt --output_dir data/b
 python 1_training.py --config configs/base.yaml            # auto-resumes last.ckpt
 
 # Resume / transfer for stage 1
-python 1_training.py --config configs/base.yaml --resume_from checkpoints/base_v0.4.2/last.ckpt
+# (auto-resume looks in checkpoints_stage1/{exp_name}/last.ckpt; the explicit
+#  paths below are a full path, so they can live in either tree)
+python 1_training.py --config configs/base.yaml --resume_from checkpoints_stage1/base_v0.4.2/last.ckpt
 python 1_training.py --config configs/base.yaml --transfer_from some.ckpt   # partial weight transfer
 
 # Dataset duration / duplicate / train-val-overlap report
@@ -817,7 +868,7 @@ python speaker_map.py --filelist filelists_2/25_stage2_base1.txt \
 
 # Stage-2 preprocessing / training
 python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
-    --output_dir data/base2 --checkpoint checkpoints/base_v0.4/last.ckpt \
+    --output_dir data/base2 --checkpoint checkpoints_stage1/base_v0.4/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json
 python 2_training.py --config configs/transformer.yaml
 
@@ -829,20 +880,20 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
 # ...or re-encode only (new stage-1 checkpoint; no ASR/aligner weights)
 python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 --only codes \
-    --checkpoint checkpoints/base_v0.5/last.ckpt
+    --checkpoint checkpoints_stage1/base_v0.5/last.ckpt
 
 # Rewrite the stage-2 filelists only (no re-extraction), now also dropping
 # silent/near-silent clips and clips that are <5% non-silent frames. The
 # silence check is the default (-50 dBFS on the loudest 20 ms frame);
 # `--min_rms_db none` disables it, `--min_rms_db -35` is stricter.
 python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
-    --output_dir data/base2 --checkpoint checkpoints/base_v0.4/last.ckpt \
+    --output_dir data/base2 --checkpoint checkpoints_stage1/base_v0.4/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json \
     --skip_existing --min_speech_frac 0.05
 
 # Stage-1 codec round-trip on your own audio (spec/f0 -> codes -> audio)
 python test_stage1_codes.py test.wav \
-    --checkpoint checkpoints/base_v0.4.6/last.ckpt --sid 0
+    --checkpoint checkpoints_stage1/base_v0.4.6/last.ckpt --sid 0
 # ...add --roundtrip for code -> audio -> code match fractions and
 # --save_tensors to dump spec/pitch codes + both f0 contours.
 
@@ -853,7 +904,7 @@ python modeling/generator.py      # constructs a Generator, runs infer
 # Is the stage-2 text conditioning actually alive? (CPU by default, so it can
 # run next to a training job; --device cuda for speed)
 python test_stage2_conditioning.py \
-    --checkpoint checkpoints/transformer_v0.4.1/last.ckpt --batches 4
+    --checkpoint checkpoints_stage2/transformer_v0.4.1/last.ckpt --batches 4
 
 # Phonemization smoke test: both stage-2 paths (transcript-only vs aligner),
 # per-word word|tag|phones tables plus PASS/FAIL checks and a cross-path diff

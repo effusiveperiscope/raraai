@@ -26,7 +26,7 @@ This script measures that directly, without listening to audio:
 Usage::
 
     python test_stage2_conditioning.py \
-        --checkpoint checkpoints/transformer_v0.4/last.ckpt
+        --checkpoint checkpoints_stage2/transformer_v0.4/last.ckpt
 
 Runs on CPU by default so it can be used while a training job owns the GPU;
 pass ``--device cuda`` for a faster (but competing) run.
@@ -334,7 +334,7 @@ def parse_args():
         description="Diagnose whether a stage-2 checkpoint actually uses the "
                     "phoneme conditioning.")
     parser.add_argument("--checkpoint",
-                        default="checkpoints/transformer_v0.4/last.ckpt")
+                        default="checkpoints_stage2/transformer_v0.4/last.ckpt")
     parser.add_argument("--config", default="configs/transformer.yaml")
     parser.add_argument("--filelist",
                         default="data/genshin_full_stage2/val_stage2.txt")

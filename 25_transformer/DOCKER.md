@@ -10,7 +10,7 @@ startup a pull of a couple of GB instead of ~10 GB.
 ## 1. Build and push
 
 From this directory (`25_transformer/`, which is the build context —
-`.dockerignore` keeps `data/`, `checkpoints/`, `logs/`, `pretrain/` and audio out):
+`.dockerignore` keeps `data/`, `checkpoints*/`, `logs*/`, `pretrain/` and audio out):
 
 ```bash
 docker build -t <dockerhub-user>/raraai-25-transformer:latest .
@@ -56,11 +56,11 @@ The image ships torch (cu130 build, ≥ 2.9 because `2_training.py` uses
 | `/venv/main` | Python 3.12 venv (activate with `source /venv/main/bin/activate`, usually already active). |
 | `/opt/hf-cache` | `HF_HOME`. Contains RMVPE (`rvc_rmvpe.pt`) and the `therealvul/g2pen_tokenizer_clean` tokenizer; add the Qwen weights with `PREFETCH_QWEN=1`. |
 | `/opt/nltk_data` | `NLTK_DATA` — the POS tagger `horsephonemizer` needs. |
-| `./checkpoints`, `./logs`, `./data` | Written by the scripts **relative to the project dir**, so put the project on a volume-backed path if you care about keeping them. |
+| `./checkpoints_stage1`, `./checkpoints_stage2`, `./logs_stage1`, `./logs_stage2`, `./data` | Written by the scripts **relative to the project dir**, so put the project on a volume-backed path if you care about keeping them. Each stage has its own tree, so clearing a stage-2 run cannot touch the stage-1 checkpoints. |
 
 Everything must be run **from the project directory** — paths inside the scripts
-(`configs/…`, `data/…`, `checkpoints/…`, `new_horsewords.clean`) are relative to
-the cwd:
+(`configs/…`, `data/…`, `checkpoints_stage1/…`, `logs_stage2/…`,
+`new_horsewords.clean`) are relative to the cwd:
 
 ```bash
 cd /workspace/25_transformer
@@ -84,17 +84,18 @@ python 1_training.py --config configs/base.yaml
 python 2_preprocess.py \
     --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 \
-    --checkpoint checkpoints/<exp>/last.ckpt \
+    --checkpoint checkpoints_stage1/<exp>/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json
 
 # ad-hoc smoke tests (no dataset needed)
 python modeling/transformer.py
-python test_stage2_conditioning.py --checkpoint checkpoints/<exp>/last.ckpt --device cuda
+python test_stage2_conditioning.py --checkpoint checkpoints_stage2/<exp>/last.ckpt --device cuda
 ```
 
 TensorBoard is already running in the base image against
-`TENSORBOARD_LOG_DIR=/workspace/25_transformer/logs`, so Lightning runs appear
-in the portal's TensorBoard tab without extra setup.
+`TENSORBOARD_LOG_DIR=/workspace/25_transformer/logs_stage1` and
+`.../logs_stage2`, so Lightning runs from both stages appear in the portal's
+TensorBoard tab without extra setup.
 
 ## 5. Datasets: the sharded stage-1 Genshin tensors
 
@@ -171,13 +172,14 @@ The first-boot copy is skipped when `/workspace/25_transformer` already exists
 copy keeps it. Refresh by hand in that case:
 
 ```bash
-rsync -a --exclude data --exclude checkpoints --exclude logs \
+rsync -a --exclude data --exclude 'checkpoints*' --exclude 'logs*' \
     /opt/workspace-internal/25_transformer/ /workspace/25_transformer/
 ```
 
 A late boot stage (`/etc/vast_boot.d/90-25-transformer-perms.sh`) re-applies
 `a+rwX` to the copied tree, so the non-root `user` account can write
-`checkpoints/`, `logs/` and `data/`.
+`checkpoints_stage1/`, `checkpoints_stage2/`, `logs_stage1/`, `logs_stage2/`
+and `data/`.
 
 `HF_HOME=/opt/hf-cache` is inside the image, so any *extra* model downloaded at
 runtime is lost when the instance is destroyed. For a long-lived cache, set
