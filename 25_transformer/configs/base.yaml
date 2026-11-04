@@ -16,7 +16,8 @@
 # 0.4.7c - higher segment size, back off batch size to compensate
 # 0.4.7d - segment size had no audible effect, resetting.
 # - modify q_recon_loss to also work on unvoiced frames
-exp_name: base_v0.4.7d
+# 0.5 - oops lost checkpoint.
+exp_name: base_v0.5
 vits:
   filter_channels: 640
   gin_channels: 256
