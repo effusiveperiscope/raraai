@@ -22,7 +22,8 @@
 #       reconstruction losses normalised by the target variance, unvoiced
 #       frames soft-weighted instead of hard-masked, EMA decay 0.8 -> 0.99,
 #       and a t_pad length fix in _pitch_codec_forward.
-exp_name: base_v0.6
+# 0.6_pitchonly - training pitch only on local for extra throughput
+exp_name: base_v0.6_pitchonly
 vits:
   filter_channels: 640
   gin_channels: 256
