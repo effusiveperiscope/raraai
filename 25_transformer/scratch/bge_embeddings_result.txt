@@ -1,0 +1,19 @@
+--- Environment & Setup ---
+Using device: cuda
+Loading model and tokenizer...
+Model loading time: 0.8893 seconds
+Running warmup...
+Running benchmark...
+
+============================== BENCHMARK RESULTS ==============================
+Total Sentences Processed per Batch: 100
+Total Iterations: 10
+--- Time Metrics ---
+Total Execution Time: 0.1382 seconds
+Average Time per Batch: 13.82 ms
+Average Time per Sentence: 0.14 ms
+
+--- Memory Metrics ---
+CPU RSS Memory Delta: 638.30 MB (Current: 1367.54 MB)
+Peak GPU Memory Allocated: 168.49 MB
+===============================================================================
