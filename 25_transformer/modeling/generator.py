@@ -1,4 +1,5 @@
 from einops import rearrange
+from contextlib import contextmanager, nullcontext
 import math
 import torch
 from modeling.vevo_repcodec import VevoRepCodec
@@ -24,6 +25,34 @@ PITCH_LOG_SCALE = math.log1p(1000.0)
 PITCH_PATH_PREFIXES = (
     "pitch_downsample.",
     "pitch_codec.",
+    "pitch_upsample.",
+    "pitch_out_proj.",
+    "pitch_uv_proj.",
+)
+
+# Module-level parameter-name prefixes of the *synthesis (decode) path*: the
+# spectrogram codec decoder + its speaker projection, the resampling conv, the
+# NSF decoder, the speaker table and the whole pitch decode path. This is
+# exactly what `Generator.infer_from_codes` runs once it has codes -- i.e.
+# everything that turns codes into audio -- and therefore exactly the trainable
+# set of stage-1 `--acoustic_only` fine-tuning (see
+# `Generator.freeze_code_encoders`): the code-producing half of the model
+# (`enc_q`, `downsample`, both codec encoders/projectors and the quantisers) is
+# frozen, so every previously extracted spec/pitch code tensor stays valid.
+#
+# It is an allow-list on purpose: a newly added module defaults to frozen,
+# which is the safe direction for code identity. If you add a module that is
+# used at inference time, add its prefix here (the freeze method prints the
+# trainable parameter table, so a missing entry is visible on the first line of
+# a run).
+CODE_DECODE_PREFIXES = (
+    "codec.decoder.",
+    "codec.g_proj.",
+    "upsample.",
+    "dec.",
+    "spk_emb.",
+    "pitch_codec.decoder.",
+    "pitch_codec.g_proj.",
     "pitch_upsample.",
     "pitch_out_proj.",
     "pitch_uv_proj.",
@@ -76,6 +105,13 @@ class Generator(nn.Module):
         self.dec = MyGeneratorNSF(hp=hp)
         self.spk_emb = nn.Embedding(hp.vits.max_spk_count, hp.vits.gin_channels)
         self.hp = hp
+        # Set by `freeze_code_encoders()` (stage-1 `--acoustic_only`): the
+        # code-producing half then also runs in eval() + no_grad, so the decoder
+        # is trained on exactly the codes `2_preprocess.py` extracts (the codec
+        # encoders contain dropout; extracting codes in train mode would train
+        # the decoder on a distribution stage 2 never sees). Plain attribute --
+        # no state_dict entry, so checkpoints are unchanged.
+        self.code_frozen = False
         # Temporal resampling around the codec so that
         # code rate == decoder frame rate / down_factor (default 1/4).
         # Convs operate on (B, C, T).
@@ -209,6 +245,87 @@ class Generator(nn.Module):
         for name, param in self.named_parameters():
             param.requires_grad_(name.startswith(PITCH_PATH_PREFIXES))
 
+    def freeze_code_encoders(self):
+        """Freeze every parameter that *produces* RVQ codes (acoustic fine-tune).
+
+        The trainable set is exactly :data:`CODE_DECODE_PREFIXES` -- the
+        parameters ``infer_from_codes`` uses to turn codes into audio. The
+        frozen complement is the whole code-producing half: ``enc_q``,
+        ``downsample``, ``codec.encoder``, ``codec.projector``,
+        ``codec.quantizer``, ``pitch_downsample``, ``pitch_codec.encoder``,
+        ``pitch_codec.projector`` and ``pitch_codec.quantizer``.
+
+        Two things are needed for the codes to actually stay identical:
+
+        * ``requires_grad_(False)`` on the encoder-side parameters -- the
+          obvious part;
+        * ``Quantizer.freeze()`` on both codebooks -- ``requires_grad`` does not
+          stop the quantiser's EMA update, which rewrites the ``embed`` buffer
+          in place on every training step and would silently move the codes.
+
+        The forward pass additionally switches the frozen half to ``eval()``
+        under ``torch.no_grad()`` (see :meth:`_frozen_encode`), because the
+        codec encoders contain dropout while ``encode_codes`` /
+        ``2_preprocess.py`` run them in eval mode.
+
+        The speaker embedding is *not* in the frozen set: the code path never
+        consumes it (``enc_q`` is called without ``g`` and
+        ``VevoRepCodec.encode_latent`` takes no ``g``), so training the decoder
+        side of the table -- including new rows for a new speaker set -- cannot
+        perturb a single code.
+
+        No parameter, buffer or ``state_dict`` key changes, so ``--transfer_from``
+        and ``--resume_from`` both keep working. Note that the *optimizer* is
+        built from ``requires_grad`` parameters, so resuming a full-training
+        checkpoint (which has state for the now-frozen tensors) fails loudly on
+        the parameter-group sizes -- start a fine-tune from a new ``exp_name``
+        with ``--transfer_from``.
+        """
+        for name, param in self.named_parameters():
+            param.requires_grad_(name.startswith(CODE_DECODE_PREFIXES))
+        self.codec.quantizer.freeze()
+        self.pitch_codec.quantizer.freeze()
+        self.code_frozen = True
+
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        frozen = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        print(f'=== Frozen-code (acoustic) mode: {trainable / 1e6:.2f} M trainable '
+              f'(decode path) / {frozen / 1e6:.2f} M frozen (code encoders) ===')
+        for prefix in CODE_DECODE_PREFIXES:
+            n = sum(p.numel() for name, p in self.named_parameters()
+                    if name.startswith(prefix) and p.requires_grad)
+            print(f'    train {prefix:22s} {n / 1e6:7.3f} M')
+
+    def _code_producer_modules(self):
+        """The modules that map specs/f0 to codes (frozen in acoustic mode)."""
+        return (self.enc_q, self.downsample,
+                self.codec.encoder, self.codec.projector, self.codec.quantizer,
+                self.pitch_downsample, self.pitch_codec.encoder,
+                self.pitch_codec.projector, self.pitch_codec.quantizer)
+
+    @contextmanager
+    def _frozen_encode(self):
+        """``eval()`` + ``no_grad()`` over the code-producing half of the model.
+
+        Used by the ``code_frozen`` branch of :meth:`forward`. ``eval()`` is not
+        cosmetic: ``VevoRepCodec``'s ``Encoder`` has dropout, and
+        ``encode_codes`` (what ``2_preprocess.py`` runs) refuses to run outside
+        eval, so training the decoder on train-mode latents would target a code
+        distribution stage 2 never sees. The previous ``training`` flags are
+        restored afterwards, so this is safe to call from both the train and the
+        validation path.
+        """
+        mods = self._code_producer_modules()
+        prev = [m.training for m in mods]
+        for m in mods:
+            m.eval()
+        try:
+            with torch.no_grad():
+                yield
+        finally:
+            for m, was_training in zip(mods, prev):
+                m.train(was_training)
+
     def _pitch_downsample_conv(self, f0_target):
         """Overlapping analysis conv, replicate-padded at both ends.
 
@@ -225,6 +342,35 @@ class Generator(nn.Module):
                 (self.pitch_downsample_pad, self.pitch_downsample_pad),
                 mode='replicate')
         return self.pitch_downsample(f0_target)  # (B, H, T / down_factor)
+
+    def _pitch_encode_inputs(self, f0, t_pad):
+        """Pitch *encoder half*: ``f0 (Hz) -> (f0_target, px_ds, voiced_w_ds)``.
+
+        Shared by stage-1 training (:meth:`_pitch_codec_forward`) and code
+        extraction (:meth:`encode_codes`), so the pitch codes can never diverge
+        between the two.
+        """
+        f0_in = f0.float().unsqueeze(1)  # (B, 1, T)
+        f0_target = (torch.log1p(torch.clamp(f0_in, min=0.0))
+                     / PITCH_LOG_SCALE)
+        if t_pad > 0:
+            f0_target = F.pad(f0_target, (0, t_pad))
+        # Same down_factor as the spec path -> same code rate.
+        px = self._pitch_downsample_conv(f0_target)  # (B, H, T_ds)
+        px_ds = rearrange(px, "b c t -> b t c")
+        # Per-frame weight for the quantiser's commitment loss, shared with
+        # `pitch_q_recon_loss` in 1_training.py. Unvoiced frames are exactly
+        # zero and collapse onto a couple of codes, so the codec's output
+        # there is only weakly constrained; weighting them the same way in
+        # both terms keeps them referring to the same frames.
+        voiced_w = torch.where(
+            f0_target > 0,
+            torch.ones_like(f0_target),
+            torch.full_like(f0_target, self.pitch_qr_uv_weight),
+        )
+        voiced_w_ds = F.interpolate(
+            voiced_w, size=px_ds.shape[1], mode='area').squeeze(1)
+        return f0_target, px_ds, voiced_w_ds
 
     def _pitch_codec_forward(self, f0, t_pad, g):
         """Run the low-parameter pitch codec.
@@ -256,29 +402,25 @@ class Generator(nn.Module):
         with torch.autocast(device_type=f0.device.type, enabled=False):
             f0 = f0.float()
             g = g.float()
-            f0_in = f0.unsqueeze(1)  # (B, 1, T)
-            f0_target = (torch.log1p(torch.clamp(f0_in, min=0.0))
-                         / PITCH_LOG_SCALE)
-            t_full = f0_target.shape[-1]
-            if t_pad > 0:
-                f0_target = F.pad(f0_target, (0, t_pad))
-            # Same down_factor as the spec path -> same code rate.
-            px = self._pitch_downsample_conv(f0_target)  # (B, H, T_ds)
-            px_ds = rearrange(px, "b c t -> b t c")
-            # Per-frame weight for the quantiser's commitment loss, shared with
-            # `pitch_q_recon_loss` in 1_training.py. Unvoiced frames are exactly
-            # zero and collapse onto a couple of codes, so the codec's output
-            # there is only weakly constrained; weighting them the same way in
-            # both terms keeps them referring to the same frames.
-            voiced_w = torch.where(
-                f0_target > 0,
-                torch.ones_like(f0_target),
-                torch.full_like(f0_target, self.pitch_qr_uv_weight),
-            )
-            voiced_w_ds = F.interpolate(
-                voiced_w, size=px_ds.shape[1], mode='area').squeeze(1)
-            pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
-                px_ds, do_uq=False, g=g, weight=voiced_w_ds)
+            t_full = f0.shape[-1]
+            # Encode half (f0 -> pitch codes) and decode half (codes -> f0_hat)
+            # are separated here for the same reason as on the spectrogram path:
+            # in frozen-code (acoustic) mode the encode half runs in
+            # eval()+no_grad via `encode_latent`, and the trainable decode half
+            # goes through `decode_latent` -- the exact call infer_from_codes
+            # makes.
+            encode_ctx = self._frozen_encode() if self.code_frozen else nullcontext()
+            with encode_ctx:
+                f0_target, px_ds, voiced_w_ds = self._pitch_encode_inputs(f0, t_pad)
+                if self.code_frozen:
+                    _, pzq, p_vqloss, p_perplexity, _ = \
+                        self.pitch_codec.encode_latent(px_ds, weight=voiced_w_ds)
+            if self.code_frozen:
+                pq = rearrange(self.pitch_codec.decode_latent(pzq, g),
+                               "b c t -> b t c")
+            else:
+                pq, _, _, _, p_vqloss, p_perplexity = self.pitch_codec(
+                    px_ds, do_uq=False, g=g, weight=voiced_w_ds)
             pq_ds = pq
             pq_ct = rearrange(pq, "b t c -> b c t")
             pq_up = self.pitch_upsample(pq_ct)
@@ -301,38 +443,57 @@ class Generator(nn.Module):
             return (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
                     f0_target[..., :t_full].squeeze(1), p_uv_logits)
 
-    def forward(self, spec, spec_l, f0, sid):
-        g = self.spk_emb(sid)
-        # enc_q returns (B, C, T) with T = decoder frame rate.
-        x, x_mask = self.enc_q(spec, spec_l)
+    def _spec_encode(self, spec, spec_l, with_indices=False):
+        """Spectrogram code path: ``enc_q -> downsample -> codec.encode_latent``.
 
-        # Downsample encoder frames by down_factor so codec runs at
-        # 1/down_factor of the decoder frame rate (default 1/4).
+        Returns ``(t_frames, t_pad, x_ds, z, zq, vqloss, perplexity, indices)``
+        where ``t_frames`` is the unpadded decoder frame count, ``x_ds`` is the
+        ``(B, T_ds, C)`` downsampled latent (the ``q_recon_loss`` target) and
+        the rest comes from ``VevoRepCodec.encode_latent``. The caller owns the
+        eval()/no_grad() bookkeeping (see :meth:`_frozen_encode`); both
+        :meth:`forward` and :meth:`encode_codes` call this, so the codes stage 1
+        trains on are the codes stage 2 extracts.
+        """
+        x, _ = self.enc_q(spec, spec_l)
+        t_frames = x.shape[-1]
         # Pad time so it is divisible by down_factor (pad on the right).
-        t_pad = (-x.shape[-1]) % self.down_factor
+        t_pad = (-t_frames) % self.down_factor
         if t_pad > 0:
             x = F.pad(x, (0, t_pad))
-        x_ds = self.downsample(x)  # (B, C, T/down_factor)
-        # VevoRepCodec.forward expects (B, T, C).
-        x_ds = rearrange(x_ds, "b c t -> b t c")
+        x_ds = rearrange(self.downsample(x), "b c t -> b t c")
+        z, zq, vqloss, perplexity, indices = self.codec.encode_latent(
+            x_ds, with_indices=with_indices)
+        return t_frames, t_pad, x_ds, z, zq, vqloss, perplexity, indices
 
-        yq, _, _, _, vqloss, perplexity = self.codec(
-            x_ds, do_uq=False, g=g)
+    @staticmethod
+    def _align_f0(f0, t_frames):
+        """Trim/pad an f0 contour to the (unpadded) decoder frame count."""
+        if f0.shape[-1] < t_frames:
+            return F.pad(f0, (0, t_frames - f0.shape[-1]))
+        return f0[..., :t_frames]
+
+    def forward(self, spec, spec_l, f0, sid):
+        g = self.spk_emb(sid)
+        # Code-producing half (enc_q -> downsample -> codec encoder/quantiser).
+        # In frozen-code (acoustic) fine-tuning this runs in eval() + no_grad,
+        # so the decoder is trained on exactly the codes 2_preprocess.py will
+        # extract; a normal run keeps the graph so the quantiser/encoder learn.
+        encode_ctx = self._frozen_encode() if self.code_frozen else nullcontext()
+        with encode_ctx:
+            (t_frames, t_pad, x_ds, _, zq,
+             vqloss, perplexity, _) = self._spec_encode(spec, spec_l)
+
+        # Decode half -- the same call infer_from_codes makes.
+        yq = rearrange(self.codec.decode_latent(zq, g), "b c t -> b t c")
         yq_ds = yq
 
         # Upsample codec output back to decoder frame rate.
-        # Codec returns yq as (B, T', C).
-        yq = rearrange(yq, "b t c -> b c t")
-        yq = self.upsample(yq)
+        yq = self.upsample(rearrange(yq, "b t c -> b c t"))
         if t_pad > 0:
             yq = yq[..., : yq.shape[-1] - t_pad]
         # Align f0 length with the (unpadded) encoder frame length so the
         # pitch branch sees the same T as the spec path.
-        t_frames = x.shape[-1] - t_pad
-        if f0.shape[-1] < t_frames:
-            f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
-        else:
-            f0_aligned = f0[..., :t_frames]
+        f0_aligned = self._align_f0(f0, t_frames)
         (f0_hat, pq_ds, px_ds, p_vqloss, p_perplexity,
             f0_target, p_uv_logits) = self._pitch_codec_forward(
                 f0_aligned, t_pad, g)
@@ -366,34 +527,18 @@ class Generator(nn.Module):
             ``return_pitch`` is True.
         """
         g = self.spk_emb(sid)
-        # enc_q returns (B, C, T) with T = decoder frame rate.
-        x, x_mask = self.enc_q(spec, spec_l)
-
-        # Downsample encoder frames by down_factor so codec runs at
-        # 1/down_factor of the decoder frame rate (default 1/4).
-        # Pad time so it is divisible by down_factor (pad on the right).
-        t_pad = (-x.shape[-1]) % self.down_factor
-        if t_pad > 0:
-            x = F.pad(x, (0, t_pad))
-        x_ds = self.downsample(x)  # (B, C, T/down_factor)
-        # VevoRepCodec.forward expects (B, T, C).
-        x_ds = rearrange(x_ds, "b c t -> b t c")
-
-        yq, _, _, _, vqloss, perplexity = self.codec(
-            x_ds, do_uq=False, g=g)
-
-        # Upsample codec output back to decoder frame rate.
-        # Codec returns yq as (B, T', C).
-        yq = rearrange(yq, "b t c -> b c t")
-        yq = self.upsample(yq)
+        # Same code path as training/encode_codes (`_spec_encode`) and the same
+        # decode call as infer_from_codes (`decode_latent`); in frozen-code
+        # (acoustic) mode this runs the encoder half in eval()+no_grad.
+        encode_ctx = self._frozen_encode() if self.code_frozen else nullcontext()
+        with encode_ctx:
+            (t_frames, t_pad, _, _, zq,
+             vqloss, perplexity, _) = self._spec_encode(spec, spec_l)
+        yq = self.upsample(self.codec.decode_latent(zq, g))  # (B, C, T)
         if t_pad > 0:
             yq = yq[..., : yq.shape[-1] - t_pad]
         if use_pitch_recon:
-            t_frames = x.shape[-1] - t_pad
-            if f0.shape[-1] < t_frames:
-                f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
-            else:
-                f0_aligned = f0[..., :t_frames]
+            f0_aligned = self._align_f0(f0, t_frames)
             (f0_hat_norm, _, _, _, _, _,
                 uv_logits) = self._pitch_codec_forward(f0_aligned, t_pad, g)
             # Denormalize log1p pitch back to Hz, keep unvoiced at 0.
@@ -468,27 +613,18 @@ class Generator(nn.Module):
                 "contain dropout, so codes extracted in train mode would not "
                 "match the ones stage 1 optimised. 2_preprocess.py already "
                 "calls net_g.eval(); do the same in ad-hoc scripts.")
-        g = self.spk_emb(sid)
-        x, _ = self.enc_q(spec, spec_l)
-        t_pad = (-x.shape[-1]) % self.down_factor
-        if t_pad > 0:
-            x = F.pad(x, (0, t_pad))
-        x_ds = self.downsample(x)  # (B, C, T_ds)
-        z = self.codec.projector(self.codec.encoder(x_ds))
-        _, spec_codes = self.codec.quantizer.inference(z)
+        # `sid` is accepted for API compatibility but is never used: the code
+        # path is speaker-independent (`enc_q` is called without `g` and
+        # `VevoRepCodec.encode_latent` takes no speaker conditioning). That is
+        # what lets acoustic fine-tuning retrain the speaker table -- including
+        # new rows for a new speaker set -- without moving a single code.
+        (t_frames, t_pad, _, _, _, _, _,
+         spec_codes) = self._spec_encode(spec, spec_l, with_indices=True)
 
-        t_frames = x.shape[-1] - t_pad
-        if f0.shape[-1] < t_frames:
-            f0_aligned = F.pad(f0, (0, t_frames - f0.shape[-1]))
-        else:
-            f0_aligned = f0[..., :t_frames]
-        f0_target = (torch.log1p(torch.clamp(
-            f0_aligned, min=0.0)) / PITCH_LOG_SCALE).unsqueeze(1)
-        if t_pad > 0:
-            f0_target = F.pad(f0_target, (0, t_pad))
-        px = self._pitch_downsample_conv(f0_target)
-        pz = self.pitch_codec.projector(self.pitch_codec.encoder(px))
-        _, pitch_codes = self.pitch_codec.quantizer.inference(pz)
+        f0_aligned = self._align_f0(f0, t_frames)
+        _, px_ds, _ = self._pitch_encode_inputs(f0_aligned, t_pad)
+        _, _, _, _, pitch_codes = self.pitch_codec.encode_latent(
+            px_ds, with_indices=True)
         return spec_codes, pitch_codes
 
     def infer_from_codes(self, spec_codes, pitch_codes, sid,
@@ -536,7 +672,7 @@ class Generator(nn.Module):
 
         # Spec path: indices -> quantized latent -> codec decoder -> upsample.
         zq = self._residual_lookup(self.codec.quantizer, spec_idx)
-        y = self.codec.decoder(zq, self.codec.g_proj(g))  # (B, C, T)
+        y = self.codec.decode_latent(zq, g)  # (B, C, T)
         yq = self.upsample(y)  # (B, C, T * down_factor)
         t_full = yq.shape[-1]
         if out_len is not None:
@@ -546,7 +682,7 @@ class Generator(nn.Module):
         # Pitch path: indices -> quantized latent -> codec decoder ->
         # upsample -> 1-channel log-norm pitch -> Hz.
         pzq = self._residual_lookup(self.pitch_codec.quantizer, pitch_idx)
-        py = self.pitch_codec.decoder(pzq, self.pitch_codec.g_proj(g))
+        py = self.pitch_codec.decode_latent(pzq, g)
         py_up = self.pitch_upsample(py)[..., :t_full]
         f0_norm = self.pitch_out_proj(py_up).squeeze(1)  # (B, T_full)
         uv_logits = self.pitch_uv_proj(py_up).squeeze(1)  # (B, T_full)

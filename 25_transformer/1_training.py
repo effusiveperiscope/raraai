@@ -60,6 +60,14 @@ class TrainModule(pl.LightningModule):
         self.net_dp = net_dp
         self.config = config
         self.pitch_only = bool(config.train.get('pitch_only', False))
+        self.acoustic_only = bool(config.train.get('acoustic_only', False))
+        # Re-encode one val batch before/after training and log the fraction of
+        # identical codes (`frozen_code/*`); see `_log_frozen_code_probe`. Only
+        # meaningful in acoustic mode, where the codes must not move.
+        self.frozen_code_check = bool(
+            config.train.get('frozen_code_check', True))
+        self._code_probe = None
+        self._code_ref = None
         # Same value the Trainer gets as log_every_n_steps; used to skip the
         # per-step bookkeeping of the auxiliary metrics (see training_step).
         self.log_interval = max(1, int(config.train.get('log_interval', 50)))
@@ -120,6 +128,116 @@ class TrainModule(pl.LightningModule):
     def on_train_start(self):
         self.test()
         self._maybe_compile_dec()
+        if self.acoustic_only and self.frozen_code_check:
+            probe = self._probe_batch()
+            if probe is None:
+                print('frozen_code_check: no validation loader available, '
+                      'code-identity probe disabled')
+                self.frozen_code_check = False
+            else:
+                self._code_ref = self._encode_probe_codes(probe)
+                print('frozen_code_check: captured reference codes for '
+                      f'{probe[0].shape[0]} val item(s); '
+                      'frozen_code/*_match must stay at 1.0')
+
+    def _probe_batch(self):
+        """One small val clip on the device, cached for the code probe.
+
+        Read straight from the filelist instead of through the DataLoader: the
+        probe must compare the *same* input at every epoch, and pulling a batch
+        from the val loader would keep a second iterator (and its workers) alive
+        next to the training loop. Capped at 800 frames so the probe stays
+        cheap. Returns ``(spec, spec_l, f0, sid)`` or ``None`` if the filelist
+        or its tensors are unavailable.
+        """
+        if self._code_probe is not None:
+            return self._code_probe
+        filelist = self.config.train.get('val_filelist', None)
+        if not filelist or not os.path.exists(filelist):
+            return None
+        with open(filelist) as fh:
+            for line in fh:
+                parts = line.strip().split('|')
+                if len(parts) < 3 or not parts[1]:
+                    continue
+                try:
+                    spec = torch.load(parts[1], weights_only=True)
+                    f0 = torch.load(parts[2], weights_only=True)
+                except (FileNotFoundError, RuntimeError) as exc:
+                    print(f'frozen_code_check: skipping {parts[1]} ({exc})')
+                    continue
+                n = min(800, spec.shape[0], f0.shape[0])
+                spec = spec[:n].T.unsqueeze(0).float().to(self.device)
+                f0 = f0[:n].unsqueeze(0).float().to(self.device)
+                sid = torch.tensor(
+                    [int(parts[3]) if len(parts) > 3 else 0],
+                    device=self.device)
+                self._code_probe = (
+                    spec, torch.tensor([spec.shape[-1]], device=self.device),
+                    f0, sid)
+                return self._code_probe
+        return None
+
+    def _encode_probe_codes(self, probe):
+        """Codes for the probe batch, with ``net_g`` temporarily in eval().
+
+        ``Generator.encode_codes`` refuses to run in train mode: the codec
+        encoders contain dropout, so codes extracted that way are not the codes
+        ``2_preprocess.py`` stores.
+        """
+        was_training = self.net_g.training
+        self.net_g.eval()
+        try:
+            with torch.no_grad():
+                return self.net_g.encode_codes(*probe)
+        finally:
+            self.net_g.train(was_training)
+
+    @staticmethod
+    def _code_perplexity(codes, vocab_size):
+        """Perplexity of the empirical code distribution (codebook coverage)."""
+        idx = codes.reshape(-1).long()
+        counts = torch.bincount(idx, minlength=vocab_size).float()
+        p = counts / counts.sum().clamp_min(1.0)
+        return torch.exp(-(p * (p + 1e-10).log()).sum())
+
+    def _log_frozen_code_probe(self):
+        """Assert (and log) that acoustic fine-tuning did not move the codes.
+
+        Logs, per codebook, ``frozen_code/{spec,pitch}_match`` -- the fraction of
+        codes identical to the reference captured at train start, which must be
+        exactly 1.0 -- and ``frozen_code/{spec,pitch}_perplexity_{q}``, i.e. how
+        well the frozen codebook is covered by the fine-tuning corpus. The latter
+        is the interesting number for a *new* speaker set: a frozen encoder
+        trained on other speakers can quantise them badly, which shows up as a
+        collapsed (low) perplexity on some book rather than as a loss spike.
+        """
+        if not (self.acoustic_only and self.frozen_code_check):
+            return
+        probe = self._probe_batch()
+        if probe is None:
+            return
+        codes = self._encode_probe_codes(probe)
+        if self._code_ref is None:
+            self._code_ref = codes
+            return
+        books = (
+            ('spec', self._code_ref[0], codes[0],
+             int(self.config.codec.codebook_size)),
+            ('pitch', self._code_ref[1], codes[1],
+             int(self.config.pitch_codec.codebook_size)),
+        )
+        for name, ref, cur, vocab in books:
+            match = (ref == cur).float().mean()
+            self.log(f'frozen_code/{name}_match', match, logger=True)
+            for q in range(cur.shape[0]):
+                self.log(f'frozen_code/{name}_perplexity_{q}',
+                         self._code_perplexity(cur[q], vocab), logger=True)
+            if float(match) < 1.0:
+                print(f'WARNING: {name} codes changed since train start '
+                      f'(match fraction {float(match):.6f}); the code encoders '
+                      'are not fully frozen -- re-extract the stage-2 codes '
+                      'before trusting them.')
 
     def _maybe_compile_dec(self):
         """Optionally ``torch.compile`` the NSF decoder (``train.compile_dec``).
@@ -280,6 +398,7 @@ class TrainModule(pl.LightningModule):
         sid = batch['sid']
         hp = self.hp
         pitch_only = self.pitch_only
+        acoustic_only = self.acoustic_only
 
         fake_audio, ids_slice, yq_ds, x_ds, vqloss, perplexity, \
             f0_hat, f0_target, pq_ds, px_ds, p_vqloss, p_perplexity, \
@@ -455,6 +574,16 @@ class TrainModule(pl.LightningModule):
             loss_g = p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
                 + pitch_uv_loss + pitch_uv_frame_loss \
                 + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
+        elif acoustic_only:
+            # Frozen-code (acoustic) fine-tuning: both sides of each quantiser
+            # are frozen, so `vqloss` / `p_vqloss` are constants with no
+            # gradient. They stay out of `loss_g` (a constant would only shift
+            # the loss scale) and are logged instead. Everything else is the
+            # full-mode loss set, minus the encoder-side terms it cannot train.
+            loss_g = score_loss + feat_loss + mel_loss + stft_loss + q_recon_loss \
+                + pitch_dec_loss + pitch_q_recon_loss \
+                + pitch_uv_loss + pitch_uv_frame_loss \
+                + c_pitch_adv * pitch_score_loss + c_pitch_feat * pitch_feat_loss
         else:
             loss_g = score_loss + feat_loss + mel_loss + stft_loss + vqloss.sum() + q_recon_loss \
                 + p_vqloss.sum() + pitch_dec_loss + pitch_q_recon_loss \
@@ -558,6 +687,10 @@ class TrainModule(pl.LightningModule):
         val_loss = ret['loss_g']
         self.log('val_loss', val_loss, prog_bar=True, logger=True)
 
+        if batch_idx == 0:
+            # Frozen-code housekeeping (no-op unless train.acoustic_only).
+            self._log_frozen_code_probe()
+
         return val_loss
 
 def parse_args():
@@ -570,11 +703,27 @@ def parse_args():
     parser.add_argument('--pitch_only', action='store_true',
         help='Freeze all components except the pitch codec (and keep only the '
              'pitch discriminator), training pitch losses alone.')
+    parser.add_argument('--acoustic_only', action='store_true',
+        help='Acoustic (frozen-code) fine-tuning: freeze everything that '
+             'produces the RVQ codes (posterior encoder, both codec encoders/'
+             'projectors and the quantisers, with their EMA updates off) and '
+             'train only the synthesis (decode) path, so the codes a frozen '
+             'stage-1 checkpoint already produced stay valid. Use --transfer_from '
+             'and a fresh --exp_name.')
+    parser.add_argument('--exp_name', type=str, default=None,
+        help='Override config.exp_name. A fine-tune MUST use a new name: an '
+             'existing checkpoints_stage1/{exp_name}/last.ckpt is auto-resumed, '
+             'which would silently continue the base run instead of '
+             'transferring from it.')
 
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
     if args.pitch_only:
         config.train.pitch_only = True
+    if args.acoustic_only:
+        config.train.acoustic_only = True
+    if args.exp_name:
+        config.exp_name = args.exp_name
     return config, args
 
 def train(config,
@@ -633,6 +782,24 @@ def train(config,
         net_g.freeze_non_pitch()
         for p in net_d.parameters():
             p.requires_grad_(False)
+
+    acoustic_only = bool(config.train.get('acoustic_only', False))
+    if acoustic_only and pitch_only:
+        raise SystemExit(
+            '--pitch_only and --acoustic_only are mutually exclusive: '
+            'pitch-only freezes everything but the pitch path (including the '
+            'NSF decoder and the spectrogram decode path), so the codes move; '
+            'acoustic-only freezes the code *encoders* and trains the whole '
+            'synthesis path, which is the opposite half of the model.')
+    if acoustic_only:
+        print('=== Acoustic mode: training the decode path, codes frozen ===')
+        net_g.freeze_code_encoders()
+        # Both discriminators stay trainable (unlike --pitch_only): the
+        # spectrogram and pitch critics are part of the acoustic objective.
+        # They are warm-started by --transfer_from, which loads net_d/net_dp too.
+        print('Codes: frozen. Previously extracted spec_codes/pitch_codes '
+              'remain valid; only a new speaker set needs 2_preprocess.py '
+              '--only codes.')
 
     training_module = TrainModule(
         net_g=net_g, net_d=net_d, net_dp=net_dp, config=config)

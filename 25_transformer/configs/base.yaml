@@ -24,7 +24,14 @@
 #       and a t_pad length fix in _pitch_codec_forward.
 # 0.6_pitchonly - training pitch only on local for extra throughput
 # 0.6a - merged checkpoint
-exp_name: base_v0.6a
+# 0.7 - acoustic fine-tuning (`1_training.py --acoustic_only`): the
+#       code-producing half of the Generator (enc_q, downsample, both codec
+#       encoders/projectors and the quantisers, with their EMA updates off) is
+#       frozen, so the codes a checkpoint already produced stay bit-identical;
+#       only the synthesis (decode) path is trained. No config value changes are
+#       needed to *enable* it (`train.acoustic_only`), but a fine-tune must run
+#       as its own `exp_name`. See AGENTS.md "Acoustic fine-tuning (stage 1)".
+exp_name: base_v0.7
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -175,3 +182,17 @@ train:
   # Set true to restore the data sanity check (a failing assert on the target
   # audio makes step() skip that batch).
   stft_range_check: false
+  # --- acoustic (frozen-code) fine-tuning ------------------------------------
+  # Train only the synthesis path: everything that *produces* codes is frozen
+  # (enc_q, downsample, both codec encoders/projectors, both quantisers with
+  # their EMA updates off) and the trainable set is exactly
+  # modeling.generator.CODE_DECODE_PREFIXES -- what infer_from_codes runs.
+  # Consequence: the spec_codes/pitch_codes already extracted for a corpus stay
+  # valid, so only a *new* speaker set needs 2_preprocess.py --only codes.
+  # Needs a fresh exp_name (`--exp_name`) and a warm start from the base
+  # checkpoint (`--transfer_from`, which also loads net_d/net_dp). See AGENTS.md.
+  acoustic_only: false
+  # In acoustic mode, re-encode one val batch before/after training and log
+  # `frozen_code/{spec,pitch}_match` (must stay exactly 1.0) plus per-codebook
+  # usage perplexity (how well the frozen codebooks cover the new corpus).
+  frozen_code_check: true

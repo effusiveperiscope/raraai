@@ -513,6 +513,86 @@ Toggling any of it needs **no re-preprocessing** to change the *config*, but the
 codec weights change, so a fresh `exp_name` is required (v0.6) and the stage-2
 codes must be re-extracted with the new checkpoint.
 
+### Acoustic fine-tuning (stage 1, `--acoustic_only`)
+
+A second stage-1 mode, symmetric to `--pitch_only` but the *opposite half* of the
+model: `python 1_training.py --config configs/base.yaml --acoustic_only
+--exp_name base_v0.7_spk2 --transfer_from checkpoints_stage1/base_v0.6a/last.ckpt`.
+
+**The invariant: the codes do not move.** Everything that *produces* codes is
+frozen — `enc_q`, `downsample`, both codec `encoder`+`projector`, and both
+quantisers — and the trainable set is exactly
+`modeling.generator.CODE_DECODE_PREFIXES`, i.e. what `infer_from_codes` runs:
+`codec.decoder`, `codec.g_proj`, `upsample`, `dec`, `spk_emb`, and the whole
+pitch decode path (`pitch_codec.decoder`, `pitch_codec.g_proj`,
+`pitch_upsample`, `pitch_out_proj`, `pitch_uv_proj`). Measured split: **23.09 M
+trainable (decode path) / 10.59 M frozen (code encoders)** of 33.67 M. Both
+discriminators keep training (unlike `--pitch_only`), warm-started by
+`--transfer_from`, which loads `net_d`/`net_dp` too.
+
+Consequence, and the reason the mode exists: every `spec_codes`/`pitch_codes`
+tensor already extracted for a corpus stays **bit-identical**, so a new speaker
+set needs only its own `2_preprocess.py --only codes` run (a few GB, not the
+325 GB corpus re-encode) and the existing stage-2 code vocabulary/semantics are
+untouched. It is the transfer-learning knob: keep the code space, move the
+voices.
+
+Three things are needed for that, and only the first is obvious:
+
+1. `requires_grad_(False)` on the encoder-side parameters (`freeze_code_encoders`).
+2. **`Quantizer.freeze()` on both codebooks.** `requires_grad` does **not** stop
+   the EMA update in `VectorQuantize.forward` — it is an in-place write to the
+   `embed` *buffer*, so an unfrozen book would rewrite itself every step and
+   silently move every code (`embed` 0.52 M + 0.03 M). `freeze` is a plain
+   attribute, not a buffer, so `state_dict` is unchanged; it must be re-applied
+   after loading, like `pitch_uv_threshold`.
+3. **`eval()` + `no_grad()` over the encoder half** (`Generator._frozen_encode`).
+   `VevoRepCodec`'s `Encoder` hard-codes `dropout=0.1`, and `encode_codes`
+   (i.e. `2_preprocess.py`) *refuses* to run outside eval — training the decoder
+   on train-mode latents would target a code distribution stage 2 never sees.
+   This also makes the encode step forward-only: it was ~136 ms of an 805 ms
+   step at batch 32 (`enc_q` + `codec` fwd+bwd), so expect roughly **−10 to
+   −13 % per step**; the discriminator work (324 ms) is untouched, so this mode
+   is for *code stability and transfer*, not throughput.
+
+`VevoRepCodec.forward` was split into `encode_latent` (encoder→projector→
+quantiser, optionally returning the code indices) and `decode_latent` (codebook
+lookup already applied → `decoder`), and `Generator.forward` / `encode_codes` /
+`infer` / `infer_from_codes` all now route through `_spec_encode` /
+`_pitch_encode_inputs` + those two calls. That is what makes "training sees the
+same codes `2_preprocess.py` extracts and `infer_from_codes` replays" a property
+of the code rather than a hope. Verified bit-identical to the pre-refactor code
+on a real checkpoint (`stage1_merged_last.ckpt`, 2 val clips, all 24 compared
+tensors exactly equal).
+
+Loss changes in this mode: `vqloss` / `p_vqloss` are constants (both sides of
+each quantiser are frozen) so they are **logged but kept out of `loss_g`**;
+everything else is the normal loss set (`mel`, `stft`, adversarial, q_recon and
+all six pitch terms) minus the encoder-side gradients it cannot deliver.
+`q_recon_loss` / `pitch_q_recon_loss` still matter — they pin the trainable
+decoder output to the frozen encoder latent.
+
+**Guards.** `train.frozen_code_check` (default `true`) captures `encode_codes`
+of one val clip (read straight from `val_filelist`, so it is the same input at
+every epoch) at `on_train_start`, re-encodes it at every validation epoch and
+logs `frozen_code/{spec,pitch}_match` (must be exactly 1.0; prints a warning
+otherwise) plus per-codebook `frozen_code/{spec,pitch}_perplexity_{q}`. The
+perplexity is the number to watch on a **new speaker set**: a frozen encoder
+trained on other speakers can quantise them badly, which shows as a collapsed
+book rather than as a loss spike. The same invariant is re-checkable offline
+with `scratch/check_frozen_codes.py` (graph level, and
+`--checkpoint A --compare B` for two checkpoints).
+
+**What it does not fix.** Fine-tuning only the synthesis path still drifts the
+*old* voices (the `dec` and `spk_emb` rows move), so if old speakers must be
+preserved, mix a few percent of the base corpus into the fine-tune filelist —
+replay, not a code change. Nothing is stored on disk for the mode, so no
+re-preprocessing is needed to *toggle* it; but the decoder weights change, so it
+needs a fresh `exp_name`, and it must be started with `--transfer_from` (a
+`--resume_from` of a full-training checkpoint fails loudly on the optimizer
+parameter-group sizes, because the generator's AdamW is built from
+`requires_grad` parameters only).
+
 ### Codebook loss weighting (stage 2)
 
 ### Codebook loss weighting (stage 2)
@@ -1037,6 +1117,22 @@ a *batch-independent* per-step loop.
     overrides the checkpoint). Both are still best treated as "start a fresh
     `exp_name`" changes, because losing the momentum is a real (if small)
     transient. See §4.
+16. **`--acoustic_only` must get a fresh `exp_name` (use `--exp_name`).** The
+    mode itself is a plain attribute pair (`Generator.code_frozen`,
+    `Quantizer.frozen`) — no parameter, buffer or `state_dict` key changes, so it
+    cannot be detected from a checkpoint. `train()` auto-resumes whenever
+    `checkpoints_stage1/{exp_name}/last.ckpt` exists, so running a fine-tune
+    under the *base* `exp_name` silently resumes that run instead of transferring
+    from it (and then dies on the optimizer parameter-group sizes, because the
+    generator's AdamW only contains `requires_grad` parameters — the frozen
+    encoders are missing from it). Always
+    `--acoustic_only --exp_name <new> --transfer_from <base>.ckpt`.
+    Related: the codebook freeze is a **plain attribute**, so anything that
+    constructs a `Generator` and wants the mode must call
+    `freeze_code_encoders()` (or `load` + re-apply); loading a checkpoint alone
+    never restores it. Also do not touch the `codec`/`pitch_codec` blocks of the
+    config for a fine-tune — the code space is the whole point, and a changed
+    `codebook_size`/`code_dim` is a shape error at load time anyway.
 
 ---
 
@@ -1058,6 +1154,26 @@ python 1_training.py --config configs/base.yaml            # auto-resumes last.c
 #  paths below are a full path, so they can live in either tree)
 python 1_training.py --config configs/base.yaml --resume_from checkpoints_stage1/base_v0.4.2/last.ckpt
 python 1_training.py --config configs/base.yaml --transfer_from some.ckpt   # partial weight transfer
+
+# Acoustic (frozen-code) fine-tuning: freeze everything that produces the RVQ
+# codes and train only the synthesis (decode) path, so the codes the base
+# checkpoint already produced stay bit-identical (see §4). `--exp_name` is
+# mandatory: the base name would auto-resume the base run instead of
+# transferring from it (§6.16). Add a fraction of the old corpus to the filelist
+# if the old voices must not drift.
+python 1_training.py --config configs/base.yaml --acoustic_only \
+    --exp_name base_v0.7_spk2 --transfer_from checkpoints_stage1/base_v0.6a/last.ckpt
+# ...then only the new speaker set needs codes extracted (no full re-encode):
+python 2_preprocess.py --filelist filelists_2/25_stage2_spk2.txt \
+    --output_dir data/spk2 --only codes \
+    --checkpoint checkpoints_stage1/base_v0.7_spk2/last.ckpt
+
+# Proof that the codes did not move: graph-level (freeze -> 3 steps) and
+# checkpoint-level (two stage-1 checkpoints, same audio, identical codes).
+python scratch/check_frozen_codes.py
+python scratch/check_frozen_codes.py \
+    --checkpoint checkpoints_stage1/base_v0.6a/last.ckpt \
+    --compare checkpoints_stage1/base_v0.7_spk2/last.ckpt --max_items 4
 
 # Splice the pitch codec path of one stage-1 run into another. The merged keys
 # are exactly PITCH_PATH_PREFIXES in modeling/generator.py (pitch_downsample /

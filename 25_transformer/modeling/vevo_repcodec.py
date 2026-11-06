@@ -37,6 +37,12 @@ class VectorQuantize(nn.Module):
         self.decay = decay
         self.eps = eps
         self.commitment = commitment
+        # Plain attribute, NOT a buffer/parameter: freezing the codebook must not
+        # change a single key or shape in `state_dict`, so it is (re)applied by
+        # whoever loads the checkpoint -- exactly like `pitch_uv_threshold`.
+        # `requires_grad_(False)` cannot express this: the EMA update below is
+        # an in-place write to the `embed` *buffer*, which ignores gradients.
+        self.frozen = False
 
         embed = torch.randn(dim, n_embed)
         self.register_buffer("embed", embed)
@@ -46,6 +52,17 @@ class VectorQuantize(nn.Module):
     @property
     def codebook(self):
         return self.embed.transpose(0, 1)
+
+    def freeze(self):
+        """Stop the EMA codebook update without touching any tensor shape.
+
+        Used by stage-1 ``--acoustic_only`` fine-tuning: the codes are only
+        stable if the codebook does not move underneath the frozen encoder.
+        Freezing keeps the loaded ``embed`` *bit-identical* (the update is the
+        only thing that rewrites it at train time), so every previously
+        extracted code tensor stays valid.
+        """
+        self.frozen = True
 
     def exists(self, val):
         return val is not None
@@ -83,7 +100,7 @@ class VectorQuantize(nn.Module):
         embed_ind = embed_ind.view(*input.shape[:-1])
         quantize = F.embedding(embed_ind, self.embed.transpose(0, 1))
 
-        if self.training:
+        if self.training and not self.frozen:
             self.ema_inplace(self.cluster_size, embed_onehot.sum(0), self.decay)
             embed_sum = flatten.transpose(0, 1) @ embed_onehot
             self.ema_inplace(self.embed_avg, embed_sum, self.decay)
@@ -177,6 +194,11 @@ class ResidualVQ(nn.Module):
         all_indices = torch.stack(all_indices)
         return quantized_out, all_indices
 
+    def freeze(self):
+        """Freeze every layer's EMA codebook (see ``VectorQuantize.freeze``)."""
+        for layer in self.layers:
+            layer.freeze()
+
     def initial(self):
         self.codebook = []
         for layer in self.layers:
@@ -206,6 +228,10 @@ class Quantizer(nn.Module):
 
     def initial(self):
         self.codebook.initial()
+
+    def freeze(self):
+        """Freeze the RVQ codebooks' EMA updates (no shape/state_dict change)."""
+        self.codebook.freeze()
 
     def forward(self, z, weight=None):
         zq, vqloss, perplexity = self.codebook(z.transpose(2, 1), weight=weight)
@@ -622,6 +648,52 @@ class VevoRepCodec(nn.Module):
         self.g_proj = nn.Linear(
             gin_channels, code_dim)
 
+    def encode_latent(self, x, weight=None, with_indices=False):
+        """Encoder half of :meth:`forward`: ``encoder -> projector -> quantiser``.
+
+        Args:
+            x: ``(B, T, C)`` input latent (the *downsampled* posterior-encoder
+                output on the spectrogram path).
+            weight: optional per-frame weight for the quantiser's commitment
+                loss (see :meth:`Quantizer.forward`).
+            with_indices: also return the nearest-neighbour code indices, i.e.
+                the *codes* themselves -- what ``2_preprocess.py`` stores. Uses
+                ``Quantizer.inference``, which returns exactly the same
+                quantised latent as ``Quantizer.forward`` but skips the
+                commitment/perplexity bookkeeping.
+
+        Returns:
+            ``(z, zq, vqloss, perplexity, indices)``: pre-quantisation latent
+            and quantised latent, both ``(B, C, T')``; the commitment loss and
+            the codebook perplexity (``None`` when ``with_indices``); and the
+            ``(Q, B, T')`` indices (``None`` otherwise).
+
+        Why a separate method: the code-producing half must have exactly one
+        implementation. Stage-1 ``--acoustic_only`` fine-tuning trains the
+        decoder on the codes this returns, and ``Generator.encode_codes``
+        (i.e. ``2_preprocess.py``) extracts codes with the same call -- so
+        "training sees the codes inference replays" is a property of the code,
+        not a hope.
+        """
+        x = rearrange(x, "b t c -> b c t")
+        x = self.encoder(x)
+        z = self.projector(x)
+        if with_indices:
+            zq, indices = self.quantizer.inference(z)
+            return z, zq, None, None, indices
+        zq, vqloss, perplexity = self.quantizer(z, weight=weight)
+        return z, zq, vqloss, perplexity, None
+
+    def decode_latent(self, zq, g):
+        """Decoder half of :meth:`forward`: ``quantised latent -> decoder``.
+
+        ``zq`` is ``(B, C, T')`` (as returned by :meth:`encode_latent` or
+        ``Quantizer``) and the result is ``(B, C, T')``. This is the same call
+        ``Generator.infer_from_codes`` makes, so training and synthesis share
+        one code->audio path.
+        """
+        return self.decoder(zq, self.g_proj(g))
+
     def forward(self, x, do_uq=True, g=None, weight=None):
         """
         Forward pass through the VevoRepCodec.
@@ -653,25 +725,16 @@ class VevoRepCodec(nn.Module):
             - T' may differ from T if the encoder/decoder use strides.
             - The quantizer is a Residual Vector Quantizer (ResidualVQ) that may use multiple codebooks.
         """
-        x = rearrange(x, "b t c -> b c t")
-        x = self.encoder(x)
-        z = self.projector(x)
-        zq, vqloss, perplexity = self.quantizer(z, weight=weight)
-        g = self.g_proj(g)
-        yq = self.decoder(zq, g)
-        yq = rearrange(yq, "b c t -> b t c")
+        z, zq, vqloss, perplexity, _ = self.encode_latent(x, weight=weight)
+        yq = rearrange(self.decode_latent(zq, g), "b c t -> b t c")
         if do_uq:
-            y = self.decoder(z, g)
-            y = rearrange(y, "b c t -> b t c")
+            y = rearrange(self.decode_latent(z, g), "b c t -> b t c")
         else:
             y = torch.zeros_like(zq)
         return yq, y, zq, z, vqloss, perplexity
 
     def forward_encode(self, x):
-        x = rearrange(x, "b t c -> b c t")
-        x = self.encoder(x)
-        z = self.projector(x)
-        zq, vqloss, perplexity = self.quantizer(z)
+        z, zq, _, _, _ = self.encode_latent(x)
         return zq, z
 
     def forward_index(self, x):
