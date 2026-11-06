@@ -23,7 +23,8 @@
 #       frames soft-weighted instead of hard-masked, EMA decay 0.8 -> 0.99,
 #       and a t_pad length fix in _pitch_codec_forward.
 # 0.6_pitchonly - training pitch only on local for extra throughput
-exp_name: base_v0.6_pitchonly
+# 0.6a - merged checkpoint
+exp_name: base_v0.6a
 vits:
   filter_channels: 640
   gin_channels: 256
@@ -154,11 +155,6 @@ train:
   keep_ckpts: 2
   num_workers: 6
   pin_memory: True
-  # Stage-1 TensorBoard root (`logs_stage1/{exp_name}/version_0`). Stage 2 writes
-  # to `logs_stage2/` so the two stages never share a tree: wiping stage 2's
-  # logs must not touch a months-long stage-1 run. 1_training.py's fallback is
-  # the same value, so keeping this key set correctly only matters if you point
-  # it somewhere else (e.g. a bigger disk).
   log_dir: logs_stage1
   train_filelist: data/genshin_full_stage1/train.txt
   val_filelist: data/genshin_full_stage1/val.txt
