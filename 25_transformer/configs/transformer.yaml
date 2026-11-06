@@ -180,13 +180,44 @@ train:
   eps: 1e-8
   weight_decay: 0.03
   # Stage 2 trains with TWO optimizers (Lightning manual optimization, see
-  # 2_training.py -> TrainModule.training_step): Muon on every 2-D parameter
-  # (attention / FFN / projection matrices) and AdamW on everything else
-  # (biases, LayerNorm gains). Both get `weight_decay` above; Muon's step is
-  # `lr * muon_lr_mult` because its update is orthogonalised, so it needs a
-  # much larger LR (~0.02 with lr=1e-4 is the usual recipe). Relative order is
-  # fixed: `self.optimizers()` -> [AdamW, Muon].
+  # 2_training.py -> TrainModule.training_step): Muon on the 2-D *hidden*
+  # linear maps (attention / FFN / projection matrices) and AdamW on
+  # everything else (biases, LayerNorm gains, embedding tables and the
+  # per-codebook output heads -- see muon_include_* below). Both get
+  # `weight_decay` above; Muon's step is `lr * muon_lr_mult` because its
+  # update is orthogonalised, so it needs a much larger LR (~0.02 with
+  # lr=1e-4 is the usual recipe). Relative order is fixed:
+  # `self.optimizers()` -> [AdamW, Muon].
   muon_lr_mult: 200.0
+  # Muon's Newton-Schulz iteration count. Its cost is *per step and
+  # independent of the batch size*: measured on this model (136 M params, 119
+  # two-dimensional tensors) ns_steps=5 is ~1.26 TMAC, i.e. ~75 % of the
+  # forward+backward FLOPs, issued as 5 iterations x 3 matmuls x 119 params in
+  # a per-parameter Python loop (torch.optim.Muon has no `foreach` path).
+  # 3 removes 40 % of that; < 3 degrades the orthogonalisation itself.
+  muon_ns_steps: 3
+  # Muon orthogonalises every 2-D parameter, which is right for the hidden
+  # linear maps and wrong for embedding tables (only a few rows have a
+  # gradient, and Muon scales their LR by sqrt(rows/cols) = 2.3x for the
+  # 4096x768 speaker tables) and for the per-codebook output heads (they are a
+  # CE projection, and reference Muon excludes loss heads). Both are routed to
+  # AdamW by default; set these to true to reproduce pre-v0.6 runs. Changing
+  # either changes the optimizer-state layout, so a --resume_from keeps the
+  # weights but drops the momentum/Adam moments (2_training.py says so).
+  muon_include_embeddings: false
+  muon_include_heads: false
+  # torch.compile the codebook decoder stack (12 x nn.TransformerDecoderLayer).
+  # Compiles `DelayCodebookDecoder._forward_impl` (never the module: an
+  # OptimizedModule renames every decoder key in state_dict()), dynamic=True
+  # because val/sampling use a different column count, with an eager fallback
+  # if compilation fails. See 2_training.py:_maybe_compile_decoder.
+  # MEASURED (batch 24, max_frames 256, fp32/TF32): ~1.0x -- median step
+  # 241.8 ms compiled vs 246.9 ms eager over 5 reps, i.e. inside the +/-6 %
+  # run-to-run spread, and the fwd+bwd part alone moved by less than the noise.
+  # The decoder is large-GEMM bound (FFN is ~8x the attention FLOPs at L=265),
+  # so there is no launch overhead left to recover. Off by default; turn it on
+  # if you change the model shape enough that launch overhead matters again.
+  compile_decoder: false
   # Note: Trainer(accumulate_grad_batches > 1) is rejected by Lightning under
   # manual optimization, so 2_training.py refuses to start if this key is > 1.
   # Numerical precision for training/resume.
@@ -230,6 +261,10 @@ train:
   max_frames: 256          # code frames per training segment (25 Hz)
   max_phone_length: 512
   val_interval: 1
+  # TensorBoard step logging. Also gates the per-codebook *diagnostics* in
+  # training_step: code_loss only computes accuracy / usage entropy (a second
+  # full softmax over every codebook, plus a device sync each) on the steps
+  # whose values are written anyway. train_loss still logs every step.
   log_interval: 50
   keep_ckpts: 2
   # Stage-2 TensorBoard root (`logs_stage2/{exp_name}/version_0`). Stage 1 writes

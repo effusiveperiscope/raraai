@@ -632,13 +632,16 @@ codebook **one extra output class** at index `vocab_size + 1` (pad/BOS stays at
 
 ### Optimizers & manual optimization (stage 2)
 
-`TrainModule` splits the parameters between **two optimizers**:
+`TrainModule` splits the parameters between **two optimizers** via
+`_split_params`:
 
-- `torch.optim.Muon` on every **2-D** parameter (attention / FFN / projection
-  matrices), with `lr * train.muon_lr_mult` (`200` → `0.02` with the shipped
-  `lr: 1e-4`; see the comment in `configs/transformer.yaml`), and
-- `torch.optim.AdamW` on everything else (biases, LayerNorm gains) with
-  `train.lr` / `betas` / `eps`.
+- `torch.optim.Muon` on the **2-D hidden linear maps** (attention / FFN /
+  projection matrices), with `lr * train.muon_lr_mult` (`200` → `0.02` with the
+  shipped `lr: 1e-4`; see the comment in `configs/transformer.yaml`), and
+- `torch.optim.AdamW` on everything else (biases, LayerNorm gains, the
+  `nn.Embedding` tables and the per-codebook output `heads` — see
+  `muon_include_embeddings` / `muon_include_heads` in §4's step-cost section)
+  with `train.lr` / `betas` / `eps`.
 
 Lightning ≥ 2.0 refuses multiple optimizers in automatic optimization
 (`Training with multiple optimizers is only supported with manual
@@ -704,6 +707,88 @@ Notes:
   norm is ~0.7-1.0 at init, so the shipped `grad_clip_val: 1.0` only bites on
   spikes. Clipping changes no checkpoint shape, so it needs neither
   re-preprocessing nor a fresh run — a spike can be fixed by resuming.
+
+### Stage-2 step cost, Muon, and metric gating (v0.6)
+
+Two things dominated a stage-2 step that had nothing to do with the model, both
+measured on `base2` codes at the shipped `batch_size: 24` / `max_frames: 256`
+(GPU wall time, `scratch/bench_stage2_step.py`, median of 10 iters over 3-5
+reps, fp32/TF32; run-to-run spread is ±6 %, so treat differences below ~5 % as
+noise):
+
+| part | before | after |
+|---|---|---|
+| fwd+bwd | 189 ms | 184 ms |
+| `clip_grad_norm_` | 5 ms | 5 ms |
+| `AdamW.step()` | 1.5 ms | 2 ms |
+| **`Muon.step()`** | **82 ms** | **49 ms** |
+| step total | 274 ms | 241 ms (**−12 %**) |
+
+The forward+backward itself is ~1 113 GFLOP (B=24, `T=256`) — i.e. ~3.3 TFLOP
+for fwd+bwd — while Muon's orthogonalisation was ~1.26 TMAC of **bf16** work in
+a *batch-independent* per-step loop.
+
+- **`train.muon_ns_steps`** (default `3`, was the library default 5). Muon runs
+  `ns_steps × 3` matmuls per parameter (`torch/optim/_muon.py`,
+  `_zeropower_via_newtonschulz`: `gram`, `gram²`, `gram @ grad`), in a plain
+  per-parameter Python loop — `torch.optim.Muon` has no `foreach` path and
+  raises if you ask for one (`"Foreach is not supported for Muon yet"`), so
+  that is ~2 400 small, serially dependent kernel launches per step. 5 → 3
+  removes 40 % of the FLOPs and ~40 % of the measured time.
+- **`train.muon_include_embeddings` / `train.muon_include_heads`** (both
+  `false`): embeddings and the per-codebook output heads now go to AdamW. The
+  two `(4096, 768)` speaker tables alone were 52.8 GMAC of Newton–Schulz work
+  per step (4.2 % of all of it) on matrices where only the handful of ids
+  present in the batch has any gradient — the update is a linear combination of
+  the *rows* of the gradient, so orthogonalising it is close to meaningless.
+  The heads are the CE projection (a loss head), and
+  `Muon._adjust_lr` was also scaling their and the embeddings' LR by
+  `sqrt(max(1, rows/cols))` — 2.3x for a 4096×768 table versus 1.0 for the
+  square attention matrices. Reference Muon excludes both for the same reasons.
+- **Metric gating.** `code_loss` used to compute, for every one of the 10
+  codebooks on *every* step, a second full `softmax` (for
+  `code_usage_entropy`), an `argmax` pass, two boolean-mask gathers and an
+  `if valid.any():` — that last one is a GPU→CPU sync, 10 per step. Then
+  `_log_step_metrics` did ~30 `.detach().float().cpu().tolist()` calls, i.e. ~30
+  more syncs plus ~33 `add_scalar` writes into TensorBoard, every step. Now:
+  `code_loss(..., diagnostics=False)` skips the accuracy/entropy block
+  entirely, `training_step` passes `False` on the steps Lightning would not log
+  anyway (`global_step % train.log_interval`), the masked reductions keep pad
+  positions out by multiplication (`clamp_min(1)` denominators, no branch), and
+  the per-codebook vectors go to the CPU as one stacked tensor. `train_loss` is
+  still logged every step, so the progress bar and per-step curves are
+  unchanged in cadence; `train_acc`/`train_loss/spec0..pitch9` etc. now update
+  every `log_interval` steps instead of every step (they were already
+  `on_epoch=False`, so nothing aggregated is lost). `val_*` still computes
+  everything on every batch because those *are* epoch-aggregated.
+- **`train.compile_decoder`** (default `false`): compiles
+  `DelayCodebookDecoder._forward_impl` with `dynamic=True`, patching the
+  `forward` attribute rather than wrapping the module (an `OptimizedModule`
+  would prefix every decoder key with `_orig_mod.` and break checkpoint
+  loading — verified: 325 keys, no `_orig_mod`, in a checkpoint written by a
+  compiled run). **Measured ~1.0x** (241.8 vs 246.9 ms median over 5 reps,
+  inside the noise): the stack is large-GEMM bound, and FFN is ~8x the attention
+  FLOPs at `L=265`, so there is no launch overhead left to recover. It exists
+  for model shapes where that changes. The compiled call needs an **explicit**
+  function signature — `code_loss` passes `sid=` as a keyword and
+  `torch.compile` rejects a lambda that lacks it.
+- **Batch size.** Because `Muon.step()` is batch-independent, throughput should
+  improve with batch until something else saturates. Measured (median of 10
+  iters, one run per point): `B=24` 247 ms → 350 items/h, `B=32` 320 ms → 360
+  items/h, `B=48` 521 ms → 332 items/h. So the shipped 24 is already near the
+  plateau and 48 is *worse*; do not assume a bigger batch buys throughput here,
+  measure with the script.
+- `_LayoutGuard` (`LayoutCheckedAdamW`/`LayoutCheckedMuon`) exists because a
+  checkpoint's optimizer state is matched **by position**: changing the split
+  makes `Optimizer.load_state_dict` raise `loaded state dict contains a
+  parameter group that doesn't match the size of optimizer's group` (and, if
+  the counts happened to coincide, would silently attach the moments to the
+  wrong tensors). It keeps the loaded weights and the group hyperparameters and
+  drops only the per-parameter state, with a printed warning, so a
+  `--resume_from` across a split change continues instead of dying.
+  `train.muon_ns_steps` lives in the Muon group's dict and would be restored
+  *from the checkpoint*, so `_apply_muon_settings` re-applies the configured
+  value in `on_train_start` and prints when it overrides the checkpoint's.
 
 ---
 
@@ -935,6 +1020,20 @@ Notes:
       `configs/transformer.yaml`) is unaffected: those take a full path, so
       update it when you move a stage-1 run. Consumers *inside* `2_training.py`
       must read the stage-1 tree, never their own.
+15. **`train.muon_include_embeddings` / `train.muon_include_heads` /
+    `train.muon_ns_steps` change the optimizer, not the model.** The weights and
+    every tensor shape are untouched, so a `--resume_from` still loads them —
+    but a changed *split* invalidates the checkpoint's per-parameter optimizer
+    state, which is matched by position (`Optimizer.load_state_dict` raises
+    `parameter group that doesn't match the size of optimizer's group`, and
+    would silently mis-assign the moments if the counts coincided).
+    `LayoutCheckedAdamW`/`LayoutCheckedMuon` catch that: they keep the weights
+    and the group hyperparameters, drop only the moments, and print a warning.
+    `ns_steps` lives *inside* the restored group dict, so `_apply_muon_settings`
+    re-applies the configured value in `on_train_start` (and prints when it
+    overrides the checkpoint). Both are still best treated as "start a fresh
+    `exp_name`" changes, because losing the momentum is a real (if small)
+    transient. See §4.
 
 ---
 
@@ -996,6 +1095,12 @@ python test_stage1_codes.py test.wav \
     --checkpoint checkpoints_stage1/base_v0.4.6/last.ckpt --sid 0
 # ...add --roundtrip for code -> audio -> code match fractions and
 # --save_tensors to dump spec/pitch codes + both f0 contours.
+
+# Stage-2 step-time benchmark: parts + totals, no Trainer, real code tensors
+# (see §4 "Stage-2 step cost"). Add --ns_steps 5 --muon_all for the pre-v0.6
+# layout/values, --compile for torch.compile, --batch_size 32 to sweep.
+python scratch/bench_stage2_step.py
+python scratch/bench_stage2_step.py --diagnostics_per_step   # no metric gating
 
 # Ad-hoc smoke tests (many modules have an `if __name__ == "__main__"` block)
 python modeling/transformer.py    # constructs a CodeTransformer, runs fwd + generate

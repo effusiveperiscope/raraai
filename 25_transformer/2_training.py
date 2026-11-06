@@ -233,6 +233,55 @@ def plot_mel_comparison_figure(audio_ref, audio_pred, sampling_rate,
     return fig
 
 
+class _LayoutGuard:
+    """Mixin: survive a checkpoint whose optimizer *layout* changed.
+
+    Stage 2 has one parameter group per optimizer, and which parameters land in
+    it depends on ``train.muon_include_embeddings`` / ``train.muon_include_
+    heads``.  ``torch.optim.Optimizer.load_state_dict`` refuses such a
+    checkpoint (``ValueError: loaded state dict contains a parameter group that
+    doesn't match the size of optimizer's group``) — and if the *count* happened
+    to match while the ordering shifted, it would silently attach the restored
+    ``exp_avg``/``exp_avg_sq``/``momentum_buffer`` to the wrong tensors, since
+    the state is matched by position.
+
+    Neither outcome is what we want when only the split changed: the *weights*
+    are still perfectly valid, only the per-parameter moments are unusable.  So
+    on a mismatch this copies the group hyperparameters (lr, betas, eps,
+    weight_decay, momentum, ns_steps, ...) from the checkpoint, skips the
+    per-parameter state, and says so.  Training then continues with a fresh
+    momentum/moment estimate instead of dying or drifting silently.
+    """
+
+    def load_state_dict(self, state_dict):
+        saved = [len(g["params"]) for g in state_dict.get("param_groups", [])]
+        current = [len(g["params"]) for g in self.param_groups]
+        if saved == current:
+            return super().load_state_dict(state_dict)
+        for group, saved_group in zip(self.param_groups,
+                                      state_dict.get("param_groups", [])):
+            for key, value in saved_group.items():
+                if key != "params":
+                    group[key] = value
+        self.state.clear()
+        print(
+            f"WARNING: {type(self).__name__} layout changed since the "
+            f"checkpoint was written (parameters per group: checkpoint "
+            f"{saved}, now {current}). The per-parameter optimizer state "
+            f"cannot be mapped onto the new layout and was skipped; the "
+            f"(already loaded) weights and the group hyperparameters are kept, "
+            f"so the run continues with a fresh momentum/moment estimate.")
+        return None
+
+
+class LayoutCheckedAdamW(_LayoutGuard, torch.optim.AdamW):
+    pass
+
+
+class LayoutCheckedMuon(_LayoutGuard, torch.optim.Muon):
+    pass
+
+
 class TrainModule(pl.LightningModule):
     def __init__(self, net: CodeTransformer, config: OmegaConf):
         super().__init__()
@@ -258,6 +307,15 @@ class TrainModule(pl.LightningModule):
         if self.grad_clip_val > 0:
             print(f"Gradient clipping: {self.grad_clip_algorithm} "
                   f"max={self.grad_clip_val}")
+
+        # Muon's Newton-Schulz iteration count (see configure_optimizers). Its
+        # cost is per-step and batch-independent, so this is the cheapest perf
+        # knob stage 2 has: measured ~1.26 TMAC at ns_steps=5 on this model.
+        ns_steps = config.train.get("muon_ns_steps", 5)
+        self.ns_steps = 5 if ns_steps is None else int(ns_steps)
+        if not 1 <= self.ns_steps <= 99:
+            raise ValueError(
+                f"train.muon_ns_steps must be in [1, 99], got {self.ns_steps}")
         # Per-epoch spike statistics (only meaningful with clipping enabled,
         # where the norm is computed on every step anyway).
         self._grad_norm_max = None
@@ -336,6 +394,63 @@ class TrainModule(pl.LightningModule):
                 self.net_g = None
         self.hp = hp
 
+    # ------------------------------------------------------------------ #
+    # Parameter split / optimizer knobs
+    # ------------------------------------------------------------------ #
+    def _split_params(self):
+        """Split parameters into ``(muon_params, adamw_params)``.
+
+        Muon orthogonalises the update matrix of every 2-D parameter, which is
+        the right thing for the hidden *linear maps* of a transformer and the
+        wrong thing for two other kinds of 2-D tensor:
+
+        * ``nn.Embedding`` tables (the phoneme / speaker / codebook
+          embeddings).  Only the rows of the ids that occur in the batch get a
+          gradient, and Newton-Schulz costs ~26 GMAC per iteration batch for
+          the 4096-row speaker tables -- a per-step cost that is almost
+          entirely wasted, because the update is a linear combination of the
+          *rows* of the gradient.
+        * the per-codebook output ``heads`` (66/130 x 768).  These are the CE
+          projection, i.e. a loss head, and a handful of rows: reference Muon
+          excludes output heads for a reason.
+
+        ``torch.optim.Muon._adjust_lr`` also scales the LR by
+        ``sqrt(max(1, rows/cols))`` -- 2.3x for a 4096x768 embedding table
+        versus 1.0 for the square attention matrices -- so routing them to
+        AdamW also removes that accidental LR bump.
+
+        Both exemptions are configurable (``train.muon_include_embeddings`` /
+        ``train.muon_include_heads``, both default ``false``) for reproducing
+        older runs.
+
+        Note: changing this split changes the *layout* of the optimizer state,
+        so a ``--resume_from`` of an older checkpoint keeps the weights but
+        discards the momentum/Adam moments (``_LayoutGuard`` says so loudly).
+        """
+        include_emb = bool(
+            self.config.train.get("muon_include_embeddings", False))
+        include_heads = bool(
+            self.config.train.get("muon_include_heads", False))
+        skip = set()
+        if not include_emb:
+            for m in self.net.modules():
+                if isinstance(m, torch.nn.Embedding):
+                    skip.add(id(m.weight))
+        if not include_heads:
+            heads = getattr(getattr(self.net, "decoder", None), "heads", None)
+            if heads is not None:
+                for m in heads.modules():
+                    if isinstance(m, torch.nn.Linear):
+                        skip.add(id(m.weight))
+
+        muon_params, adamw_params = [], []
+        for p in self.net.parameters():
+            if p.ndim == 2 and id(p) not in skip:
+                muon_params.append(p)
+            else:
+                adamw_params.append(p)
+        return muon_params, adamw_params
+
     def configure_optimizers(self):
         """Muon on the 2-D matrices, AdamW on everything else (biases, norms).
 
@@ -343,9 +458,15 @@ class TrainModule(pl.LightningModule):
         so the module runs with ``automatic_optimization = False`` (see
         ``__init__``).  The optimizers/schedulers are returned in a fixed order
         and `training_step` unpacks them by position.
+
+        ``train.muon_ns_steps`` controls Muon's Newton-Schulz iteration count.
+        Its cost is *fixed per step* -- it does not scale with the batch -- and
+        measured on this model it is ~1.26 TMAC, i.e. ~75 % of the
+        forward+backward FLOPs, delivered as 5 iterations x 3 matmuls x 119
+        parameters in a per-parameter Python loop (``torch.optim.Muon`` has no
+        ``foreach`` path).  Dropping to 3 steps removes 40 % of that.
         """
-        muon_params = [p for p in self.net.parameters() if p.ndim == 2]
-        adamw_params = [p for p in self.net.parameters() if p.ndim != 2]
+        muon_params, adamw_params = self._split_params()
         if not muon_params or not adamw_params:
             raise ValueError(
                 "Expected both 2-D (Muon) and non-2-D (AdamW) parameters, got "
@@ -355,17 +476,18 @@ class TrainModule(pl.LightningModule):
         # much larger step than Adam(W): the usual recipe is ~0.02 for the
         # hidden layers, i.e. the AdamW LR scaled by ~200.
         muon_lr_mult = float(self.config.train.get("muon_lr_mult", 200.0))
-        optim_adamw = torch.optim.AdamW(
+        optim_adamw = LayoutCheckedAdamW(
             adamw_params,
             lr=self.config.train.lr,
             betas=tuple(self.config.train.betas),
             eps=self.config.train.eps,
             weight_decay=weight_decay,
         )
-        optim_muon = torch.optim.Muon(
+        optim_muon = LayoutCheckedMuon(
             muon_params,
             lr=self.config.train.lr * muon_lr_mult,
             weight_decay=weight_decay,
+            ns_steps=self.ns_steps,
         )
         sched_adamw = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=optim_adamw,
@@ -377,15 +499,92 @@ class TrainModule(pl.LightningModule):
             T_max=self.config.train.get("cosine_anneal_end", 1000000),
             eta_min=1e-6 * muon_lr_mult,
         )
-        print(f"Optimizers: Muon {len(muon_params)} 2-D tensors @ "
-              f"lr={optim_muon.param_groups[0]['lr']:g}, AdamW "
-              f"{len(adamw_params)} tensors @ "
+        n_muon = sum(p.numel() for p in muon_params)
+        n_adamw = sum(p.numel() for p in adamw_params)
+        print(f"Optimizers: Muon {len(muon_params)} 2-D tensors "
+              f"({n_muon/1e6:.1f} M) @ lr="
+              f"{optim_muon.param_groups[0]['lr']:g}, ns_steps={self.ns_steps}; "
+              f"AdamW {len(adamw_params)} tensors ({n_adamw/1e6:.1f} M) @ "
               f"lr={optim_adamw.param_groups[0]['lr']:g} "
               f"(weight_decay={weight_decay:g})")
         return [optim_adamw, optim_muon], [sched_adamw, sched_muon]
 
+    def _apply_muon_settings(self):
+        """Re-apply ``train.muon_ns_steps`` after a checkpoint restore.
+
+        ``Optimizer.load_state_dict`` restores ``param_groups`` wholesale, and
+        ``ns_steps`` lives in the Muon group's dict — so a ``--resume_from``
+        would otherwise silently keep the value the checkpoint was trained
+        with, no matter what the config says.  Called from ``on_train_start``,
+        which runs after Lightning has restored the optimizers.
+        """
+        optims = self.optimizers()
+        if len(optims) < 2:
+            return
+        muon = getattr(optims[1], "optimizer", optims[1])  # unwrap LightningOptimizer
+        changed = False
+        for group in muon.param_groups:
+            if group.get("ns_steps") != self.ns_steps:
+                group["ns_steps"] = self.ns_steps
+                changed = True
+        if changed:
+            print(f"Muon: ns_steps forced to {self.ns_steps} "
+                  f"(the checkpoint's value was overridden)")
+
+    def _maybe_compile_decoder(self):
+        """Optionally ``torch.compile`` the codebook decoder stack.
+
+        ``train.compile_decoder`` (default ``false``).  Same pattern as stage
+        1's ``compile_dec``:
+
+        * the compile target is ``DelayCodebookDecoder._forward_impl`` with
+          ``use_mask_cache=False``, **not** the module — wrapping the module
+          returns an ``OptimizedModule`` whose ``_orig_mod`` child renames every
+          decoder key in ``state_dict()`` and breaks checkpoint loading;
+        * ``dynamic=True`` because validation/sampling batches have a different
+          column count (``L = T + K - 1``, and val items are not cropped to
+          ``max_frames``);
+        * the warm-up call compiles up front and turns a compile failure into a
+          printed fallback to eager instead of dying at step 0.  Its RNG side
+          effects are undone, so on/off differ only in speed.
+        """
+        if not bool(self.config.train.get("compile_decoder", False)):
+            return
+        max_frames = int(self.config.train.get("max_frames", 256))
+        K = self.net.codebook_num
+        H = self.net.hidden_size
+        L = max_frames + K - 1
+        codes = torch.zeros(1, K, L, dtype=torch.long, device=self.device)
+        memory = torch.zeros(1, 4, H, device=self.device)
+        memory_mask = torch.ones(1, 4, dtype=torch.bool, device=self.device)
+        sid = torch.zeros(1, dtype=torch.long, device=self.device)
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = (torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available() else None)
+        impl = self.net.decoder._forward_impl
+
+        def compiled_forward(codes, memory, memory_mask=None, sid=None):
+            # Explicit signature (not a ``lambda``) because ``code_loss`` calls
+            # the decoder as ``decoder(inputs, memory, memory_mask, sid=sid)``
+            # and ``torch.compile`` rejects unknown keyword arguments.
+            return impl(codes, memory, memory_mask, sid, False)
+
+        try:
+            compiled = torch.compile(compiled_forward, dynamic=True)
+            compiled(codes, memory, memory_mask, sid)
+            self.net.decoder.forward = compiled
+            print("torch.compile: decoder (DelayCodebookDecoder._forward_impl)")
+        except Exception as exc:
+            print(f"torch.compile failed for the decoder, keeping eager: {exc}")
+        finally:
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
+
     def on_train_start(self):
+        self._apply_muon_settings()
         self._sample_and_log()
+        self._maybe_compile_decoder()
 
     def on_train_epoch_end(self):
         self._log_grad_epoch_stats()
@@ -786,7 +985,7 @@ class TrainModule(pl.LightningModule):
     # ------------------------------------------------------------------ #
     # Train / val
     # ------------------------------------------------------------------ #
-    def _forward_loss(self, batch, epoch=None):
+    def _forward_loss(self, batch, epoch=None, diagnostics=True):
         """Batch -> loss dict, with ``epoch`` selecting the codebook weights.
 
         Train passes ``self.current_epoch`` so the curriculum applies.  Val
@@ -794,10 +993,16 @@ class TrainModule(pl.LightningModule):
         stay a fixed yardstick, otherwise ``val_loss`` silently changes
         definition midway through the warmup and early stopping /
         checkpointing compare incomparable numbers.
+
+        ``diagnostics=False`` skips the per-codebook accuracy / usage-entropy
+        diagnostics (see ``CodeTransformer.code_loss``): same loss, less GPU
+        work.  Train only asks for them on the steps whose values are actually
+        logged; val always does, because those are aggregated over the epoch.
         """
         batch = {k: (v.to(self.device) if torch.is_tensor(v) else v)
                  for k, v in batch.items()}
-        return self.net.compute_batch_loss(batch, epoch=epoch)
+        return self.net.compute_batch_loss(batch, epoch=epoch,
+                                           diagnostics=diagnostics)
 
     def on_train_epoch_start(self):
         """Log the effective per-codebook loss weights once per epoch.
@@ -824,6 +1029,16 @@ class TrainModule(pl.LightningModule):
 
         Train logs per step (so curves track the actual optimisation), val
         logs per epoch (mean over the val set).
+
+        Only the keys that are present are logged: with
+        ``diagnostics=False`` (the train steps between two ``log_interval``
+        points, see ``training_step``) ``acc``/``code_accs``/
+        ``code_usage_entropy`` are absent by design.
+
+        The per-codebook vectors are transferred to the CPU as *one* stacked
+        tensor: the old code did ``.detach().float().cpu().tolist()`` per
+        vector per codebook, i.e. ~30 GPU->CPU syncs every step, each of which
+        stalls the pipeline for a handful of scalars.
         """
         on_epoch = not on_step
         kw = dict(on_step=on_step, on_epoch=on_epoch, logger=True)
@@ -836,12 +1051,17 @@ class TrainModule(pl.LightningModule):
         # entropy. Values are averaged over the batch, so accumulate them on
         # epoch as well as logging them per step.
         n_spec = self.net.spec_codebook_num
-        for name, tag in (("code_losses", "loss"), ("code_accs", "acc"),
-                          ("code_usage_entropy", "usage_entropy")):
-            vec = out.get(name)
-            if vec is None:
-                continue
-            for i, v in enumerate(vec.detach().float().cpu().tolist()):
+        present = [(name, tag, out[name])
+                   for name, tag in (("code_losses", "loss"),
+                                     ("code_accs", "acc"),
+                                     ("code_usage_entropy", "usage_entropy"))
+                   if name in out]
+        if not present:
+            return
+        table = torch.stack([vec.detach().float() for _, _, vec in present]
+                            ).cpu().tolist()  # one sync for all of them
+        for (_, tag, _), row in zip(present, table):
+            for i, v in enumerate(row):
                 group = "spec" if i < n_spec else "pitch"
                 self.log(f"{prefix}_{tag}/{group}{i}", float(v), **kw)
 
@@ -939,9 +1159,20 @@ class TrainModule(pl.LightningModule):
         gradient accumulation with it, so every batch is exactly one step of
         each optimizer (equivalent to ``accumulate_grad_batches=1``;
         ``__init__`` rejects a larger value).
+
+        The per-codebook diagnostics (accuracy, usage entropy and the ~30
+        TensorBoard scalars they feed) are only computed on the steps Lightning
+        would log anyway (``train.log_interval``); on the other steps the batch
+        only pays for the cross-entropies themselves.  The loss is the same
+        either way, so the optimisation is unchanged — this is the same metric
+        gating stage 1 uses.  ``train_loss`` (the progress bar) is still logged
+        every step.
         """
         self.net.train()
-        out = self._forward_loss(batch, epoch=self.current_epoch)
+        every = max(int(self.config.train.get("log_interval", 50) or 50), 1)
+        diagnostics = self.global_step % every == 0
+        out = self._forward_loss(batch, epoch=self.current_epoch,
+                                 diagnostics=diagnostics)
         self._log_step_metrics("train", out, on_step=True)
 
         optim_adamw, optim_muon = self.optimizers()
@@ -993,6 +1224,9 @@ class TrainModule(pl.LightningModule):
             {**batch, "phone_ids": phones[rotate],
              "phone_lengths": lengths[rotate]},
             epoch=None,  # fixed (final) codebook weights, like val_loss
+            # Only the three loss scalars are used below; the per-codebook
+            # accuracy/entropy extras would double the cost of this probe.
+            diagnostics=False,
         )
         # float() forces a device sync; only the first `text_delta_batches`
         # batches of the epoch pay it.

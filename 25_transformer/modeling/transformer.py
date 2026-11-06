@@ -336,13 +336,28 @@ class DelayCodebookDecoder(nn.Module):
             x = e if x is None else x + e
         return x
 
-    def forward(
+    def _forward_impl(
         self,
         codes: torch.Tensor,  # (B, K, L) long, pad index == vocab size
         memory: torch.Tensor,  # (B, N, H)
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
+        use_mask_cache: bool = True,
     ) -> List[torch.Tensor]:
+        """Body of :meth:`forward`, with the causal-mask source selectable.
+
+        ``use_mask_cache=True`` reuses ``_causal_mask``'s cached ``(L, L)``
+        tensor, which is what eager training wants (the shape is constant at
+        ``max_frames + K - 1``).
+
+        ``use_mask_cache=False`` rebuilds the mask inside the call instead, so
+        the whole body is a pure function of its inputs with no Python-side
+        mutable state.  ``2_training.py`` compiles *that* variant
+        (``train.compile_decoder``): the cache's ``if self._causal_mask_key !=
+        key`` is a Python branch on a shape-dependent key, which under
+        ``torch.compile``/dynamo is a guard (and recompilation) at best and a
+        graph break at worst.
+        """
         B, K, L = codes.shape
         x = self.embed(codes)
         x = self.pos(x)
@@ -353,7 +368,12 @@ class DelayCodebookDecoder(nn.Module):
                     "but no sid was passed")
             x = x + self.spk_emb(sid.to(codes.device)).unsqueeze(1)
 
-        tgt_mask = self._causal_mask(L, x.device, x.dtype)
+        if use_mask_cache:
+            tgt_mask = self._causal_mask(L, x.device, x.dtype)
+        else:
+            tgt_mask = torch.full((L, L), float("-inf"), device=x.device,
+                                  dtype=x.dtype)
+            tgt_mask = torch.triu(tgt_mask, diagonal=1)
         mem_pad = None if memory_mask is None else ~memory_mask
         out = self.decoder(
             tgt=x,
@@ -362,6 +382,16 @@ class DelayCodebookDecoder(nn.Module):
             memory_key_padding_mask=mem_pad,
         )
         return [head(out) for head in self.heads]
+
+    def forward(
+        self,
+        codes: torch.Tensor,  # (B, K, L) long, pad index == vocab size
+        memory: torch.Tensor,  # (B, N, H)
+        memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
+        sid: Optional[torch.Tensor] = None,  # (B,) long
+    ) -> List[torch.Tensor]:
+        return self._forward_impl(codes, memory, memory_mask, sid,
+                                  use_mask_cache=True)
 
 
 class CodeTransformer(nn.Module):
@@ -618,6 +648,7 @@ class CodeTransformer(nn.Module):
         sid: Optional[torch.Tensor] = None,  # (B,) long
         epoch: Optional[int] = None,
         complete: Optional[torch.Tensor] = None,  # (B,) bool, for EOS
+        diagnostics: bool = True,
     ) -> dict:
         """Delayed next-token loss over all codebooks.
 
@@ -631,6 +662,17 @@ class CodeTransformer(nn.Module):
         (uniform unless ``transformer.codebook_weights`` is set), so the
         coarse codebooks can be prioritised over the fine residual ones.
 
+        Args:
+            diagnostics: compute the per-codebook accuracy / usage entropy as
+                well.  Those cost a second full softmax over every codebook's
+                logits plus an argmax pass, i.e. real GPU time that is only
+                useful on the steps whose result is actually logged (see
+                ``2_training.py:training_step``, which passes ``False`` on the
+                steps between two ``train.log_interval`` log points).  The
+                returned dict then simply omits ``acc``/``spec_acc``/
+                ``pitch_acc``/``code_accs``/``code_usage_entropy``; the loss
+                scalars are bit-identical either way.
+
         Returns a dict with the total loss plus per-group (spec/pitch) losses
         and diagnostics that make "is it learning?" answerable from
         TensorBoard alone:
@@ -641,13 +683,15 @@ class CodeTransformer(nn.Module):
             still average back to ``loss``).
         ``acc``/``spec_acc``/``pitch_acc``
             teacher-forced top-1 accuracy over non-pad target positions.
+            Omitted when ``diagnostics=False``.
         ``code_losses`` (K,), ``code_accs`` (K,), ``code_usage_entropy`` (K,)
             the same per codebook, always *unweighted* so the raw per-book
             behaviour stays visible.  ``code_usage_entropy`` is the entropy of
             the batch-averaged predicted distribution, normalised to
             ``[0, 1]`` by ``log(vocab - 1)``; values near 0 mean the head has
             collapsed onto a handful of codes even if the loss still looks
-            healthy.
+            healthy.  ``code_accs``/``code_usage_entropy`` are omitted when
+            ``diagnostics=False``; ``code_losses`` never is.
         ``loss_weights`` (K,)
             the effective weights used for this batch, for logging.
         """
@@ -675,47 +719,59 @@ class CodeTransformer(nn.Module):
             flat_targets = targets[:, k].reshape(-1)
             losses.append(F.cross_entropy(
                 flat_logits, flat_targets, ignore_index=self.pad_ids[k]))
+            if not diagnostics:
+                continue
 
-            valid = flat_targets != self.pad_ids[k]  # (B*L,)
-            if valid.any():
-                accs.append(
-                    (flat_logits.argmax(-1)[valid] == flat_targets[valid])
-                    .float().mean())
-                probs = F.softmax(flat_logits[valid], dim=-1).mean(0)
-                ent = -(probs.clamp_min(1e-9).log() * probs).sum()
-                # `probs.size(-1)` includes the pad class, which is never a
-                # target, so the attainable maximum is log(vocab - 1).  With EOS
-                # the end-of-utterance class is included in the mass (it is a
-                # real, if rare, target), so the normaliser stays as is.
-                entropies.append(
-                    ent / math.log(max(probs.size(-1) - 1, 2)))
-            else:  # degenerate batch (everything masked)
-                accs.append(lg.new_zeros(()))
-                entropies.append(lg.new_zeros(()))
+            # Extra per-codebook diagnostics (accuracy + predicted-distribution
+            # entropy). These are the expensive part of this function -- a
+            # second full softmax, an argmax pass and two masking reductions
+            # *per codebook* -- so `diagnostics=False` skips them on the
+            # training steps that Lightning would not log anyway (see
+            # `train.log_interval` and `2_training.py:training_step`).
+            #
+            # Everything here stays on-device: no `if valid.any()` (that is a
+            # GPU->CPU sync per codebook, i.e. 10 syncs per step in the old
+            # code) and no boolean-mask gather (which materialises another
+            # (n_valid, v) copy). Pad positions are zeroed by multiplication
+            # instead and the denominator is `n_valid.clamp_min(1)`, so a
+            # degenerate all-masked batch yields 0 rather than NaN.
+            mask = (flat_targets != self.pad_ids[k]).unsqueeze(-1).to(lg.dtype)
+            n_valid = mask.sum().clamp_min(1.0)
+            correct = (flat_logits.argmax(-1) == flat_targets)
+            accs.append((correct.to(lg.dtype).unsqueeze(-1) * mask).sum()
+                        / n_valid)
+            probs = (F.softmax(flat_logits, dim=-1) * mask).sum(0) / n_valid
+            ent = -(probs.clamp_min(1e-9).log() * probs).sum()
+            # `probs.size(-1)` includes the pad class, which is never a target,
+            # so the attainable maximum is log(vocab - 1).  With EOS the
+            # end-of-utterance class is included in the mass (it is a real, if
+            # rare, target), so the normaliser stays as is.
+            entropies.append(ent / math.log(max(probs.size(-1) - 1, 2)))
 
         losses = torch.stack(losses)  # (K,)
-        accs = torch.stack(accs)  # (K,)
-        entropies = torch.stack(entropies)  # (K,)
-
-        # Coarse-to-fine combination.  ``code_losses`` above stays unweighted
-        # (raw diagnostics); only the optimised total is weighted.
         weights = self.loss_weights(epoch).to(device=losses.device,
                                              dtype=losses.dtype)
         n_spec = self.spec_codebook_num
-        return {
+        out = {
             "loss": self._weighted_mean(losses, weights),
             "spec_loss": self._weighted_mean(losses[:n_spec],
                                              weights[:n_spec]),
             "pitch_loss": self._weighted_mean(losses[n_spec:],
                                               weights[n_spec:]),
-            "acc": accs.mean(),
-            "spec_acc": accs[:n_spec].mean(),
-            "pitch_acc": accs[n_spec:].mean(),
             "code_losses": losses,
-            "code_accs": accs,
-            "code_usage_entropy": entropies,
             "loss_weights": weights,
         }
+        if diagnostics:
+            accs = torch.stack(accs)  # (K,)
+            entropies = torch.stack(entropies)  # (K,)
+            out.update({
+                "acc": accs.mean(),
+                "spec_acc": accs[:n_spec].mean(),
+                "pitch_acc": accs[n_spec:].mean(),
+                "code_accs": accs,
+                "code_usage_entropy": entropies,
+            })
+        return out
 
     @staticmethod
     def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -739,6 +795,7 @@ class CodeTransformer(nn.Module):
         code_lengths: Optional[torch.Tensor] = None,
         epoch: Optional[int] = None,
         complete: Optional[torch.Tensor] = None,
+        diagnostics: bool = True,
     ) -> dict:
         """Training forward pass: phonemes + speaker -> spec/pitch code loss.
 
@@ -746,21 +803,25 @@ class CodeTransformer(nn.Module):
         :meth:`loss_weights`); it does not affect the model's computation.
         ``complete`` (``(B,)`` bool) marks the samples whose segment reaches the
         end of the clip and therefore get an EOS target (no-op unless
-        ``transformer.eos_token`` is set).
+        ``transformer.eos_token`` is set).  ``diagnostics`` is forwarded to
+        :meth:`code_loss`.
         """
         memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
         return self.code_loss(
             memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch,
-            complete=complete)
+            complete=complete, diagnostics=diagnostics)
 
     def compute_batch_loss(self, batch: dict,
-                           epoch: Optional[int] = None) -> dict:
+                           epoch: Optional[int] = None,
+                           diagnostics: bool = True) -> dict:
         """Convenience wrapper used by the Lightning module.
 
         Expects ``phone_ids``, ``phone_lengths``, ``sid``, ``spec_codes``,
         ``pitch_codes`` and optional ``code_lengths`` / ``complete`` entries.
-        ``epoch`` drives the codebook weight curriculum.
+        ``epoch`` drives the codebook weight curriculum; ``diagnostics``
+        enables the per-codebook accuracy/usage-entropy extras (see
+        :meth:`code_loss`).
         """
         return self.forward(
             phone_ids=batch["phone_ids"],
@@ -771,6 +832,7 @@ class CodeTransformer(nn.Module):
             code_lengths=batch.get("code_lengths"),
             epoch=epoch,
             complete=batch.get("complete"),
+            diagnostics=diagnostics,
         )
 
     # ------------------------------------------------------------------ #
