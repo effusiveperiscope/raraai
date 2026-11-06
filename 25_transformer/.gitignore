@@ -10,4 +10,5 @@ archived_checkpoints/
 checkpoints_stage1/
 checkpoints_stage2/
 test_out
+test_in
 *.wav
