@@ -44,6 +44,9 @@ dataset_codes.py     Stage-2 dataset + collator (phone/spec/pitch codes)
 speaker_map.py       Speaker-id canonicalisation (stage-2 id -> stage-1 id)
 horsephonemizer.py   G2P phonemiser
 ultimate_xc.py       (imported for side effects; see footguns)
+merge_pitch_codec.py Splice one stage-1 run's pitch codec path into another
+                     checkpoint (see §7; prefixes come from
+                     modeling.generator.PITCH_PATH_PREFIXES)
 
 configs/
   base.yaml          Stage-1 hyperparameters (Generator, codecs, discriminators)
@@ -1055,6 +1058,18 @@ python 1_training.py --config configs/base.yaml            # auto-resumes last.c
 #  paths below are a full path, so they can live in either tree)
 python 1_training.py --config configs/base.yaml --resume_from checkpoints_stage1/base_v0.4.2/last.ckpt
 python 1_training.py --config configs/base.yaml --transfer_from some.ckpt   # partial weight transfer
+
+# Splice the pitch codec path of one stage-1 run into another. The merged keys
+# are exactly PITCH_PATH_PREFIXES in modeling/generator.py (pitch_downsample /
+# pitch_codec / pitch_upsample / pitch_out_proj / pitch_uv_proj — the weights
+# --pitch_only trains); everything else, including the metadata, comes from
+# --base_checkpoint. Optimizer state is dropped, so continue training from the
+# result with --transfer_from (--keep_optimizer_state keeps the base's instead;
+# --include_pitch_disc also takes net_dp.* from the pitch checkpoint).
+python merge_pitch_codec.py \
+    --pitch_checkpoint pretrain/stage1_pitch_last.ckpt \
+    --base_checkpoint pretrain/5090_stage1_last.ckpt \
+    --output pretrain/stage1_merged_last.ckpt
 
 # Dataset duration / duplicate / train-val-overlap report
 # (auto-detects stage-1, stage-2 and raw-audio filelists; --json for scripting)

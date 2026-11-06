@@ -12,6 +12,23 @@ import torch.nn.functional as F
 # ~[0, 1000 Hz] to ~[0, 1] for stable codec training.
 PITCH_LOG_SCALE = math.log1p(1000.0)
 
+# Module-level parameter-name prefixes of the *pitch codec path*: the analysis
+# conv, the pitch RVQ codec, the synthesis conv, the f0 output head and the
+# voicing (V/UV) head. These are exactly the weights stage-1 ``--pitch_only``
+# keeps trainable (see ``Generator.freeze_non_pitch``), so anything that needs
+# to identify "the pitch codec weights" in a checkpoint (e.g.
+# ``merge_pitch_codec.py``) must read this tuple instead of re-listing them.
+# Note the decoder's own pitch conditioning (``dec.pit.cond.*``) is *not* part
+# of this set: it belongs to the NSF decoder and stays frozen in pitch-only
+# training.
+PITCH_PATH_PREFIXES = (
+    "pitch_downsample.",
+    "pitch_codec.",
+    "pitch_upsample.",
+    "pitch_out_proj.",
+    "pitch_uv_proj.",
+)
+
 
 def _get_cfg(cfg, key, default):
     try:
@@ -184,16 +201,13 @@ class Generator(nn.Module):
         everything else (posterior encoder, spectrogram codec, resampling
         layers, NSF decoder and the speaker table). Used by stage-1
         ``--pitch_only`` fine-tuning so only the pitch path is updated.
+
+        The prefix list lives in :data:`PITCH_PATH_PREFIXES` so that
+        ``merge_pitch_codec.py`` merges exactly the weights this method
+        unfreezes.
         """
-        pitch_prefixes = (
-            "pitch_downsample.",
-            "pitch_codec.",
-            "pitch_upsample.",
-            "pitch_out_proj.",
-            "pitch_uv_proj.",
-        )
         for name, param in self.named_parameters():
-            param.requires_grad_(name.startswith(pitch_prefixes))
+            param.requires_grad_(name.startswith(PITCH_PATH_PREFIXES))
 
     def _pitch_downsample_conv(self, f0_target):
         """Overlapping analysis conv, replicate-padded at both ends.
