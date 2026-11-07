@@ -249,6 +249,33 @@ default; `--skip_existing` would instead reuse the old ones — combine it with
 `--force` if you want to keep the reuse contract for the other keys). The
 filelists are rewritten as usual, from the same seeded shuffle.
 
+**Punctuation survives the aligner path too.** The Qwen forced aligner tokenises
+its input with `Qwen3ForceAlignProcessor`, whose `clean_token` keeps only
+letters, digits and `'` in each token — so `"excited, Spike?"` comes back as the
+items `["excited", "Spike"]` with the `,` and `?` gone, *before* the phonemizer
+sees them. That is not what we want: g2p_en emits punctuation as its own
+ARPAbet token, the g2pen tokenizer has ids for `, . ? ! -` (13, 8, 84, 59, 905),
+and the published corpora carry it (`data/genshin_full_stage2`: 100 % of 200
+sampled clips). So `features.attach_punctuation` puts it back:
+
+- `FeatureExtractor.align` keeps the text each item group was aligned against
+  (the caller's transcript, or `ASRTranscription.text`), splits it on
+  whitespace, reduces every segment with the aligner's own rule and stores the
+  stripped characters in an extra **`punct`** field on the item whose word they
+  followed (punctuation on a segment with no word of its own, e.g. a lone
+  `--`, goes to the preceding word; CJK is matched character-group-wise). If
+  the word sequences disagree the items are left untouched rather than
+  punctuated wrongly.
+- `FeatureExtractor.phonemize_items` appends `keep_punctuation(item['punct'])`
+  to the word's phone string before tokenizing, so the ids have exactly the
+  shape the transcript path (`phonemize_sentence`) produces: `SPAY1K.` →
+  `[..., 8]`. `keep_punctuation` drops characters the tokenizer has no id for
+  (`;`, `:`, Unicode quotes) so they never become `[UNK]`.
+
+`data/base2` was built **before** this fix, so its `phone_ids` have no
+punctuation at all; rebuild them with `--only phones` (cheap, no codec) before a
+fresh stage-2 run so the text distribution matches the base checkpoint.
+
 ---
 
 ## 4. Configuration

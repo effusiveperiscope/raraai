@@ -1,4 +1,5 @@
 import math
+import unicodedata
 import numpy as np
 import torch
 from svc_helper.pitch.rmvpe import RMVPEModel
@@ -115,6 +116,92 @@ def normalize_waveform(wav, mode='none', target_db=-1.0, max_gain_db=30.0,
     # output lives in.
     out = np.clip(wav * gain, -1.0, 1.0)
     return out.astype(wav.dtype, copy=False), float(20.0 * math.log10(gain))
+
+
+def _aligner_keeps(ch):
+    """Whether the Qwen forced aligner keeps `ch` inside an aligned token.
+
+    Mirrors ``Qwen3ForceAlignProcessor.is_kept_char`` in ``qwen_asr``: letters
+    and digits (by Unicode category) plus the ASCII apostrophe. Everything
+    else -- ``, . ? ! - ; :`` and Unicode quotes -- is stripped from the token
+    it belongs to, which is why `attach_punctuation` exists.
+    """
+    if ch == "'":
+        return True
+    cat = unicodedata.category(ch)
+    return cat.startswith('L') or cat.startswith('N')
+
+
+def attach_punctuation(text, items):
+    """Put the punctuation the forced aligner strips back onto `items`.
+
+    ``Qwen3-ForcedAligner`` tokenises its input with
+    ``Qwen3ForceAlignProcessor``, whose ``clean_token`` keeps only letters,
+    digits and ``'`` in each token. For ``"I don't know, Spike."`` it therefore
+    returns the items ``["I", "don't", "know", "Spike"]`` -- the ``,`` and ``.``
+    are gone before ``phonemize_items`` ever sees them. That matters, because
+    g2p_en emits punctuation as its own ARPAbet token, the g2pen tokenizer has
+    ids for ``, . ? ! -``, and the published stage-2 corpora carry them in
+    essentially every clip: dropping them removes a pause cue the transformer
+    was trained on.
+
+    This stores the punctuation that follows each word in an extra ``punct``
+    field, which `phonemize_items` appends to that word's phone string -- the
+    same shape the whole-transcript path produces (``SPAY1K.`` rather than
+    ``SPAY1K``).
+
+    Matching is positional: `text` is split on whitespace, each segment reduced
+    with the aligner's own rule gives one word per item (CJK excepted, where
+    the aligner emits one item per character, so item texts are joined until
+    they cover the word). Punctuation on a segment with no word at all (a lone
+    ``--`` / ``...``) is given to the preceding word.
+
+    Args:
+        text: The string that was aligned -- the caller's transcript, or the
+            ASR text that produced `items`. Both keep their punctuation.
+        items: Mutable item dicts, each with a ``text`` key.
+
+    Returns:
+        True when the punctuation was attached (also when there was none).
+        False when `text` and `items` disagree on the word sequence; `items` is
+        then left untouched, because losing the punctuation is bad but putting
+        it on the wrong word would be worse.
+    """
+    if not text or not items:
+        return False
+    pairs = []  # (word, punctuation) in reading order
+    pending = ''  # punctuation seen before the first word
+    for seg in str(text).split():
+        word = ''.join(ch for ch in seg if _aligner_keeps(ch))
+        punct = ''.join(ch for ch in seg if not _aligner_keeps(ch))
+        if not word:
+            if pairs:
+                pairs[-1] = (pairs[-1][0], pairs[-1][1] + punct)
+            else:
+                pending += punct
+            continue
+        pairs.append((word, pending + punct))
+        pending = ''
+    if not pairs:
+        return False
+
+    attached = []  # (item index, punctuation)
+    idx = 0
+    for word, punct in pairs:
+        target = word.lower()
+        consumed = ''
+        while idx < len(items) and len(consumed) < len(target):
+            consumed += str(items[idx].get('text', '')).lower()
+            idx += 1
+        if consumed != target:
+            return False
+        attached.append((idx - 1, punct))
+    if idx != len(items):
+        return False
+    for i, punct in attached:
+        if punct:
+            items[i]['punct'] = items[i].get('punct', '') + punct
+    return True
 
 
 class FeatureExtractor:
@@ -259,11 +346,20 @@ class FeatureExtractor:
                 ``text`` (str): word / token text from the forced aligner.
                 ``start_time`` (float): word start in seconds.
                 ``end_time`` (float): word end in seconds.
+                ``punct`` (str, optional): punctuation that followed this word
+                    in the aligned text. The aligner strips it from its tokens
+                    (see `attach_punctuation`), so this is the only way it
+                    survives; `phonemize_items` appends it to the phones.
         """
         if self.qwen_model is None:
             raise RuntimeError(
                 "align() needs the Qwen3-ASR / forced-aligner weights; "
                 "construct FeatureExtractor(..., load_qwen=True).")
+        # (text the items were aligned against, aligner items) per utterance.
+        # The text -- not the items -- is what carries the punctuation: both
+        # the caller's transcript and the ASR output keep it, while the
+        # aligner's tokenizer strips it from the tokens it returns.
+        groups = []
         if transcription is not None and str(transcription).strip() != "":
             if self.qwen_model.forced_aligner is None:
                 raise ValueError(
@@ -276,37 +372,40 @@ class FeatureExtractor:
             )
             # align() returns a list with one ForcedAlignResult per sample;
             # single-audio input yields exactly one result.
-            items = []
             for res in aligned:
                 inner = getattr(res, "items", res)
-                items.extend(list(inner))
+                groups.append((str(transcription), list(inner)))
+        elif transcription is not None:
+            # Explicitly empty transcription: nothing to align.
+            groups = []
         else:
-            if transcription is not None:
-                # Explicitly empty transcription: nothing to align.
-                items = []
-            else:
-                results = self.qwen_model.transcribe(
-                    audio=(np.asarray(data_16k), 16000),
-                    language=language,
-                    return_time_stamps=True,
-                )
-                # Flatten aligned items across utterances (single-audio input
-                # normally yields exactly one ASRTranscription).
-                items = []
-                for utt in results:
-                    ts = getattr(utt, "time_stamps", None)
-                    if ts is None:
-                        continue
-                    inner = getattr(ts, "items", ts)
-                    items.extend(list(inner))
-        # Flatten aligned items across utterances (single-audio input normally
-        # yields exactly one ASRTranscription) into plain, serialisable dicts.
-        # Everything downstream only needs these three fields.
-        return [{
-            "text": getattr(it, "text", ""),
-            "start_time": float(getattr(it, "start_time", 0.0)),
-            "end_time": float(getattr(it, "end_time", 0.0)),
-        } for it in items]
+            results = self.qwen_model.transcribe(
+                audio=(np.asarray(data_16k), 16000),
+                language=language,
+                return_time_stamps=True,
+            )
+            # Flatten aligned items across utterances (single-audio input
+            # normally yields exactly one ASRTranscription). The utterance text
+            # is kept next to its items so each can be punctuated on its own.
+            for utt in results:
+                ts = getattr(utt, "time_stamps", None)
+                if ts is None:
+                    continue
+                inner = getattr(ts, "items", ts)
+                groups.append((getattr(utt, "text", "") or "", list(inner)))
+
+        # Everything downstream only needs these fields (`punct` is filled in
+        # below when the aligned text is known).
+        items = []
+        for text, inner in groups:
+            dicts = [{
+                "text": getattr(it, "text", ""),
+                "start_time": float(getattr(it, "start_time", 0.0)),
+                "end_time": float(getattr(it, "end_time", 0.0)),
+            } for it in inner]
+            attach_punctuation(text, dicts)
+            items.extend(dicts)
+        return items
 
     def phonemize_items(self, items):
         """Attach ``phones`` / ``phone_ids`` to aligned items. No audio needed.
@@ -319,24 +418,48 @@ class FeatureExtractor:
         heteronyms ("read" / "refuse" / "present" ...); see AGENTS.md
         "Heteronyms (homographs)".
 
+        Each item's ``punct`` field (set by `attach_punctuation`, i.e. `align`)
+        is appended to that item's phone string, so the codes carry the
+        punctuation exactly like the whole-transcript path does (``SPAY1K.``
+        rather than ``SPAY1K``). Characters the g2pen tokenizer has no id for
+        (``;``, ``:``, curly quotes) are dropped instead of becoming ``[UNK]``.
+
         Args:
-            items: Dicts as returned by `align`; only ``text`` is used.
+            items: Dicts as returned by `align`; ``text`` and the optional
+                ``punct`` are used.
 
         Returns:
-            New list of dicts: a copy of each input item plus ``phones`` (str)
-            and ``phone_ids`` (list[int]).
+            New list of dicts: a copy of each input item plus ``phones`` (str),
+            ``phone_ids`` (list[int]) and ``punct`` (the kept punctuation).
         """
         texts = [str(it.get("text", "")) for it in items]
         tags = self.hphzr.tag_words(texts)
         out = []
         for item, text, tag in zip(items, texts, tags):
-            phones = self.hphzr.phonemize(text, tag=tag)
+            punct = self.keep_punctuation(item.get("punct", ""))
+            phones = self.hphzr.phonemize(text, tag=tag) + punct
             entry = dict(item)
             entry["text"] = text
+            entry["punct"] = punct
             entry["phones"] = phones
             entry["phone_ids"] = self.tokenizer_g2p(phones)['input_ids']
             out.append(entry)
         return out
+
+    def keep_punctuation(self, punct):
+        """The part of `punct` the g2pen tokenizer can encode.
+
+        g2p_en passes punctuation through untouched (``SPAY1K.``) and the
+        tokenizer has ids for ``, . ? ! -``; anything else (``;``, ``:`` or a
+        Unicode quote) would tokenize to ``[UNK]``, so it is dropped here --
+        ``semicolons stay out of phone_ids`` is one of the invariants
+        `test_phonemize.py` checks.
+        """
+        if not punct:
+            return ''
+        unk = self.tokenizer_g2p.unk_token_id
+        return ''.join(ch for ch in str(punct)
+                       if self.tokenizer_g2p.convert_tokens_to_ids(ch) != unk)
 
     def phonemize_text(self, text):
         """Phone ids for a whole transcript, without audio or alignment.

@@ -311,6 +311,9 @@ def process_filelist(filelist_path,
             the filelist transcript directly (`FeatureExtractor.
             phonemize_text`), which needs no audio/ASR at all, but it cannot
             tell that a clip has no speakable text and loses word boundaries.
+            Punctuation is carried into `phone_ids` either way: the aligner
+            strips it from its tokens, so `FeatureExtractor.align` restores it
+            from the transcript / ASR text (see `features.attach_punctuation`).
 
     Clips whose ASR/forced alignment produce an empty phoneme sequence (very
     short interjections, usually) are dropped when `phone_ids` is rebuilt: the
@@ -630,7 +633,8 @@ if __name__ == '__main__':
              'forced-aligned words, exactly like a full run; "transcript" '
              'phonemizes the filelist transcript directly, which needs no '
              'audio, ASR or GPU but keeps clips the aligner would have left '
-             'empty and drops word boundaries')
+             'empty and drops word boundaries. Both keep the punctuation the '
+             'transcript has (the aligner strips it; see features.py)')
     parser.add_argument('--speaker_map', type=str, default=None,
         help='JSON map canonicalising speaker ids to the stage-1 space '
              '(see speaker_map.py)')

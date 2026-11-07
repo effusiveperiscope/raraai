@@ -18,9 +18,16 @@ For every run it prints the per-word table (word | Penn tag | phones | id count)
 plus the decoded phone string, and runs a handful of assertions (non-empty ids,
 no ``[UNK]``, ids inside the vocabulary, ``decode(ids)`` round-trip). The two
 paths are then compared on the same utterance: differences are *informational*
-only, because the aligner tokenises (``don't`` -> ``don`` + ``'t``, punctuation
-as its own items) while the text path splits on whitespace, and that changes
-the phoneme string by construction.
+only, because the audio path tokenizes every word separately (each word starts
+with a space-marked token) while the text path tokenizes the whole sentence
+once, and that changes the ids by construction.
+
+Punctuation is checked explicitly. The Qwen forced aligner strips it from its
+tokens (``Qwen3ForceAlignProcessor.clean_token`` keeps letters, digits and
+``'`` only), so ``align()`` puts it back from the transcript / ASR text with
+``features.attach_punctuation`` and ``phonemize_items`` appends it to the
+word's phones. Both paths must therefore carry the punctuation the transcript
+has -- the same shape the published stage-2 corpora were built with.
 
 Examples
 --------
@@ -66,10 +73,13 @@ DEFAULT_TEXTS = [
     "Huh?",
 ]
 
-# Strips everything that is not a phoneme character or a digit, so the aligner
-# path (punctuation is a separate item) can be compared with the transcript
-# path (punctuation clings to the word); see `normalise_phones`.
+# Strips everything that is not a phoneme character or a digit, so the two
+# paths' phone strings can be compared without tripping over punctuation.
 _PHONE_NOISE = re.compile(r"[^A-Z0-9]+")
+
+# Punctuation characters the g2pen tokenizer has ids for, i.e. the ones that
+# must survive from the transcript into `phone_ids` (`.` `,` `?` `!` `-`).
+_KEPT_PUNCT = ',.?!-'
 
 
 class Checks:
@@ -175,6 +185,15 @@ def run_text_path(fe: FeatureExtractor, text: str,
     checks.check(phones == ' '.join(per_word_phones),
                  'text path: phonemize_sentence == per-word phonemize(tag=...)')
     check_ids(fe, ids, phones, 'text path', checks)
+
+    # The reference behaviour for punctuation: g2p_en passes it through, so the
+    # phones keep "SPAY1K." -> the `.` is the last id of the word. The audio
+    # path has to reproduce this (see `attach_punctuation` in features.py).
+    expected = {ch for ch in text if ch in _KEPT_PUNCT}
+    got = ''.join(ch for ch in phones if ch in _KEPT_PUNCT)
+    checks.check(all(ch in got for ch in expected),
+                 'text path: punctuation is phonemized',
+                 f'text={sorted(expected)} phones={got!r}')
     return phones, ids
 
 
@@ -219,6 +238,24 @@ def run_audio_path(fe: FeatureExtractor, audio_path: str,
     ids = list(itertools.chain.from_iterable(per_word_ids))
     check_ids(fe, ids, phones, 'audio path', checks)
 
+    # Punctuation: the aligner's tokenizer strips it, `attach_punctuation` puts
+    # it back and `phonemize_items` appends it to the word's phones. Without
+    # that the codes silently lose the pause cue the published stage-2 corpora
+    # carry in (almost) every clip.
+    item_punct = ''.join(str(it.get('punct', '')) for it in items)
+    phone_punct = ''.join(ch for ph in per_word_phones
+                          for ch in ph if ch in _KEPT_PUNCT)
+    if transcript:
+        expected = ''.join(ch for ch in transcript if ch in _KEPT_PUNCT)
+        checks.check(all(ch in phone_punct for ch in set(expected)),
+                     'audio path: transcript punctuation survives into the '
+                     'phones', f'transcript={expected!r} phones={phone_punct!r}')
+    if item_punct:
+        checks.check(phone_punct == item_punct,
+                     'audio path: recovered punctuation reaches the phones',
+                     f'items={item_punct!r} phones={phone_punct!r}')
+    print(f'  punctuation: items={item_punct!r} phones={phone_punct!r}')
+
     covered = max((float(it['end_time']) for it in items), default=0.0)
     checks.check(covered <= duration + 0.05,
                  'audio path: final word ends inside the clip',
@@ -236,9 +273,9 @@ def compare_paths(text_phones: str, text_ids: list[int],
     print(f'  audio phones: {audio_phones!r}')
     print(f'  ids identical: {text_ids == audio_ids}')
     # The audio path tokenizes *per word* (every word starts with a
-    # space-marked token) and treats punctuation as its own item, while the
-    # text path tokenizes the whole sentence once. Raw ids therefore differ by
-    # construction even when the phonemes agree -- compare `phones` instead.
+    # space-marked token), while the text path tokenizes the whole sentence
+    # once. Raw ids therefore differ by construction even when the phonemes
+    # agree -- compare `phones` instead.
     first_diff = next((i for i, (a, b) in enumerate(zip(text_ids, audio_ids))
                        if a != b), None)
     if first_diff is None and len(text_ids) != len(audio_ids):
