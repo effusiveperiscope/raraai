@@ -27,7 +27,8 @@
 #          v0.4.x checkpoints cannot be resumed into it -- warm-start with
 #          --transfer_from (modeling.transformer.expand_state_dict_with_eos
 #          pads the old rows in) or start fresh.
-exp_name: transformer_v0.5
+# v0.5a  - adapt from new stage1
+exp_name: transformer_v0.5a
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -288,7 +289,7 @@ train:
   # audio for TensorBoard. Set to null to disable audio logging.
   # This is a *stage-1* run, so it lives in checkpoints_stage1/ (stage 2 writes
   # to checkpoints_stage2/ -- see AGENTS.md §4/§6).
-  generator_checkpoint: checkpoints_stage1/base_v0.4.7d/last.ckpt
+  generator_checkpoint: checkpoints_stage1/base_v0.7/last.ckpt
   # Voicing decision threshold used by Generator.infer_from_codes when no
   # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
   pitch_uv_threshold: 0.5
