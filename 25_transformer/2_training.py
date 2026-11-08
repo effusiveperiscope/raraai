@@ -10,7 +10,31 @@ owns the optimisation loop, data loading, logging and checkpointing.
 """
 
 import itertools
+import logging
 import os
+
+# Claim the root logger's handler slot *before* the heavy imports.
+#
+# `modeling/generator.py` pulls in the vendored NSF decoder
+# (`modeling/rvc/my_nsf.py` -> `svc_helper.svc.rvc.lib.infer_pack`), and
+# `svc_helper.svc.rvc.modules.vc.utils` does `from fairseq import checkpoint_utils`
+# (`vc/pipeline.py` imports faiss too).  fairseq's
+# `models/wav2vec/wav2vec2_classification.py` calls
+# `logging.basicConfig(level=logging.DEBUG)` **at module level**, which installs
+# a root StreamHandler formatted `%(levelname)s:%(name)s:%(message)s` and turns
+# the root logger to DEBUG -- that is where `DEBUG:numba.core.byteflow:bytecode
+# dump:` and `INFO:faiss.loader:` in the log come from (measured: 47 such lines
+# for one njit call, 0 with this guard).
+#
+# `logging.basicConfig` returns immediately once the root logger has a handler,
+# so doing it here means fairseq's call can change neither the handler nor the
+# level.  A bare `logging.getLogger().setLevel(WARNING)` is NOT enough: this
+# script imports the Generator *lazily* (`load_generator()` runs at the first
+# validation sample / OOD probe, long after that line), so DEBUG came back
+# afterwards (measured root level 10 -> 30 with the guard).
+# The post-import reset below is kept as cheap insurance against a library that
+# calls `logging.getLogger().setLevel(DEBUG)` directly (hydra does that).
+logging.basicConfig(level=logging.WARNING)
 
 import librosa
 import matplotlib
@@ -29,8 +53,6 @@ from dataset_codes import CodeCollator, CodeDataset
 from modeling.transformer import CodeTransformer, expand_state_dict_with_special
 
 import ultimate_xc
-import logging
-# Something above this is setting DEBUG but I don't know what
 logging.getLogger().setLevel(logging.WARNING)
 
 

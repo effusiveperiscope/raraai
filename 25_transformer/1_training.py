@@ -1,4 +1,14 @@
 import itertools
+import logging
+
+# Claim the root logger's handler slot *before* the heavy imports; see the long
+# comment at the top of 2_training.py.  `modeling.generator` -> the vendored
+# `svc_helper.svc.rvc` -> `fairseq`, which runs
+# `logging.basicConfig(level=logging.DEBUG)` at import time.  That is a no-op only
+# if a handler already exists, hence this line first (the old
+# `logging.getLogger().setLevel(WARNING)` further down could not stop the
+# faiss/numba DEBUG+INFO spam that follows).
+logging.basicConfig(level=logging.WARNING)
 
 from modeling.vits import commons
 from modeling.generator import Generator
@@ -8,7 +18,6 @@ from dataset_ac import dataset_ac
 from einops import rearrange
 
 import warnings
-import logging
 warnings.filterwarnings('error', category=RuntimeWarning)
 warnings.simplefilter('ignore', category=UserWarning) # pyworld spams the log with messages
 logging.getLogger('numba').setLevel(logging.WARNING)

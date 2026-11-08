@@ -40,9 +40,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import traceback
+
+# Before `modeling.generator` (-> vendored `svc_helper.svc.rvc` -> fairseq), which
+# calls `logging.basicConfig(level=logging.DEBUG)` at import time -- see the
+# comment at the top of 2_training.py.  Without this, faiss/numba spam the output.
+logging.basicConfig(level=logging.WARNING)
 
 import librosa
 import numpy as np

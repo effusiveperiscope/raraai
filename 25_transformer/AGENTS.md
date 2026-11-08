@@ -1224,6 +1224,37 @@ a *batch-independent* per-step loop.
     range for the stage-1 codec, so `generate`/`infill` mask them out of every
     sampled column — if you add another sampling path, do the same.
 
+18. **`fairseq` turns the root logger to DEBUG at import time.** Importing
+    `modeling.generator` pulls in the vendored NSF decoder
+    (`modeling/rvc/my_nsf.py` → `svc_helper.svc.rvc.lib.infer_pack`), and
+    `svc_helper.svc.rvc.modules.vc.utils` does `from fairseq import
+    checkpoint_utils` (its `vc/pipeline.py` also imports `faiss`). fairseq's
+    `models/wav2vec/wav2vec2_classification.py` runs
+    `logging.basicConfig(level=logging.DEBUG)` **at module level**, which
+    installs a root `StreamHandler` formatted
+    `%(levelname)s:%(name)s:%(message)s` and sets the root logger to DEBUG. That
+    is the source of `DEBUG:numba.core.byteflow:bytecode dump:` and
+    `INFO:faiss.loader:` in the logs (measured: 47 such lines for one `njit`
+    call). Consequences:
+    - `logging.getLogger().setLevel(logging.WARNING)` alone is **not** enough
+      when the Generator is imported lazily — `2_training.py:load_generator`
+      runs at the first validation sample / OOD probe, i.e. after that line,
+      and DEBUG came back (`1_training.py` and `2_preprocess.py` import the
+      Generator at the top, so there the post-import reset did work).
+    - The fix is `logging.basicConfig(level=logging.WARNING)` at the **top** of
+      the script, before the heavy imports: `basicConfig` returns immediately
+      once the root logger has a handler, so fairseq's call then changes neither
+      the handler nor the level. Measured: root level 10 → 30, DEBUG lines 47 →
+      0. It is in `1_training.py`, `2_preprocess.py`, `2_training.py`,
+      `test_stage1_codes.py` and `scratch/stage2_repl.py`; add it to any new
+      script that imports `modeling.generator` and prints to stdout.
+    - `test_phonemize.py` deliberately does **not** need it: `features.py` only
+      imports `svc_helper.pitch.rmvpe`, which does not reach fairseq.
+    - Do not "fix" this by pinning `numba`'s logger (as the old
+      `logging.getLogger('numba').setLevel(WARNING)` in `1_training.py` did):
+      that silences one victim while the root logger stays at DEBUG for
+      everything else.
+
 ---
 
 ## 7. Useful commands
@@ -1326,13 +1357,14 @@ python scratch/bench_stage2_step.py --diagnostics_per_step   # no metric gating
 # fdisk-style REPL for stage-2 inference (scratch/stage2_repl.py): press a key
 # per command, type a sentence, sample codes for a speaker id and decode them
 # with the frozen stage-1 Generator.  Also compares a free-running sample
-# against a val item's ground truth (`v`), writes wavs (`w`) and switches to
-# another stage-2 checkpoint at runtime (`s`, prompt; `?` lists the runs under
-# checkpoints_stage2/).  No infill: the shipped runs are pre-FIM, so the
-# SUF/MID classes are untrained.  The eos_token/fim/region_cond layout is read
-# back from the checkpoint on every load, so a config newer than its checkpoint
-# (or several runs with different layouts in one session) still loads the right
-# thing.
+# against a val item's ground truth (`v`), writes wavs (`w`), plays them live
+# through pydub (`b`, or `--play` to play every clip as it is decoded; needs
+# simpleaudio or the ffplay binary) and switches to another stage-2 checkpoint at
+# runtime (`s`, prompt; `?` lists the runs under checkpoints_stage2/).  No
+# infill: the shipped runs are pre-FIM, so the SUF/MID classes are untrained.
+# The eos_token/fim/region_cond layout is read back from the checkpoint on every
+# load, so a config newer than its checkpoint (or several runs with different
+# layouts in one session) still loads the right thing.
 python scratch/stage2_repl.py
 python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_v0.5a/last.ckpt --no_audio
 python scratch/stage2_repl.py --list_checkpoints            # just list the runs

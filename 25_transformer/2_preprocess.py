@@ -1,8 +1,17 @@
 import argparse
 import itertools
+import logging
 import math
 import os
 import random
+
+# Claim the root logger's handler slot *before* the heavy imports; see the long
+# comment at the top of 2_training.py.  `modeling.generator` (imported below)
+# pulls in the vendored `svc_helper.svc.rvc` -> `fairseq`, which runs
+# `logging.basicConfig(level=logging.DEBUG)` at import time; that is a no-op only
+# if a handler already exists.  The reset below used to be the only line, and it
+# ran *after* the imports had already enabled DEBUG.
+logging.basicConfig(level=logging.WARNING)
 
 import librosa
 import numpy as np
@@ -16,8 +25,6 @@ from features import FeatureExtractor
 from modeling.generator import Generator
 from utils import win_longpath
 
-import logging
-# Something above this is setting DEBUG but I don't know what
 logging.getLogger().setLevel(logging.WARNING)
 
 # Tensors written per source file, in the order they appear in the filelist.
