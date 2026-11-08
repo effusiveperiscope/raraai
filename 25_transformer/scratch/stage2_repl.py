@@ -38,6 +38,7 @@ Keys (press ``m`` inside the REPL for the same list)
     h  temperature (prompt)        k  top-k (prompt, ``none`` disables)
     a  decode the last codes again w  write the last audio to a wav (prompt)
     x  dump the last codes tensor  q  quit (^C / ^D also work)
+    b  play the last audio (pydub; space does the same)
 
     s  switch stage-2 checkpoint (prompt: run name or path; ``?`` lists runs)
 
@@ -58,11 +59,25 @@ Notes
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import logging
 import os
+import shutil
 import sys
+import threading
 import time
 import traceback
 from typing import Optional, Tuple
+
+# Claim the root logger's handler slot before anything can import the stage-1
+# Generator (`load_generator` below, i.e. the first `g`): `modeling/generator.py`
+# pulls in the vendored NSF decoder -> `svc_helper.svc.rvc` -> `fairseq`, whose
+# `models/wav2vec/wav2vec2_classification` runs
+# `logging.basicConfig(level=logging.DEBUG)` at import time and would turn the
+# root logger to DEBUG (numba bytecode dumps + faiss INFO).  `basicConfig` is a
+# no-op once a handler exists, so doing it here wins.
+# See the long comment at the top of 2_training.py.
+logging.basicConfig(level=logging.WARNING)
 
 import torch
 
@@ -83,7 +98,7 @@ LINE_ALIASES = {
     "text": "t", "say": "y", "gen": "g", "generate": "g", "val": "v",
     "value": "v", "sid": "i", "id": "i", "frames": "f", "temp": "h",
     "temperature": "h", "topk": "k", "audio": "a", "write": "w",
-    "save": "w", "dump": "x", "codes": "c",
+    "save": "w", "dump": "x", "codes": "c", "play": "b", "hear": "b",
     "switch": "s", "load": "s", "open": "s", "ckpt": "s",
     "checkpoint": "s", "checkpoints": "s",
     "quit": "q", "exit": "q",
@@ -248,6 +263,145 @@ def list_checkpoints(current: Optional[str] = None,
           "(a directory resolves to last.ckpt, then best-checkpoint.ckpt)")
 
 
+# ---------------------------------------------------------------------- #
+# Live playback (pydub)
+# ---------------------------------------------------------------------- #
+def _has_simpleaudio() -> bool:
+    return importlib.util.find_spec("simpleaudio") is not None
+
+
+def playback_backend() -> Optional[str]:
+    """Which backend pydub will pick (its order: simpleaudio, pyaudio, ffplay)."""
+    if _has_simpleaudio():
+        return "simpleaudio"
+    if importlib.util.find_spec("pyaudio") is not None:
+        return "pyaudio"
+    if shutil.which("ffplay"):
+        return "ffplay"
+    return None
+
+
+class AudioPlayer:
+    """Play a decoded waveform through pydub, without blocking the REPL.
+
+    ``pydub.playback.play`` needs a backend -- ``simpleaudio``, ``pyaudio``, or
+    else the ``ffplay`` binary, which is what this env has: it exports a temp wav
+    and runs ``ffplay -nodisp -autoexit``, and *that call blocks until the clip is
+    over*.  It therefore runs on a daemon thread, and the next ``play()`` waits
+    for the previous clip to finish instead of starting a second, overlapping
+    ffplay.
+
+    The audio is handed over as raw 16-bit PCM at the stage-1 sample rate, so
+    building the segment needs no file round-trip (the ffplay backend writes its
+    own temp wav).
+    """
+
+    def __init__(self):
+        self._thread: Optional[threading.Thread] = None
+        self._error: Optional[str] = None
+
+    def describe(self) -> str:
+        """One-line summary of the backend, for ``p`` (print settings)."""
+        if self._error:
+            return f"failed ({self._error})"
+        if importlib.util.find_spec("pydub") is None:
+            return "off (pydub not installed)"
+        backend = playback_backend()
+        if backend is None:
+            return "off (needs simpleaudio, pyaudio or the ffplay binary)"
+        if backend == "ffplay":
+            return "pydub -> ffplay (blocking, backgrounded)"
+        return f"pydub -> {backend}"
+
+    def wait(self) -> None:
+        """Wait for the clip started by the previous ``play()`` to finish."""
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join()
+        self._thread = None
+
+    def play(self, wave, sampling_rate: int) -> bool:
+        """Start playing ``wave`` (a 1-D float waveform); returns success."""
+        if self._error:
+            print(f"  playback unavailable: {self._error}")
+            return False
+        try:
+            import numpy as np
+            from pydub import AudioSegment
+        except Exception as exc:  # pydub missing
+            self._error = f"pydub not importable ({exc})"
+            print(f"  playback unavailable: {self._error}"
+                  f"  -- pip install pydub (needs ffplay, pyaudio or simpleaudio)")
+            return False
+
+        backend = playback_backend()
+        if backend is None:
+            self._error = ("no playback backend (install simpleaudio or pyaudio, "
+                           "or put ffplay on PATH)")
+            print(f"  playback unavailable: {self._error}")
+            return False
+
+        self.wait()  # never overlap two clips
+        pcm = (np.clip(np.asarray(wave, dtype=np.float32), -1.0, 1.0)
+               * 32767.0).astype("<i2")
+        seg = AudioSegment(data=pcm.tobytes(), sample_width=2,
+                           frame_rate=int(sampling_rate), channels=1)
+        self._thread = threading.Thread(target=self._run, args=(seg,),
+                                        daemon=True)
+        self._thread.start()
+        print(f"  playing {seg.duration_seconds:.2f} s @ {sampling_rate} Hz "
+              f"through pydub/{backend}")
+        return True
+
+    def _run(self, seg) -> None:
+        try:
+            if playback_backend() == "ffplay":
+                self._run_ffplay(seg)
+            else:
+                # `AudioSegment.play()` does not exist in pydub 0.25.1 (this
+                # env); the entry point is the module-level function.
+                from pydub.playback import play as pydub_play
+
+                pydub_play(seg)
+        except Exception as exc:  # no audio device, broken backend, ...
+            self._error = str(exc)
+            print(f"  playback failed: {exc}")
+
+    @staticmethod
+    def _run_ffplay(seg) -> None:
+        """pydub's ffplay backend, minus its per-frame status spam.
+
+        ``pydub.playback.play()`` shells out to ``ffplay -nodisp -autoexit`` and
+        lets ffplay write its stats line to *our* stderr, which fights with the
+        REPL prompt; it also uses ``subprocess.call`` and throws the exit code
+        away, so a missing audio device would look like success.  This is the
+        same binary with the same arguments plus ``-loglevel error``, and it
+        checks the exit code -- pydub still builds and exports the segment.
+        """
+        import subprocess
+        import tempfile
+
+        player = shutil.which("ffplay") or "ffplay"
+        with tempfile.NamedTemporaryFile("w+b", suffix=".wav",
+                                         delete=False) as handle:
+            path = handle.name
+        try:
+            seg.export(path, format="wav")
+            proc = subprocess.run(
+                [player, "-nodisp", "-autoexit", "-hide_banner",
+                 "-loglevel", "error", path],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE)
+            if proc.returncode != 0:
+                lines = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+                raise RuntimeError(lines[-1] if lines
+                                   else f"ffplay exited {proc.returncode}")
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def load_generator(checkpoint_path: str, config, device: str):
     """Build the frozen stage-1 ``Generator`` (mirrors 2_training/2_preprocess)."""
     from modeling.generator import Generator
@@ -275,6 +429,7 @@ class Stage2REPL:
                  generator_checkpoint: Optional[str] = None,
                  audio: bool = True,
                  out_dir: str = "scratch/repl_out",
+                 auto_play: bool = False,
                  reader: Optional[KeyReader] = None):
         self.config = config
         self.checkpoint = checkpoint
@@ -284,6 +439,9 @@ class Stage2REPL:
         self._audio_disabled = not audio
         self.out_dir = out_dir
         self.reader = reader or KeyReader()
+        # Live playback (`b`) + the `--play` auto-play toggle.
+        self.auto_play = bool(auto_play)
+        self.player = AudioPlayer()
 
         self.frame_rate = (int(config.data.sampling_rate)
                            // int(config.data.hop_length))
@@ -619,7 +777,17 @@ class Stage2REPL:
         med = float(self.last_f0[voiced].median()) if bool(voiced.any()) else 0.0
         print(f"  audio: {self.last_audio.numel() / sr:.2f} s @ {sr} Hz, "
               f"voiced {frac * 100:.0f} %, median f0 {med:.0f} Hz")
+        if self.auto_play:
+            self.player.play(self.last_audio, sr)
         return True
+
+    def play(self) -> bool:
+        """Play the last decoded audio (``b``)."""
+        if self.last_audio is None:
+            print("Nothing decoded yet -- press g (generate) or a (audio).")
+            return False
+        return self.player.play(self.last_audio,
+                                int(self.config.data.sampling_rate))
 
     # ------------------------------------------------------------------ #
     # Validation-item comparison
@@ -796,6 +964,8 @@ class Stage2REPL:
               f"{self.frame_rate:g} Hz)")
         print(f"temperature: {self.temperature:g}   top_k: {self.top_k}")
         print(f"audio      : {audio}")
+        print(f"playback   : {self.player.describe()}"
+              f"   auto-play: {'on' if self.auto_play else 'off (press b)'}")
         if self.last_codes is not None:
             sr = int(self.config.data.sampling_rate)
             extra = (f", audio {self.last_audio.numel() / sr:.2f} s"
@@ -819,11 +989,13 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
   a  decode the last codes again  w  write the last audio to a wav (prompt)
   x  dump the last codes tensor   q  quit (^C / ^D also work)
   s  switch stage-2 checkpoint (prompt: run name or path; `?` lists them)
+  b  play the last audio (pydub; space does the same)
 
   Blank at a prompt keeps the current value; blank at a wav/codes prompt
   writes into the output directory with a generated name.  `s` rebuilds the
   model in place, re-deriving eos_token/fim/region_cond from the new
   checkpoint, and clears the last codes/audio (they came from the old one).
+  `--play` plays every clip as soon as it is decoded (`b` replays it).
 """
 
 
@@ -875,6 +1047,8 @@ def banner(repl: "Stage2REPL") -> None:
 def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
     """Run one command. Returns ``False`` when the REPL should exit."""
     key = key.lower()
+    if key == " ":  # space replays the last clip (single-key mode)
+        key = "b"
     try:
         if key == "q":
             print("bye.")
@@ -951,6 +1125,8 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
                 print("Nothing sampled yet -- press g (generate).")
             else:
                 repl._decode_audio(repl.last_codes, repl.last_sid)
+        elif key == "b":
+            repl.play()
         elif key == "w":
             path = rest or repl.reader.read_line(
                 f"Wav path [{repl.out_dir}/...]: ")
@@ -1008,6 +1184,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "train.generator_checkpoint from the config)")
     parser.add_argument("--no_audio", action="store_true",
                         help="never load the stage-1 Generator (codes only)")
+    parser.add_argument("--play", action="store_true",
+                        help="play every decoded clip through pydub as soon as "
+                             "it is generated (needs ffplay or simpleaudio; "
+                             "`b` replays it, space works too)")
     parser.add_argument("--device", default=None,
                         help="cuda/cpu (default: cuda when available)")
     parser.add_argument("--line_mode", action="store_true",
@@ -1063,6 +1243,7 @@ def main(argv=None) -> int:
         generator_checkpoint=gen_ckpt,
         audio=not args.no_audio,
         out_dir=args.out_dir,
+        auto_play=args.play,
         reader=KeyReader(force_line_mode=args.line_mode))
 
     # Initial state, before the (slow) model build, so --list_speakers stays
