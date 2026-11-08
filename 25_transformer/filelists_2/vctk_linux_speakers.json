@@ -1,0 +1,884 @@
+{
+  "corpus": "vctk_linux",
+  "n_lines": 43885,
+  "n_speakers": 108,
+  "speakers": {
+    "0": {
+      "speaker": "p225",
+      "lines": 231,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "1": {
+      "speaker": "p226",
+      "lines": 356,
+      "gender": "male",
+      "age": "22",
+      "accent": "English",
+      "region": "Surrey"
+    },
+    "2": {
+      "speaker": "p227",
+      "lines": 389,
+      "gender": "male",
+      "age": "38",
+      "accent": "English",
+      "region": "Cumbria"
+    },
+    "3": {
+      "speaker": "p228",
+      "lines": 366,
+      "gender": "female",
+      "age": "22",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "4": {
+      "speaker": "p229",
+      "lines": 379,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "5": {
+      "speaker": "p230",
+      "lines": 397,
+      "gender": "female",
+      "age": "22",
+      "accent": "English",
+      "region": "Stockton-on-tees"
+    },
+    "6": {
+      "speaker": "p231",
+      "lines": 456,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "7": {
+      "speaker": "p232",
+      "lines": 411,
+      "gender": "male",
+      "age": "23",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "8": {
+      "speaker": "p233",
+      "lines": 372,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Staffordshire"
+    },
+    "9": {
+      "speaker": "p234",
+      "lines": 357,
+      "gender": "female",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "West Dumfries"
+    },
+    "10": {
+      "speaker": "p236",
+      "lines": 492,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Manchester"
+    },
+    "11": {
+      "speaker": "p237",
+      "lines": 339,
+      "gender": "male",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "Fife"
+    },
+    "12": {
+      "speaker": "p238",
+      "lines": 454,
+      "gender": "female",
+      "age": "22",
+      "accent": "NorthernIrish",
+      "region": "Belfast"
+    },
+    "13": {
+      "speaker": "p239",
+      "lines": 502,
+      "gender": "female",
+      "age": "22",
+      "accent": "English",
+      "region": "SW England"
+    },
+    "14": {
+      "speaker": "p240",
+      "lines": 377,
+      "gender": "female",
+      "age": "21",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "15": {
+      "speaker": "p241",
+      "lines": 353,
+      "gender": "male",
+      "age": "21",
+      "accent": "Scottish",
+      "region": "Perth"
+    },
+    "16": {
+      "speaker": "p243",
+      "lines": 393,
+      "gender": "male",
+      "age": "22",
+      "accent": "English",
+      "region": "London"
+    },
+    "17": {
+      "speaker": "p244",
+      "lines": 420,
+      "gender": "female",
+      "age": "22",
+      "accent": "English",
+      "region": "Manchester"
+    },
+    "18": {
+      "speaker": "p245",
+      "lines": 354,
+      "gender": "male",
+      "age": "25",
+      "accent": "Irish",
+      "region": "Dublin"
+    },
+    "19": {
+      "speaker": "p246",
+      "lines": 358,
+      "gender": "male",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "Selkirk"
+    },
+    "20": {
+      "speaker": "p247",
+      "lines": 475,
+      "gender": "male",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "Argyll"
+    },
+    "21": {
+      "speaker": "p248",
+      "lines": 376,
+      "gender": "female",
+      "age": "23",
+      "accent": "Indian",
+      "region": null
+    },
+    "22": {
+      "speaker": "p249",
+      "lines": 335,
+      "gender": "female",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "Aberdeen"
+    },
+    "23": {
+      "speaker": "p250",
+      "lines": 481,
+      "gender": "female",
+      "age": "22",
+      "accent": "English",
+      "region": "SE England"
+    },
+    "24": {
+      "speaker": "p251",
+      "lines": 364,
+      "gender": "male",
+      "age": "26",
+      "accent": "Indian",
+      "region": null
+    },
+    "25": {
+      "speaker": "p252",
+      "lines": 395,
+      "gender": "male",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "Edinburgh"
+    },
+    "26": {
+      "speaker": "p253",
+      "lines": 375,
+      "gender": "female",
+      "age": "22",
+      "accent": "Welsh",
+      "region": "Cardiff"
+    },
+    "27": {
+      "speaker": "p254",
+      "lines": 396,
+      "gender": "male",
+      "age": "21",
+      "accent": "English",
+      "region": "Surrey"
+    },
+    "28": {
+      "speaker": "p255",
+      "lines": 379,
+      "gender": "male",
+      "age": "19",
+      "accent": "Scottish",
+      "region": "Galloway"
+    },
+    "29": {
+      "speaker": "p256",
+      "lines": 319,
+      "gender": "male",
+      "age": "24",
+      "accent": "English",
+      "region": "Birmingham"
+    },
+    "30": {
+      "speaker": "p257",
+      "lines": 434,
+      "gender": "female",
+      "age": "24",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "31": {
+      "speaker": "p258",
+      "lines": 413,
+      "gender": "male",
+      "age": "22",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "32": {
+      "speaker": "p259",
+      "lines": 481,
+      "gender": "male",
+      "age": "23",
+      "accent": "English",
+      "region": "Nottingham"
+    },
+    "33": {
+      "speaker": "p260",
+      "lines": 356,
+      "gender": "male",
+      "age": "21",
+      "accent": "Scottish",
+      "region": "Orkney"
+    },
+    "34": {
+      "speaker": "p261",
+      "lines": 474,
+      "gender": "female",
+      "age": "26",
+      "accent": "NorthernIrish",
+      "region": "Belfast"
+    },
+    "35": {
+      "speaker": "p262",
+      "lines": 394,
+      "gender": "female",
+      "age": "23",
+      "accent": "Scottish",
+      "region": "Edinburgh"
+    },
+    "36": {
+      "speaker": "p263",
+      "lines": 471,
+      "gender": "male",
+      "age": "22",
+      "accent": "Scottish",
+      "region": "Aberdeen"
+    },
+    "37": {
+      "speaker": "p264",
+      "lines": 483,
+      "gender": "female",
+      "age": "23",
+      "accent": "Scottish",
+      "region": "West Lothian"
+    },
+    "38": {
+      "speaker": "p265",
+      "lines": 348,
+      "gender": "female",
+      "age": "23",
+      "accent": "Scottish",
+      "region": "Ross"
+    },
+    "39": {
+      "speaker": "p266",
+      "lines": 422,
+      "gender": "female",
+      "age": "22",
+      "accent": "Irish",
+      "region": "Athlone"
+    },
+    "40": {
+      "speaker": "p267",
+      "lines": 417,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Yorkshire"
+    },
+    "41": {
+      "speaker": "p268",
+      "lines": 406,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Southern England"
+    },
+    "42": {
+      "speaker": "p269",
+      "lines": 396,
+      "gender": "female",
+      "age": "20",
+      "accent": "English",
+      "region": "Newcastle"
+    },
+    "43": {
+      "speaker": "p270",
+      "lines": 462,
+      "gender": "male",
+      "age": "21",
+      "accent": "English",
+      "region": "Yorkshire"
+    },
+    "44": {
+      "speaker": "p271",
+      "lines": 454,
+      "gender": "male",
+      "age": "19",
+      "accent": "Scottish",
+      "region": "Fife"
+    },
+    "45": {
+      "speaker": "p272",
+      "lines": 411,
+      "gender": "male",
+      "age": "23",
+      "accent": "Scottish",
+      "region": "Edinburgh"
+    },
+    "46": {
+      "speaker": "p273",
+      "lines": 433,
+      "gender": "male",
+      "age": "23",
+      "accent": "English",
+      "region": "Suffolk"
+    },
+    "47": {
+      "speaker": "p274",
+      "lines": 466,
+      "gender": "male",
+      "age": "22",
+      "accent": "English",
+      "region": "Essex"
+    },
+    "48": {
+      "speaker": "p275",
+      "lines": 416,
+      "gender": "male",
+      "age": "23",
+      "accent": "Scottish",
+      "region": "Midlothian"
+    },
+    "49": {
+      "speaker": "p276",
+      "lines": 462,
+      "gender": "female",
+      "age": "24",
+      "accent": "English",
+      "region": "Oxford"
+    },
+    "50": {
+      "speaker": "p277",
+      "lines": 458,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "NE England"
+    },
+    "51": {
+      "speaker": "p278",
+      "lines": 409,
+      "gender": "male",
+      "age": "22",
+      "accent": "English",
+      "region": "Cheshire"
+    },
+    "52": {
+      "speaker": "p279",
+      "lines": 405,
+      "gender": "male",
+      "age": "23",
+      "accent": "English",
+      "region": "Leicester"
+    },
+    "53": {
+      "speaker": "p280",
+      "lines": 410,
+      "gender": "female",
+      "age": "25",
+      "accent": "Unknown",
+      "region": "France (mic2 files unavailable)"
+    },
+    "54": {
+      "speaker": "p281",
+      "lines": 459,
+      "gender": "male",
+      "age": "29",
+      "accent": "Scottish",
+      "region": "Edinburgh"
+    },
+    "55": {
+      "speaker": "p282",
+      "lines": 366,
+      "gender": "female",
+      "age": "23",
+      "accent": "English",
+      "region": "Newcastle"
+    },
+    "56": {
+      "speaker": "p283",
+      "lines": 469,
+      "gender": "female",
+      "age": "24",
+      "accent": "Irish",
+      "region": "Cork"
+    },
+    "57": {
+      "speaker": "p284",
+      "lines": 425,
+      "gender": "male",
+      "age": "20",
+      "accent": "Scottish",
+      "region": "Fife"
+    },
+    "58": {
+      "speaker": "p285",
+      "lines": 403,
+      "gender": "male",
+      "age": "21",
+      "accent": "Scottish",
+      "region": "Edinburgh"
+    },
+    "59": {
+      "speaker": "p286",
+      "lines": 467,
+      "gender": "male",
+      "age": "23",
+      "accent": "English",
+      "region": "Newcastle"
+    },
+    "60": {
+      "speaker": "p287",
+      "lines": 424,
+      "gender": "male",
+      "age": "23",
+      "accent": "English",
+      "region": "York"
+    },
+    "61": {
+      "speaker": "p288",
+      "lines": 412,
+      "gender": "female",
+      "age": "22",
+      "accent": "Irish",
+      "region": "Dublin"
+    },
+    "62": {
+      "speaker": "p292",
+      "lines": 411,
+      "gender": "male",
+      "age": "23",
+      "accent": "NorthernIrish",
+      "region": "Belfast"
+    },
+    "63": {
+      "speaker": "p293",
+      "lines": 396,
+      "gender": "female",
+      "age": "22",
+      "accent": "NorthernIrish",
+      "region": "Belfast"
+    },
+    "64": {
+      "speaker": "p294",
+      "lines": 423,
+      "gender": "female",
+      "age": "33",
+      "accent": "American",
+      "region": "San Francisco"
+    },
+    "65": {
+      "speaker": "p295",
+      "lines": 416,
+      "gender": "female",
+      "age": "23",
+      "accent": "Irish",
+      "region": "Dublin"
+    },
+    "66": {
+      "speaker": "p297",
+      "lines": 417,
+      "gender": "female",
+      "age": "20",
+      "accent": "American",
+      "region": "New York"
+    },
+    "67": {
+      "speaker": "p298",
+      "lines": 405,
+      "gender": "male",
+      "age": "19",
+      "accent": "Irish",
+      "region": "Tipperary"
+    },
+    "68": {
+      "speaker": "p299",
+      "lines": 405,
+      "gender": "female",
+      "age": "25",
+      "accent": "American",
+      "region": "California"
+    },
+    "69": {
+      "speaker": "p300",
+      "lines": 398,
+      "gender": "female",
+      "age": "23",
+      "accent": "American",
+      "region": "California"
+    },
+    "70": {
+      "speaker": "p301",
+      "lines": 411,
+      "gender": "female",
+      "age": "23",
+      "accent": "American",
+      "region": "North Carolina"
+    },
+    "71": {
+      "speaker": "p302",
+      "lines": 311,
+      "gender": "male",
+      "age": "20",
+      "accent": "Canadian",
+      "region": "Montreal"
+    },
+    "72": {
+      "speaker": "p303",
+      "lines": 352,
+      "gender": "female",
+      "age": "24",
+      "accent": "Canadian",
+      "region": "Toronto"
+    },
+    "73": {
+      "speaker": "p304",
+      "lines": 423,
+      "gender": "male",
+      "age": "22",
+      "accent": "NorthernIrish",
+      "region": "Belfast"
+    },
+    "74": {
+      "speaker": "p305",
+      "lines": 422,
+      "gender": "female",
+      "age": "19",
+      "accent": "American",
+      "region": "Philadelphia"
+    },
+    "75": {
+      "speaker": "p306",
+      "lines": 345,
+      "gender": "female",
+      "age": "21",
+      "accent": "American",
+      "region": "New York"
+    },
+    "76": {
+      "speaker": "p307",
+      "lines": 420,
+      "gender": "female",
+      "age": "23",
+      "accent": "Canadian",
+      "region": "Ontario"
+    },
+    "77": {
+      "speaker": "p308",
+      "lines": 423,
+      "gender": "female",
+      "age": "18",
+      "accent": "American",
+      "region": "Alabama"
+    },
+    "78": {
+      "speaker": "p310",
+      "lines": 423,
+      "gender": "female",
+      "age": "21",
+      "accent": "American",
+      "region": "Tennessee"
+    },
+    "79": {
+      "speaker": "p311",
+      "lines": 423,
+      "gender": "male",
+      "age": "21",
+      "accent": "American",
+      "region": "Iowa"
+    },
+    "80": {
+      "speaker": "p312",
+      "lines": 417,
+      "gender": "female",
+      "age": "19",
+      "accent": "Canadian",
+      "region": "Hamilton"
+    },
+    "81": {
+      "speaker": "p313",
+      "lines": 421,
+      "gender": "female",
+      "age": "24",
+      "accent": "Irish",
+      "region": "County Down"
+    },
+    "82": {
+      "speaker": "p314",
+      "lines": 423,
+      "gender": "female",
+      "age": "26",
+      "accent": "SouthAfrican",
+      "region": "Cape Town"
+    },
+    "83": {
+      "speaker": "p316",
+      "lines": 421,
+      "gender": "male",
+      "age": "20",
+      "accent": "Canadian",
+      "region": "Alberta"
+    },
+    "84": {
+      "speaker": "p317",
+      "lines": 423,
+      "gender": "female",
+      "age": "23",
+      "accent": "Canadian",
+      "region": "Hamilton"
+    },
+    "85": {
+      "speaker": "p318",
+      "lines": 422,
+      "gender": "female",
+      "age": "32",
+      "accent": "American",
+      "region": "Napa"
+    },
+    "86": {
+      "speaker": "p323",
+      "lines": 423,
+      "gender": "female",
+      "age": "19",
+      "accent": "SouthAfrican",
+      "region": "Pretoria"
+    },
+    "87": {
+      "speaker": "p326",
+      "lines": 399,
+      "gender": "male",
+      "age": "26",
+      "accent": "Australian",
+      "region": "English Sydney"
+    },
+    "88": {
+      "speaker": "p329",
+      "lines": 424,
+      "gender": "female",
+      "age": "23",
+      "accent": "American",
+      "region": null
+    },
+    "89": {
+      "speaker": "p330",
+      "lines": 423,
+      "gender": "female",
+      "age": "26",
+      "accent": "American",
+      "region": null
+    },
+    "90": {
+      "speaker": "p333",
+      "lines": 421,
+      "gender": "female",
+      "age": "19",
+      "accent": "American",
+      "region": "Indiana"
+    },
+    "91": {
+      "speaker": "p334",
+      "lines": 423,
+      "gender": "male",
+      "age": "18",
+      "accent": "American",
+      "region": "Chicago"
+    },
+    "92": {
+      "speaker": "p335",
+      "lines": 422,
+      "gender": "female",
+      "age": "25",
+      "accent": "NewZealand",
+      "region": "English"
+    },
+    "93": {
+      "speaker": "p336",
+      "lines": 418,
+      "gender": "female",
+      "age": "18",
+      "accent": "SouthAfrican",
+      "region": "Johannesburg"
+    },
+    "94": {
+      "speaker": "p339",
+      "lines": 423,
+      "gender": "female",
+      "age": "21",
+      "accent": "American",
+      "region": "Pennsylvania"
+    },
+    "95": {
+      "speaker": "p340",
+      "lines": 423,
+      "gender": "female",
+      "age": "18",
+      "accent": "Irish",
+      "region": "Dublin"
+    },
+    "96": {
+      "speaker": "p341",
+      "lines": 409,
+      "gender": "female",
+      "age": "26",
+      "accent": "American",
+      "region": "Ohio"
+    },
+    "97": {
+      "speaker": "p343",
+      "lines": 388,
+      "gender": "female",
+      "age": "27",
+      "accent": "Canadian",
+      "region": "Alberta"
+    },
+    "98": {
+      "speaker": "p345",
+      "lines": 397,
+      "gender": "male",
+      "age": "22",
+      "accent": "American",
+      "region": "Florida"
+    },
+    "99": {
+      "speaker": "p347",
+      "lines": 423,
+      "gender": "male",
+      "age": "26",
+      "accent": "SouthAfrican",
+      "region": "Johannesburg"
+    },
+    "100": {
+      "speaker": "p351",
+      "lines": 422,
+      "gender": "female",
+      "age": "21",
+      "accent": "NorthernIrish",
+      "region": "Derry"
+    },
+    "101": {
+      "speaker": "p360",
+      "lines": 424,
+      "gender": "male",
+      "age": "19",
+      "accent": "American",
+      "region": "New Jersey"
+    },
+    "102": {
+      "speaker": "p361",
+      "lines": 424,
+      "gender": "female",
+      "age": "19",
+      "accent": "American",
+      "region": "New Jersey"
+    },
+    "103": {
+      "speaker": "p362",
+      "lines": 123,
+      "gender": "female",
+      "age": "29",
+      "accent": "American",
+      "region": null
+    },
+    "104": {
+      "speaker": "p363",
+      "lines": 419,
+      "gender": "male",
+      "age": "22",
+      "accent": "Canadian",
+      "region": "Toronto"
+    },
+    "105": {
+      "speaker": "p364",
+      "lines": 301,
+      "gender": "male",
+      "age": "23",
+      "accent": "Irish",
+      "region": "Donegal"
+    },
+    "106": {
+      "speaker": "p374",
+      "lines": 424,
+      "gender": "male",
+      "age": "28",
+      "accent": "Australian",
+      "region": "English"
+    },
+    "107": {
+      "speaker": "p376",
+      "lines": 424,
+      "gender": "male",
+      "age": "22",
+      "accent": "Indian",
+      "region": null
+    }
+  },
+  "root": "/mnt/data/DataAugmentation/VCTK-Corpus-0.92",
+  "mic": "mic1",
+  "stats": {
+    "no_audio": 300,
+    "empty_text": 0,
+    "audio_without_transcripts": [
+      "p315"
+    ],
+    "transcripts_without_audio": [],
+    "ignored_dirs": [
+      "s5"
+    ]
+  }
+}

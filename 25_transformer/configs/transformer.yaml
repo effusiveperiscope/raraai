@@ -367,4 +367,4 @@ train:
   ood_samples: 1
   ood_frames: 512           # 512 code frames = 5.12 s (100 Hz frame rate)
   ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
-  ood_sid: null             # null -> speaker of the first sampled val item
+  ood_sid: 612             # null -> speaker of the first sampled val item

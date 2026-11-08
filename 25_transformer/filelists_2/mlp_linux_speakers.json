@@ -1,0 +1,89 @@
+{
+  "corpus": "mlp_linux",
+  "n_lines": 35543,
+  "n_speakers": 15,
+  "speakers": {
+    "0": {
+      "speaker": "Twilight",
+      "gender": null,
+      "lines": 7687
+    },
+    "1": {
+      "speaker": "Pinkie",
+      "gender": null,
+      "lines": 4105
+    },
+    "2": {
+      "speaker": "Applejack",
+      "gender": null,
+      "lines": 4680
+    },
+    "3": {
+      "speaker": "Rainbow",
+      "gender": null,
+      "lines": 4444
+    },
+    "4": {
+      "speaker": "Fluttershy",
+      "gender": null,
+      "lines": 3156
+    },
+    "5": {
+      "speaker": "Rarity",
+      "gender": null,
+      "lines": 4292
+    },
+    "6": {
+      "speaker": "Spike",
+      "gender": null,
+      "lines": 3156
+    },
+    "7": {
+      "speaker": "Sweetie Belle",
+      "gender": null,
+      "lines": 1194
+    },
+    "8": {
+      "speaker": "Sunset Shimmer",
+      "gender": null,
+      "lines": 790
+    },
+    "9": {
+      "speaker": "Celestia",
+      "gender": null,
+      "lines": 865
+    },
+    "10": {
+      "speaker": "Luna",
+      "gender": null,
+      "lines": 423
+    },
+    "12": {
+      "speaker": "Big Mac",
+      "gender": null,
+      "lines": 278
+    },
+    "13": {
+      "speaker": "Tirek",
+      "gender": null,
+      "lines": 247
+    },
+    "14": {
+      "speaker": "Flash Sentry",
+      "gender": null,
+      "lines": 65
+    },
+    "15": {
+      "speaker": "Autumn Blaze",
+      "gender": null,
+      "lines": 161
+    }
+  },
+  "filelist": "filelists_2/mlp_linux.txt",
+  "stats": {
+    "bad_lines": 0,
+    "missing_audio": 0,
+    "unparsed_names": 0,
+    "multiple_names_per_sid": {}
+  }
+}

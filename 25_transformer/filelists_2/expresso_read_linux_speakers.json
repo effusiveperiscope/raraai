@@ -1,0 +1,40 @@
+{
+  "corpus": "expresso_read_linux",
+  "n_lines": 11596,
+  "n_speakers": 4,
+  "speakers": {
+    "0": {
+      "speaker": "ex01",
+      "lines": 2897,
+      "gender": "male"
+    },
+    "1": {
+      "speaker": "ex02",
+      "lines": 2900,
+      "gender": "female"
+    },
+    "2": {
+      "speaker": "ex03",
+      "lines": 2900,
+      "gender": "male"
+    },
+    "3": {
+      "speaker": "ex04",
+      "lines": 2899,
+      "gender": "female"
+    }
+  },
+  "root": "/mnt/data/DataAugmentation/expresso",
+  "skipped_styles": [
+    "longform",
+    "singing"
+  ],
+  "stats": {
+    "no_transcript": 0,
+    "longform_skipped": 8,
+    "style_skipped": {
+      "singing": 11
+    },
+    "unused_transcripts": 19
+  }
+}
