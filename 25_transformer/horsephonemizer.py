@@ -16,6 +16,32 @@ HOMOGRAPHS = g2p.homograph2features
 _WORD_CHARS = re.compile(r"[^a-z']")
 # Splits a token into (leading punctuation, word, trailing punctuation).
 _TOKEN_PARTS = re.compile(r"^([^A-Za-z']*)(.*?)([^A-Za-z']*)$")
+# Characters split off a token's ends before a `new_horsewords.clean` lookup:
+# the ones g2p_en passes through as standalone ARPAbet tokens, so ``SPAY1K.``
+# keys ``SPAY1K`` and keeps its ``.``. ``'`` and ``-`` are deliberately *not*
+# here because they are part of real dictionary keys (``'BOUT``, ``SPIKE'S``,
+# ``CEL-``), and accented letters are left alone for the same reason.
+_DICT_PUNCT = frozenset('.,?!;:"()[]{}')
+# Of those, the ones put back on the result: exactly the characters the g2pen
+# tokenizer has ids for (13, 8, 84, 59, 905 -- see `features.keep_punctuation`)
+# and the ones g2p_en itself emits as punctuation tokens. Everything else in
+# `_DICT_PUNCT` is dropped, because g2p_en's own `re.sub` deletes it too and a
+# ``"`` or ``;`` would otherwise tokenise to ``[UNK]``.
+_KEEP_PUNCT = frozenset('.,?!-')
+
+
+def _split_punctuation(s):
+    """Split `s` into ``(prefix, word, suffix)`` around `_DICT_PUNCT`.
+
+    ``'Monday,'`` -> ``('', 'Monday', ',')``; ``"'BOUT"`` and ``'CEL-'`` come
+    back whole; ``'...'`` yields an empty `word`.
+    """
+    start, end = 0, len(s)
+    while start < end and s[start] in _DICT_PUNCT:
+        start += 1
+    while end > start and s[end - 1] in _DICT_PUNCT:
+        end -= 1
+    return s[:start], s[start:end], s[end:]
 
 
 class HorsePhonemizer:
@@ -107,8 +133,35 @@ class HorsePhonemizer:
         return ''.join(p)
 
     def _dictionary_pronunciation(self, s, tag=None):
-        """Hand-dictionary lookup for `s`, preferring a POS-qualified key."""
-        s_up = s.strip().upper()
+        """Hand-dictionary lookup for `s`, preferring a POS-qualified key.
+
+        The token's surrounding punctuation is split off before the lookup and
+        re-appended to the result, because the dictionary is keyed on bare words.
+        A plain ``s.strip()`` (whitespace only) made every punctuated token miss
+        the hand dictionary and fall through to g2p_en, so a pinned ``MONDAY``
+        was ignored in "Monday, Tuesday, ..." and the `USE/VB` pin in
+        "Use, don't abuse." -- the exact words the dictionary exists to fix.
+
+        Only `_DICT_PUNCT` is stripped: `'` and `-` are part of real keys
+        (``'BOUT``, ``SPIKE'S``, the ``CEL-`` truncations) and accented letters
+        are kept, so every key still matches the token the way it did before.
+        """
+        prefix, word, suffix = _split_punctuation(s.strip())
+        if not word:
+            # Pure punctuation: nothing for the dictionary to say.
+            return None
+        pron = self._dict_pronunciation(word.upper(), tag)
+        if pron is None:
+            return None
+        # Drop the punctuation g2p_en would have deleted (see `_KEEP_PUNCT`), so
+        # the dictionary path cannot emit a character the tokenizer has no id
+        # for and the two phonemizer paths keep the same shape.
+        prefix = ''.join(ch for ch in prefix if ch in _KEEP_PUNCT)
+        suffix = ''.join(ch for ch in suffix if ch in _KEEP_PUNCT)
+        return prefix + pron + suffix
+
+    def _dict_pronunciation(self, s_up, tag=None):
+        """Dictionary value for the bare-word key `s_up`, POS-qualified first."""
         if tag is not None:
             for key in (f'{s_up}/{tag}', f'{s_up}/{tag[:2]}'):
                 if key in self.horsedict:

@@ -231,6 +231,37 @@ pronunciation (~1 % of the `25_stage2_base1` utterances are affected, mostly
   is not in its homograph table at all, so it falls back to `cmudict[0]` =
   the metal). Matching is exact tag first, then two-letter prefix, so
   `USE/VB` covers `VB/VBD/VBP/VBZ`; POS-qualified > plain word > g2p_en.
+- **The dictionary is punctuation-transparent.** `_dictionary_pronunciation`
+  splits punctuation off both ends of the token (`_split_punctuation`) before
+  keying the lookup and re-attaches it to the result. It used to `strip()`
+  whitespace only, so *every* punctuated token missed the hand dictionary and
+  fell through to g2p_en — "Use, don't abuse." was phonemized from cmudict
+  despite the `USE/VB` pin, and a pinned `MONDAY` was ignored in
+  "Monday, Tuesday, ...", i.e. exactly the words the dictionary exists to fix.
+  Two details keep it safe: only `.,?!;:"()[]{}` count as punctuation there
+  (`'` and `-` are part of real keys — `'BOUT`, `SPIKE'S`, the `CEL-`
+  truncations — and accented letters like `APPLIQUÉ` are left alone), and only
+  `.,?!-` are put *back* (`_KEEP_PUNCT`), because that is the set the g2pen
+  tokenizer has ids for (13, 8, 84, 59, 905 — the same set `keep_punctuation`
+  enforces on the aligner path) and the set g2p_en itself emits; a `"` or `;`
+  would otherwise become `[UNK]`.
+
+**Non-heteronym variant choice: cmudict variant 1 always wins.** For a word
+with several cmudict pronunciations and no homograph entry, g2p_en does
+`pron = self.cmu[word][0]` — the *first variant*, which is not necessarily the
+spelling-consistent one. The `-day` family is the visible case: cmudict lists
+`MONDAY 1 M AH1 N D IY0` / `MONDAY 2 M AH1 N D EY2` (likewise TUESDAY,
+WEDNESDAY, FRIDAY, SATURDAY, and THURSDAY'S/SATURDAYS), so `Monday, Tuesday, …`
+came out *Mun-dee, Toos-dee* while THURSDAY/SUNDAY — whose variant 1 *is* `EY2`
+— came out with `EY2`, i.e. a 5-vs-2 split inside one sentence. All 21
+day / `-days` / `-day's` forms are now pinned to `D EY2` at the end of
+`new_horsewords.clean`, which is the intended place for it (a dictionary entry,
+not a change to g2p_en's variant policy, which would move thousands of other
+words). `YESTERDAY`/`TODAY`/`BIRTHDAY`/`HOLIDAY`/`WEEKDAY` already have `EY`
+variants first and are untouched. This changes `phone_ids`, so an existing
+stage-2 corpus needs `--only phones` (see below) to stay consistent with
+inference — and a model trained on the old ids has never seen `EY2` in that
+position, so pair it with the re-phonemized corpus rather than mixing.
 
 Because `phone_ids` are baked into the tensors, a phonemizer change only takes
 effect on a run that rebuilds them — which is now cheap and touches nothing
@@ -987,7 +1018,9 @@ a *batch-independent* per-step loop.
   step logging). Validation audio for stage 2 is optionally logged by loading a
   frozen stage-1 Generator (`train.generator_checkpoint`); it is non-fatal if
   the checkpoint is missing, and every visual/audio log is skipped without a
-  stage-1 checkpoint or TensorBoard logger.
+  stage-1 checkpoint or TensorBoard logger. That Generator is held **outside**
+  the module tree (`TrainModule._net_g_holder`, read through the `net_g`
+  property), not as a submodule — see §6.19.
 - **Stage-2 diagnostics.** `2_training.py` logs, per codebook, `{train,val}_`
   `loss/`, `acc/`, `usage_entropy/` (`spec0..7`, `pitch8..9`) — these per-book
   curves are always **unweighted** (raw diagnostics), whereas `{train,val}_loss`
@@ -1255,6 +1288,39 @@ a *batch-independent* per-step loop.
       that silences one victim while the root logger stays at DEBUG for
       everything else.
 
+19. **The frozen stage-1 Generator is NOT a `TrainModule` submodule.** It used
+    to be (`self.net_g = load_generator(...)` in `setup()`), and because
+    `nn.Module.__setattr__` registers any `nn.Module` assigned to an attribute,
+    all 497 of its tensors went into `state_dict()` — i.e. into every stage-2
+    checkpoint (+~134 MB each, verified: 822 keys = 325 `net.*` + 497
+    `net_g.*`) and into Lightning's **strict** load contract. `setup()` only
+    attaches it when `train.generator_checkpoint` resolves *on the current
+    host*, so resuming on a box without that stage-1 run crashed with
+
+    ```
+    RuntimeError: Error(s) in loading state_dict for TrainModule:
+        Missing key(s) in state_dict: "net_g.enc_q.pre.weight", ...
+    ```
+
+    (Lightning calls `trainer.strategy.load_model_state_dict` →
+    `lightning_module.load_state_dict(ckpt["state_dict"], strict=...)`, and it
+    calls `setup()` *before* restoring, so the failure depends on the host, not
+    on the run being corrupt.) The generator now lives in
+    `TrainModule._net_g_holder` (a plain list, so nothing is registered) and is
+    read through the read-only `net_g` property, which keeps every
+    `self.net_g` call site working; `state_dict()` is back to the 325 `net.*`
+    keys. Consequences:
+    - Old checkpoints are still resumable: `TrainModule.load_state_dict`
+      drops any `net_g.*` key with a printed NOTE (those weights are never
+      authoritative — the generator is rebuilt from
+      `train.generator_checkpoint`). Never re-register the generator just to
+      silence that message.
+    - Do not assign a `Generator` to a plain-looking attribute of a
+      `LightningModule` again. The same applies to any other inference-only
+      helper model (`nn.ModuleList`/`ModuleDict` would register it too).
+    - A missing `train.generator_checkpoint` is now merely "audio decode off"
+      (printed on the first `setup()`), never a resume failure.
+
 ---
 
 ## 7. Useful commands
@@ -1353,6 +1419,12 @@ python test_stage1_codes.py test.wav \
 # layout/values, --compile for torch.compile, --batch_size 32 to sweep.
 python scratch/bench_stage2_step.py
 python scratch/bench_stage2_step.py --diagnostics_per_step   # no metric gating
+
+# What is actually inside a stage-2 checkpoint? A run written before §6.19 also
+# carries the frozen stage-1 Generator (497 net_g.* keys -> 822 total); current
+# code writes 325 net.* keys and `load_state_dict` absorbs the legacy ones, so
+# resuming either of them works.
+python -c "import torch; sd = torch.load('checkpoints_stage2/<exp>/last.ckpt', map_location='cpu', weights_only=True, mmap=True)['state_dict']; print(len(sd), 'keys,', sum(k.startswith('net_g.') for k in sd), 'net_g.*')"
 
 # fdisk-style REPL for stage-2 inference (scratch/stage2_repl.py): press a key
 # per command, type a sentence, sample codes for a speaker id and decode them

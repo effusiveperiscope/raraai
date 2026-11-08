@@ -309,7 +309,13 @@ class TrainModule(pl.LightningModule):
         super().__init__()
         self.net = net
         self.config = config
-        self.net_g = None
+        # The frozen stage-1 Generator used for validation-time audio lives in
+        # a plain list, NOT in `self.net_g = <Generator>`: `nn.Module.__setattr__`
+        # registers *any* `nn.Module` assigned to an attribute as a child
+        # module, which would put its 497 tensors into `state_dict()` of every
+        # stage-2 checkpoint and -- the real problem -- into Lightning's strict
+        # `load_state_dict` contract. See the `net_g` property below.
+        self._net_g_holder = [None]
 
         # Gradient clipping (applied in _clip_and_log_grads, i.e. before every
         # optimizer step). 0 disables clipping; the norm is still logged. See
@@ -382,6 +388,52 @@ class TrainModule(pl.LightningModule):
         # list means "tried and unavailable" (never retried, never fatal).
         self._ood_phone_ids = None
 
+    # ------------------------------------------------------------------ #
+    # Frozen stage-1 Generator (validation-time audio only)
+    #
+    # Why this is a property over a plain list instead of `self.net_g`:
+    # `setup()` attaches the generator only when `train.generator_checkpoint`
+    # exists *and* loads on the current host, so a checkpoint written on a box
+    # that had the stage-1 run used to carry `net_g.*` tensors that a box
+    # without it could not satisfy:
+    #
+    #     RuntimeError: Error(s) in loading state_dict for TrainModule:
+    #         Missing key(s) in state_dict: "net_g.enc_q.pre.weight", ...
+    #
+    # It is a frozen, inference-only copy: the only authoritative source is the
+    # stage-1 checkpoint path, never the stage-2 file. Keeping it out of the
+    # module tree leaves `state_dict()` at the 325 `net.*` keys this module
+    # actually trains (and keeps stage-2 checkpoints ~134 MB smaller).
+    # ------------------------------------------------------------------ #
+    @property
+    def net_g(self):
+        """The frozen stage-1 ``Generator``, or ``None`` when unavailable."""
+        return self._net_g_holder[0]
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load a checkpoint, discarding legacy ``net_g.*`` tensors.
+
+        Checkpoints written before the frozen generator was moved out of the
+        module tree contain it as a submodule (497 tensors, ~134 MB), so a
+        strict load into today's ``TrainModule`` would fail with
+        ``Unexpected key(s) in state_dict: "net_g.enc_q.pre.weight", ...``.
+        Those weights are not ours to restore -- the generator is rebuilt from
+        ``train.generator_checkpoint`` in ``setup()`` -- so they are dropped
+        here rather than forcing every existing run through a checkpoint
+        rewrite. Lightning calls this via ``strategy.load_model_state_dict``
+        (``lightning_module.load_state_dict(ckpt["state_dict"], strict=...)``),
+        so both ``--resume_from`` and auto-resume go through it.
+        """
+        stale = [k for k in state_dict if k.startswith("net_g.")]
+        if stale:
+            state_dict = {k: v for k, v in state_dict.items()
+                          if not k.startswith("net_g.")}
+            print(f"NOTE: ignored {len(stale)} stale 'net_g.*' tensor(s) in the "
+                  f"checkpoint -- the frozen stage-1 Generator used to be saved "
+                  f"as a TrainModule submodule. It is loaded from "
+                  f"train.generator_checkpoint instead.")
+        return super().load_state_dict(state_dict, strict=strict)
+
     def _reset_text_delta(self):
         """Clear the per-epoch accumulators of the text-conditioning probe."""
         self._text_delta_sum = 0.0
@@ -407,13 +459,22 @@ class TrainModule(pl.LightningModule):
         ckpt = hp.train.get("generator_checkpoint", None)
         if ckpt is not None and os.path.exists(ckpt):
             try:
-                self.net_g = load_generator(ckpt, hp, self.device)
+                # Held outside the module tree on purpose (see the `net_g`
+                # property): assigning a Generator to a plain attribute would
+                # register it as a submodule and write it into every checkpoint.
+                self._net_g_holder[0] = load_generator(ckpt, hp, self.device)
                 for p in self.net_g.parameters():
                     p.requires_grad = False
                 print(f"Loaded stage-1 Generator for sampling: {ckpt}")
             except Exception as e:  # sampling is optional
                 print(f"Could not load Generator ({ckpt}): {e}")
-                self.net_g = None
+                self._net_g_holder[0] = None
+        elif ckpt is not None:
+            # Worth saying out loud: this used to be the difference between a
+            # resumable and an unresumable run (see `load_state_dict`). It is
+            # harmless now -- audio/infill logging is simply off.
+            print(f"NOTE: train.generator_checkpoint does not exist "
+                  f"({ckpt}); sampling still works, audio decode is off.")
         self.hp = hp
 
     # ------------------------------------------------------------------ #
