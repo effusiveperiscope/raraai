@@ -740,6 +740,56 @@ codebook **one extra output class** at index `vocab_size + 1` (pad/BOS stays at
   simply ignores it.
 
 
+### Fill-in-the-middle / span regeneration (stage 2, v0.6-fim)
+
+`transformer.fim: true` adds **two sentinel classes per codebook** (`SUF`, `MID`,
+at `vocab+2`/`vocab+3` when EOS is on, `vocab+1`/`+2` otherwise) and, with
+`train.fim_rate > 0`, mixes prefix–suffix–middle reordered training samples with
+plain AR samples. It exists so the model can **regenerate a span** at inference:
+given a bad middle frame range, keep the prefix and suffix and resynthesise the
+hole.
+
+- **Order is `prefix <SUF> suffix <MID> middle` (PSM).** The middle is generated
+  *last* in the sequence, so its length is free — but for the "regenerate this
+  span" UX we fix it (below), which removes the duration problem entirely.
+- **Frame-level reorder.** `CodeTransformer.apply_fim` moves whole frames (all
+  `K` codebooks together) and drops the sentinels in as full frames *before*
+  `build_delay_pattern`, so the delay pattern, masking and `code_loss` are
+  untouched. It is vectorised (one gather index shared by all codebooks), so it
+  adds no GPU→CPU sync. AR and FIM items can share a batch: AR items are padded
+  to the same width and masked exactly like the existing padding. The 2 extra
+  frames per FIM item are ≈0.8 % of `max_frames`.
+- **`transformer.region_cond`** (independent switch) adds a decoder-side
+  **region embedding** (0 normal / 1 prefix / 2 suffix / 3 middle) to every
+  column, like `spk_emb`. It is a *dense* side channel that says what role a
+  position plays; the `SUF`/`MID` sentinels are *sparse* boundary markers and are
+  smeared across `K` columns by the delay pattern, so the region tag is what makes
+  "am I in the middle?" trivial for the decoder. Set `region_cond: false` for the
+  sentinel-only ablation.
+- **Spans** are chosen in `dataset_codes.CodeDataset._sample_fim` (training items
+  only, never validation): `mid_len ∈ [fim_min_frames, fim_mid_frac·T]`,
+  `prefix_len ∈ [0, T−mid_len]` uniform. `2_training.py` passes the batch fields
+  through; `code_loss` reports `fim_middle_loss` (CE over middle targets only,
+  diagnostics steps) and `fim_frac` (fraction of the batch that was FIM).
+- **Inference**: `CodeTransformer.infill(phonemes, sid, prefix_codes,
+  suffix_codes, middle_frames)` builds the `prefix <SUF> suffix <MID>` prompt and
+  samples exactly `middle_frames`, masking sentinels/pad/EOS. Splice the result in
+  *time* order `prefix + middle + suffix`. `generate` still does plain AR and now
+  also masks the sentinel ids. `2_training.py:_log_infill` runs this probe every
+  `sample_interval` epochs on a val item and logs target-vs-regenerated codes /
+  audio plus `sample/fim_middle_code_match_{j}`.
+- **EOS + FIM.** EOS is appended after the middle only when the suffix is empty
+  (the middle reaches the clip's real end); a mid-clip middle gets no EOS,
+  exactly like a mid-clip AR crop.
+- **Checkpoints**: `+2` rows is a shape change like EOS, so `--resume_from` a
+  pre-FIM checkpoint fails; use a fresh `exp_name` + `--transfer_from`
+  (`expand_state_dict_with_special`, formerly `expand_state_dict_with_eos`,
+  zero-pads the new rows). `2_training.py:check_special_layout` guards both
+  directions. **No re-preprocessing** — the codes are unchanged.
+
+`test_fim.py` is the CPU smoke test (apply_fim reorder, mixed-batch loss,
+sentinel masking in `generate`, `infill`), safe to run next to a GPU job.
+
 ### Optimizers & manual optimization (stage 2)
 
 `TrainModule` splits the parameters between **two optimizers** via
@@ -1161,6 +1211,19 @@ a *batch-independent* per-step loop.
     config for a fine-tune — the code space is the whole point, and a changed
     `codebook_size`/`code_dim` is a shape error at load time anyway.
 
+17. **`transformer.fim` changes the parameter shapes** (like `eos_token`): every
+    codebook embedding/head grows by 2 rows (`SUF`, `MID`), so a pre-FIM
+    checkpoint cannot be `--resume_from`'d. Start a fresh `exp_name` and
+    warm-start with `--transfer_from` (`expand_state_dict_with_special`
+    zero-pads the new rows). `2_training.py:check_special_layout` guards both
+    directions (it also covers `eos_token` now). `transformer.region_cond` adds
+    a `decoder.region_emb` table — also new params, also fine via
+    `--transfer_from`. **No re-preprocessing** is needed: the codes are
+    unchanged, so only `train.fim_rate` / `fim_min_frames` / `fim_mid_frac`
+    change, and those are pure training knobs. The sentinel ids are out of
+    range for the stage-1 codec, so `generate`/`infill` mask them out of every
+    sampled column — if you add another sampling path, do the same.
+
 ---
 
 ## 7. Useful commands
@@ -1260,6 +1323,22 @@ python test_stage1_codes.py test.wav \
 python scratch/bench_stage2_step.py
 python scratch/bench_stage2_step.py --diagnostics_per_step   # no metric gating
 
+# fdisk-style REPL for stage-2 inference (scratch/stage2_repl.py): press a key
+# per command, type a sentence, sample codes for a speaker id and decode them
+# with the frozen stage-1 Generator.  Also compares a free-running sample
+# against a val item's ground truth (`v`), writes wavs (`w`) and switches to
+# another stage-2 checkpoint at runtime (`s`, prompt; `?` lists the runs under
+# checkpoints_stage2/).  No infill: the shipped runs are pre-FIM, so the
+# SUF/MID classes are untrained.  The eos_token/fim/region_cond layout is read
+# back from the checkpoint on every load, so a config newer than its checkpoint
+# (or several runs with different layouts in one session) still loads the right
+# thing.
+python scratch/stage2_repl.py
+python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_v0.5a/last.ckpt --no_audio
+python scratch/stage2_repl.py --list_checkpoints            # just list the runs
+python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \
+    --frames 200 --out scratch/repl_out/hello.wav      # one-shot
+
 # Ad-hoc smoke tests (many modules have an `if __name__ == "__main__"` block)
 python modeling/transformer.py    # constructs a CodeTransformer, runs fwd + generate
 python modeling/generator.py      # constructs a Generator, runs infer
@@ -1268,6 +1347,10 @@ python modeling/generator.py      # constructs a Generator, runs infer
 # run next to a training job; --device cuda for speed)
 python test_stage2_conditioning.py \
     --checkpoint checkpoints_stage2/transformer_v0.4.1/last.ckpt --batches 4
+
+# FIM / span-regeneration smoke test (CPU; safe next to a GPU training job):
+# apply_fim reorder, mixed AR+FIM loss, sentinel masking in generate, infill
+python test_fim.py
 
 # Phonemization smoke test: both stage-2 paths (transcript-only vs aligner),
 # per-word word|tag|phones tables plus PASS/FAIL checks and a cross-path diff

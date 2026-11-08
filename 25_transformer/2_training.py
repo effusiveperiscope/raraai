@@ -26,7 +26,7 @@ import pytorch_lightning as pl
 from commons import (load_state_dict_mismatch, load_submodule_prefix,
                      matplotlib_to_tensorboard)
 from dataset_codes import CodeCollator, CodeDataset
-from modeling.transformer import CodeTransformer, expand_state_dict_with_eos
+from modeling.transformer import CodeTransformer, expand_state_dict_with_special
 
 import ultimate_xc
 import logging
@@ -563,15 +563,17 @@ class TrainModule(pl.LightningModule):
                     if torch.cuda.is_available() else None)
         impl = self.net.decoder._forward_impl
 
-        def compiled_forward(codes, memory, memory_mask=None, sid=None):
+        def compiled_forward(codes, memory, memory_mask=None, sid=None,
+                             region=None):
             # Explicit signature (not a ``lambda``) because ``code_loss`` calls
-            # the decoder as ``decoder(inputs, memory, memory_mask, sid=sid)``
-            # and ``torch.compile`` rejects unknown keyword arguments.
-            return impl(codes, memory, memory_mask, sid, False)
+            # the decoder as ``decoder(inputs, memory, memory_mask, sid=sid,
+            # region=region)`` and ``torch.compile`` rejects unknown keyword
+            # arguments.
+            return impl(codes, memory, memory_mask, sid, region, False)
 
         try:
             compiled = torch.compile(compiled_forward, dynamic=True)
-            compiled(codes, memory, memory_mask, sid)
+            compiled(codes, memory, memory_mask, sid, None)
             self.net.decoder.forward = compiled
             print("torch.compile: decoder (DelayCodebookDecoder._forward_impl)")
         except Exception as exc:
@@ -662,6 +664,16 @@ class TrainModule(pl.LightningModule):
 
             if self.net_g is not None:
                 self._log_audio(j, gt, codes[0], batch["sid"])
+
+            if self.net.fim:
+                # Regenerate a fixed-length middle span of the *ground-truth*
+                # item and log target-vs-regenerated codes/audio.  This is the
+                # direct "does infill work?" view (the free-running samples above
+                # are plain AR generation).
+                try:
+                    self._log_infill(j, batch, temperature, top_k)
+                except Exception as e:
+                    print(f"FIM infill probe failed: {e}")
 
             if probe_n > 0 and len(candidates) > 1:
                 own = int(batch["sid"][0].item())
@@ -769,6 +781,45 @@ class TrainModule(pl.LightningModule):
             plot_mel_comparison_figure(
                 audio_gt, audio_pred, sr, hop,
                 f"log-mel @ step {self.global_step}"))
+
+    def _log_infill(self, j, batch, temperature, top_k):
+        """Regenerate a fixed-length middle span of a ground-truth item.
+
+        Picks ``prefix = T//3`` and ``middle = T//3`` frames (leaving a suffix),
+        blanks the middle, calls :meth:`CodeTransformer.infill` with the known
+        prefix/suffix, and logs target-vs-regenerated codes (and audio when a
+        stage-1 Generator is loaded).  ``sample/fim_middle_code_match_{j}`` is
+        the free-running agreement of the regenerated middle with the original;
+        it is a *sample* number (voice sampling variance means it is never 1.0
+        for a good model), but a value near chance means the middle is ignored.
+        """
+        T = int(batch["code_lengths"][0].item())
+        if T < 6:
+            return
+        p = max(1, T // 3)
+        m = max(2, T // 3)
+        if p + m >= T:
+            m = T - p - 1
+        if m < 2:
+            return
+        n_spec = self.net.spec_codebook_num
+        codes = torch.cat([batch["spec_codes"][0], batch["pitch_codes"][0]],
+                          dim=0)[:, :T]                    # (K, T)
+        prefix = codes[:, :p].unsqueeze(0)
+        suffix = codes[:, p + m:T].unsqueeze(0)
+        middle = self.net.infill(
+            batch["phone_ids"][:1], batch["phone_lengths"][:1], batch["sid"][:1],
+            prefix, suffix, m, temperature=temperature, top_k=top_k,
+        )                                                       # (1, K, m)
+        regen = torch.cat([prefix, middle, suffix], dim=2)[0]  # (K, T)
+        self._log_code_maps(f"fim{j}", codes, regen)
+        match = (middle[0, :, :m] == codes[:, p:p + m]).float().mean()
+        self._add_scalar(f"sample/fim_middle_code_match_{j}", match)
+        self._add_scalar(f"sample/fim_spec_code_match_{j}",
+                         (middle[0, :n_spec, :m] == codes[:n_spec, p:p + m])
+                         .float().mean())
+        if self.net_g is not None:
+            self._log_audio(f"fim{j}", codes, regen, batch["sid"][:1])
 
     def _log_speaker_probe(self, j, batch, sids, gen_frames, temperature,
                            top_k):
@@ -1043,7 +1094,8 @@ class TrainModule(pl.LightningModule):
         on_epoch = not on_step
         kw = dict(on_step=on_step, on_epoch=on_epoch, logger=True)
         self.log(f"{prefix}_loss", out["loss"], prog_bar=True, **kw)
-        for key in ("spec_loss", "pitch_loss", "acc", "spec_acc", "pitch_acc"):
+        for key in ("spec_loss", "pitch_loss", "acc", "spec_acc", "pitch_acc",
+                    "fim_middle_loss", "fim_frac"):
             if key in out:
                 self.log(f"{prefix}_{key}", out[key], **kw)
 
@@ -1277,15 +1329,16 @@ def parse_args():
     return config, args
 
 
-def check_eos_layout(state_dict, net, source):
-    """Fail loudly when a checkpoint's EOS layout disagrees with ``net``.
+def check_special_layout(state_dict, net, source):
+    """Fail loudly when a checkpoint's special-class layout disagrees with ``net``.
 
-    ``transformer.eos_token`` decides whether each codebook has one extra EOS
-    class, so switching it changes the codebook embedding/head shapes.  A
-    ``--resume_from`` cannot absorb that (Lightning's strict load would fail on
-    ~30 tensors and the optimizer state is positional), and a ``--transfer_from``
-    can only grow an EOS-less checkpoint (``expand_state_dict_with_eos`` has no
-    way to *shrink* one), so both paths call this first.
+    ``transformer.eos_token`` and ``transformer.fim`` each add classes to every
+    codebook (EOS; SUF/MID), so switching either changes the embedding/head
+    shapes.  A ``--resume_from`` cannot absorb that (Lightning's strict load
+    would fail on ~30 tensors and the optimizer state is positional), and a
+    ``--transfer_from`` can only *grow* a narrower checkpoint
+    (``expand_state_dict_with_special`` has no way to shrink one), so both paths
+    call this first.
 
     Args:
         state_dict: checkpoint tensors, keyed with the ``net.`` prefix.
@@ -1294,23 +1347,17 @@ def check_eos_layout(state_dict, net, source):
     """
     key = "net.decoder.embeds.0.weight"
     w = state_dict.get(key)
-    want = net.vocab_sizes[0] + 1 + int(net.eos_token)
+    want = net.decoder.num_classes[0]
     if w is None or w.shape[0] == want:
         return
-    has_eos = w.shape[0] == want + 1
-    if not has_eos:
-        advice = (f"Either set transformer.eos_token to false, or start a new "
-                  f"exp_name and warm-start with --transfer_from {source} "
-                  f"(which pads the old rows with zeros and trains the new EOS "
-                  f"class from scratch).")
-    else:
-        advice = (f"This checkpoint was trained *with* EOS, so set "
-                  f"transformer.eos_token to true (there is no helper to drop "
-                  f"the EOS class again).")
+    advice = (f"Either match transformer.eos_token / transformer.fim to this "
+              f"checkpoint, or start a new exp_name and warm-start with "
+              f"--transfer_from {source} (which zero-pads the smaller layout up "
+              f"to the new special classes).  There is no helper to *drop* a "
+              f"special class again.")
     raise SystemExit(
         f"ERROR: {source} has {key} with {w.shape[0]} rows, but this model "
-        f"needs {want} (EOS class in the checkpoint: {has_eos}; "
-        f"transformer.eos_token here: {net.eos_token}).  {advice}")
+        f"needs {want} (eos_token={net.eos_token}, fim={net.fim}).  {advice}")
 
 
 def train(config, resume_from=None, transfer_from=None):
@@ -1333,10 +1380,11 @@ def train(config, resume_from=None, transfer_from=None):
     if resume_from is not None:
         print(f"Resuming from lightning checkpoint: {resume_from}")
         d = torch.load(resume_from, map_location="cpu", weights_only=False)
-        # ``transformer.eos_token`` changes the codebook embedding/head shapes;
-        # exit with instructions instead of letting Lightning fail (or, worse,
-        # letting ``--transfer_from`` silently reinitialise 30 tensors).
-        check_eos_layout(d.get("state_dict", {}), net, resume_from)
+        # ``transformer.eos_token`` / ``transformer.fim`` change the codebook
+        # embedding/head shapes; exit with instructions instead of letting
+        # Lightning fail (or, worse, letting ``--transfer_from`` silently
+        # reinitialise 30 tensors).
+        check_special_layout(d.get("state_dict", {}), net, resume_from)
         # Lightning restores optimizer states positionally
         # (``zip(self.optimizers, checkpoint["optimizer_states"])``), so a
         # checkpoint written by the old single-AdamW code would silently leave
@@ -1355,13 +1403,13 @@ def train(config, resume_from=None, transfer_from=None):
         print(f"Transferring from checkpoint: {transfer_from}")
         state = torch.load(transfer_from, map_location="cpu", weights_only=False)
         state = state.get("state_dict", state)
-        # An EOS-less checkpoint's codebook embeddings/heads are one row too
-        # narrow: pad them instead of letting load_state_dict_mismatch skip (and
-        # therefore re-init) all 30 of them.  ``check_eos_layout`` afterwards
-        # catches what the helper cannot fix (an EOS checkpoint going into an
-        # EOS-less config).
-        state = expand_state_dict_with_eos(net, state)
-        check_eos_layout(state, net, transfer_from)
+        # A narrower checkpoint's codebook embeddings/heads (fewer special
+        # classes) are zero-padded instead of letting load_state_dict_mismatch
+        # skip (and therefore re-init) all 30 of them.  ``check_special_layout``
+        # afterwards catches what the helper cannot fix (a *wider* checkpoint
+        # going into a smaller config).
+        state = expand_state_dict_with_special(net, state)
+        check_special_layout(state, net, transfer_from)
         load_submodule_prefix(net, "net.", state)
     else:
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -1384,6 +1432,12 @@ def train(config, resume_from=None, transfer_from=None):
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
+        # Fill-in-the-middle mixing: per-item Bernoulli(train.fim_rate) span
+        # reorder, independent of codebook weights.  Requires transformer.fim.
+        fim=bool(config.transformer.get("fim", False)),
+        fim_rate=float(config.train.get("fim_rate", 0.0) or 0.0),
+        fim_min_frames=int(config.transformer.get("fim_min_frames", 8) or 8),
+        fim_mid_frac=float(config.transformer.get("fim_mid_frac", 0.5) or 0.5),
     )
     val_dataset = CodeDataset(
         config.train.val_filelist,

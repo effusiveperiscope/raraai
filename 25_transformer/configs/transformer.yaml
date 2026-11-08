@@ -28,7 +28,11 @@
 #          --transfer_from (modeling.transformer.expand_state_dict_with_eos
 #          pads the old rows in) or start fresh.
 # v0.5a  - adapt from new stage1
-exp_name: transformer_v0.5a
+# v0.6-fim - fill-in-the-middle: SUF/MID sentinels + prefix/suffix/middle region
+#          tag, mixed with AR training (train.fim_rate).  Enables fixed-length
+#          span regeneration (CodeTransformer.infill).  Shape change (+2 rows per
+#          codebook): new exp_name + --transfer_from, no re-preprocessing.
+exp_name: transformer_v0.6_fim
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -82,6 +86,28 @@ transformer:
 
   # End-of-utterance class (v0.5)
   eos_token: true
+
+  # Fill-in-the-middle (v0.6-fim).  Adds two sentinel classes per codebook
+  # (SUF, MID) and, with train.fim_rate > 0, mixes prefix-suffix-middle
+  # reordered samples with plain AR samples.  The order is prefix <SUF> suffix
+  # <MID> middle, so the *middle* is generated last and its length is free --
+  # for "regenerate a bad span" we fix that length (see CodeTransformer.infill).
+  #
+  # It changes the codebook embedding/head shapes (+2 rows), so a pre-FIM
+  # checkpoint cannot be --resume_from'd: start a fresh exp_name and warm-start
+  # with --transfer_from (expand_state_dict_with_special zero-pads the new rows).
+  # No re-preprocessing: the codes are unchanged.
+  fim: true
+  # Region tag (prefix/suffix/middle) added to every decoder column, like the
+  # speaker embedding.  It is a dense side channel that tells the decoder the
+  # role of a position; the SUF/MID sentinels only mark the boundaries and are
+  # smeared across K columns by the delay pattern.  Independent of `fim` so the
+  # "sentinel-only" variant can be ablated (region_cond: false).
+  region_cond: true
+  # Span sampling for FIM items (training only; val stays plain AR so val_loss is
+  # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
+  fim_min_frames: 8
+  fim_mid_frac: 0.5
 
   # Coarse-to-fine loss weighting over the K = 8 spec + 2 pitch codebooks
   # (order: spec0..spec7, pitch8, pitch9).  The optimised loss is
@@ -261,6 +287,12 @@ train:
   max_epochs: -1
   max_frames: 256          # code frames per training segment (25 Hz)
   max_phone_length: 512
+  # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
+  # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  ~0.5 is
+  # the usual recipe and preserves left-to-right quality while teaching infill;
+  # 0.0 disables it (leaving only transformer.fim's extra classes, unused).
+  # Validation is always plain AR, so val_loss/val_text_delta stay comparable.
+  fim_rate: 0.5
   val_interval: 1
   # TensorBoard step logging. Also gates the per-codebook *diagnostics* in
   # training_step: code_loss only computes accuracy / usage entropy (a second

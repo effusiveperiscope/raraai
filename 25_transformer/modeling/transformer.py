@@ -58,8 +58,19 @@ The EOS target is only added for clips that actually reach their end:
 ``dataset_codes`` reports a per-item ``complete`` flag, because random training
 crops are usually mid-clip and an EOS there would teach the model to fall silent
 after ``max_frames``.  Enabling the key changes the parameter shapes (see
-``expand_state_dict_with_eos``), so it needs a fresh run or a ``--transfer_from``
-warm start -- a ``--resume_from`` of an EOS-less checkpoint cannot work.
+``expand_state_dict_with_special``), so it needs a fresh run or a
+``--transfer_from`` warm start -- a ``--resume_from`` of an EOS-less checkpoint
+cannot work.
+
+Fill-in-the-middle (``transformer.fim``)
+----------------------------------------
+Adds two sentinel classes per codebook (SUF, MID).  ``apply_fim`` reorders a
+training item to ``prefix <SUF> suffix <MID> middle`` (frame level, before the
+delay pattern) so the model learns to regenerate a span given its two sides;
+plain AR items in the same batch are untouched.  ``transformer.region_cond``
+additionally adds a decoder-side prefix/suffix/middle region tag.  At inference
+``infill`` builds the ``prefix <SUF> suffix <MID>`` prompt and samples a
+fixed-length middle.  See ``configs/transformer.yaml`` and ``test_fim.py``.
 """
 
 from __future__ import annotations
@@ -266,16 +277,22 @@ class DelayCodebookDecoder(nn.Module):
         speaker_cond: bool = True,
         residual_scale: bool = True,
         eos: bool = False,
+        fim: bool = False,
+        region_cond: bool = False,
+        n_regions: int = 4,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
         self.num_codebooks = len(self.vocab_sizes)
         self.hidden_size = hidden_size
         self.speaker_cond = bool(speaker_cond)
-        # ``vocab_size`` is the pad/BOS class; ``vocab_size + 1`` is EOS and
-        # only exists when the model was trained with ``transformer.eos_token``.
+        # Extra per-codebook classes: ``vocab_size`` is pad/BOS, ``+1`` is EOS
+        # (``transformer.eos_token``), ``+2``/``+3`` are the FIM SUF/MID
+        # sentinels (``transformer.fim``).  See the module docstring.
         self.eos = bool(eos)
-        self.num_classes = [v + 1 + int(self.eos) for v in self.vocab_sizes]
+        self.fim = bool(fim)
+        self.num_classes = [v + 1 + int(self.eos) + 2 * int(self.fim)
+                            for v in self.vocab_sizes]
 
         # Decoder-side speaker conditioning.  The encoder already puts `sid`
         # into the memory, but relying on cross-attention alone is fragile:
@@ -290,6 +307,18 @@ class DelayCodebookDecoder(nn.Module):
             self.spk_emb = nn.Embedding(n_speakers, hidden_size)
         else:
             self.spk_emb = None
+
+        # FIM region tag (prefix / suffix / middle), added to every decoder
+        # column exactly like ``spk_emb``.  Region ids: 0 = normal (plain AR
+        # item), 1 = prefix, 2 = suffix, 3 = middle.  This is a *side channel*,
+        # not a sequence token: it tells the decoder the role of a position
+        # (dense, per column), whereas the SUF/MID sentinel tokens only mark
+        # *where* the boundaries are (sparse, and smeared across K columns by
+        # the delay pattern).  See ``CodeTransformer.apply_fim``.
+        if region_cond:
+            self.region_emb = nn.Embedding(n_regions, hidden_size)
+        else:
+            self.region_emb = None
 
         self.embeds = nn.ModuleList(
             [nn.Embedding(c, hidden_size) for c in self.num_classes]
@@ -342,6 +371,7 @@ class DelayCodebookDecoder(nn.Module):
         memory: torch.Tensor,  # (B, N, H)
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
+        region: Optional[torch.Tensor] = None,  # (B, L) long, FIM region ids
         use_mask_cache: bool = True,
     ) -> List[torch.Tensor]:
         """Body of :meth:`forward`, with the causal-mask source selectable.
@@ -368,6 +398,16 @@ class DelayCodebookDecoder(nn.Module):
                     "but no sid was passed")
             x = x + self.spk_emb(sid.to(codes.device)).unsqueeze(1)
 
+        # FIM region tag (prefix/suffix/middle), a per-column additive side
+        # channel.  ``region`` is optional: a plain AR caller (or a model built
+        # without ``transformer.region_cond``) gets column region 0 ("normal"),
+        # which is what AR training uses, so nothing changes by omission.
+        if self.region_emb is not None:
+            if region is None:
+                region = torch.zeros(B, x.size(1), dtype=torch.long,
+                                     device=codes.device)
+            x = x + self.region_emb(region.to(codes.device))
+
         if use_mask_cache:
             tgt_mask = self._causal_mask(L, x.device, x.dtype)
         else:
@@ -389,8 +429,9 @@ class DelayCodebookDecoder(nn.Module):
         memory: torch.Tensor,  # (B, N, H)
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
+        region: Optional[torch.Tensor] = None,  # (B, L) long, FIM region ids
     ) -> List[torch.Tensor]:
-        return self._forward_impl(codes, memory, memory_mask, sid,
+        return self._forward_impl(codes, memory, memory_mask, sid, region,
                                   use_mask_cache=True)
 
 
@@ -417,6 +458,16 @@ class CodeTransformer(nn.Module):
         # it changes the embedding/head shapes, so a checkpoint trained without
         # it cannot be resumed into a model built with it.
         eos_token = bool(_get_cfg(tcfg, "eos_token", False))
+        # Fill-in-the-middle (v0.6-fim).  Adds two sentinel classes per codebook
+        # (SUF, MID) and lets training mix prefix-suffix-middle reordered
+        # samples with normal AR samples.  Like ``eos_token`` it changes the
+        # embedding/head shapes, so a checkpoint trained without it cannot be
+        # resumed into a model built with it (use --transfer_from).
+        fim = bool(_get_cfg(tcfg, "fim", False))
+        # Decoder-side prefix/suffix/middle region tag (see ``apply_fim``).
+        # Cheap additive embedding, only meaningful together with ``fim`` but
+        # independent to allow the "sentinel-only" ablation.
+        region_cond = bool(_get_cfg(tcfg, "region_cond", False))
         # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
         memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
         residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
@@ -440,6 +491,16 @@ class CodeTransformer(nn.Module):
         # when this model was built without EOS.  See the module docstring.
         self.eos_token = eos_token
         self.eos_ids = ([v + 1 for v in self.vocab_sizes] if eos_token else None)
+        # FIM sentinel indices: SUF and MID sit directly above the EOS class.
+        # With EOS off they shift down to vocab_size + 1 / + 2.
+        self.fim = fim
+        self.region_cond = region_cond
+        self.n_regions = 4
+        _special_base = 1 + int(eos_token)
+        self.suf_ids = ([v + _special_base for v in self.vocab_sizes]
+                        if fim else None)
+        self.mid_ids = ([v + _special_base + 1 for v in self.vocab_sizes]
+                        if fim else None)
         self.hidden_size = hidden_size
         self.n_speakers = n_speakers
         self.decoder_speaker_cond = decoder_speaker_cond
@@ -476,6 +537,9 @@ class CodeTransformer(nn.Module):
             speaker_cond=decoder_speaker_cond,
             residual_scale=residual_scale,
             eos=eos_token,
+            fim=fim,
+            region_cond=region_cond,
+            n_regions=self.n_regions,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
@@ -600,6 +664,137 @@ class CodeTransformer(nn.Module):
         return out, lens
 
     # ------------------------------------------------------------------ #
+    # Fill-in-the-middle (v0.6-fim)
+    # ------------------------------------------------------------------ #
+    def apply_fim(self, codes, code_lengths, fim_mask, prefix_len, mid_len):
+        """Reorder each FIM item to ``prefix <SUF> suffix <MID> middle``.
+
+        The reordering is done at the **frame** level (all K codebooks move
+        together), because the delay pattern requires frame-aligned codebooks;
+        :meth:`build_delay_pattern` then handles the per-codebook shift
+        unchanged.  Items with ``fim_mask=False`` are left in plain AR order
+        (region 0) and merely padded to the same width, so AR and FIM samples
+        can share a batch.
+
+        Fully vectorised on-device: ``src`` is a per-(item, frame) gather index
+        shared by all codebooks, sentinels are written with a ``where`` and the
+        region tag is built from the same masks, so no GPU->CPU sync is added.
+
+        Args:
+            codes: ``(B, K, T)`` real code frames.
+            code_lengths: ``(B,)`` valid frames per item.
+            fim_mask: ``(B,)`` which items to reorder.
+            prefix_len, mid_len: ``(B,)`` span lengths (suffix = len - p - m).
+
+        Returns:
+            ``(codes_new, lengths_new, region)``: ``(B, K, T+2)``,
+            ``(B,)`` (``T+2`` for FIM items, the original length for AR items)
+            and ``(B, T+2)`` region ids (0 normal, 1 prefix, 2 suffix,
+            3 middle).
+        """
+        B, K, T = codes.shape
+        device = codes.device
+        Tn = T + 2
+        pos = torch.arange(Tn, device=device)                 # (Tn,)
+        cl = code_lengths.to(device).long().clamp(min=1, max=T)
+        p = prefix_len.to(device).long().clamp(min=0, max=T)[:, None]
+        p = torch.minimum(p, (cl - 1).clamp(min=0)[:, None])
+        m = mid_len.to(device).long().clamp(min=0, max=T)[:, None]
+        m = torch.minimum(m, cl[:, None] - p)
+        s = (cl[:, None] - p - m).clamp(min=0)                # suffix length
+        isfim = fim_mask.to(device).bool()[:, None]           # (B, 1)
+
+        pos2 = pos[None, :]                                   # (1, Tn)
+        in_prefix = pos2 < p
+        is_suf = pos2 == p
+        in_suffix = (pos2 > p) & (pos2 <= p + s)
+        is_mid = pos2 == p + s + 1
+        in_mid = (pos2 >= p + s + 2) & (pos2 < p + s + 2 + m)
+
+        src_fim = torch.where(
+            in_prefix, pos2,
+            torch.where(in_suffix, pos2 - 1 + m,
+                        torch.where(in_mid, pos2 - s - 2,
+                                    torch.zeros_like(pos2))))
+        src_ar = pos2.expand(B, Tn)
+        valid_ar = pos2 < cl[:, None]
+        # A FIM item's reordered stream is exactly ``cl + 2`` frames long; any
+        # frame past that is collator padding (short item in a longer batch) and
+        # must stay masked, exactly like the AR padding.
+        valid_fim = pos2 < (cl + 2)[:, None]
+
+        reg_fim = torch.zeros((B, Tn), dtype=torch.long, device=device)
+        reg_fim = torch.where(in_prefix, torch.ones_like(reg_fim), reg_fim)
+        reg_fim = torch.where(in_suffix | is_suf,
+                              torch.full_like(reg_fim, 2), reg_fim)
+        reg_fim = torch.where(in_mid | is_mid,
+                              torch.full_like(reg_fim, 3), reg_fim)
+        reg_ar = torch.zeros((B, Tn), dtype=torch.long, device=device)
+
+        src = torch.where(isfim, src_fim, src_ar)
+        region = torch.where(isfim, reg_fim, reg_ar)
+        valid = torch.where(isfim, valid_fim, valid_ar)
+
+        src_c = src.clamp(0, T - 1)
+        gathered = torch.gather(codes, 2, src_c[:, None, :].expand(B, K, Tn))
+        sent = torch.full((B, K, Tn), -1, dtype=codes.dtype, device=device)
+        suf_base = torch.tensor(self.suf_ids, device=device, dtype=codes.dtype)
+        mid_base = torch.tensor(self.mid_ids, device=device, dtype=codes.dtype)
+        sent = torch.where(is_suf[:, None, :].expand(B, K, Tn),
+                           suf_base.view(1, K, 1).expand(B, K, Tn), sent)
+        sent = torch.where(is_mid[:, None, :].expand(B, K, Tn),
+                           mid_base.view(1, K, 1).expand(B, K, Tn), sent)
+        out = torch.where(sent >= 0, sent, gathered)
+
+        pad = torch.tensor(self.pad_ids, device=device,
+                           dtype=codes.dtype).view(1, K, 1)
+        out = torch.where(valid[:, None, :].expand(B, K, Tn),
+                          out, pad.expand(B, K, Tn))
+        lengths_new = torch.where(fim_mask.to(device).bool(), cl + 2, cl)
+        return out, lengths_new.long(), region
+
+    def _region_to_columns(self, region: torch.Tensor, out_width: int,
+                           L: int) -> torch.Tensor:
+        """Map a per-frame ``region`` (B, Tn) to per-column ids (B, L).
+
+        Column ``c`` of the delayed matrix carries (among others) codebook 0's
+        frame ``c``, so its region tag is ``region[:, c]`` (clamped into the last
+        frame for the ``K - 1`` delay-tail columns).  ``region`` is first grown
+        to the post-EOS ``out_width`` by repeating its last frame, so the EOS
+        frame inherits the region it terminates.
+        """
+        Tr = region.shape[1]
+        if Tr < out_width:
+            tail = region[:, -1:].expand(-1, out_width - Tr)
+            region = torch.cat([region, tail], dim=1)
+        elif Tr > out_width:
+            region = region[:, :out_width]
+        idx = torch.arange(L, device=region.device).clamp(max=out_width - 1)
+        return region[:, idx]
+
+    def _middle_target_mask(self, region: torch.Tensor, targets: torch.Tensor,
+                            L: int) -> torch.Tensor:
+        """Boolean ``(B, K, L)`` mask of middle-region, non-pad targets.
+
+        Diagnostics only (drives ``fim_middle_loss``).  Target column ``j`` of
+        codebook ``k`` maps to reordered frame ``j - k`` (the same relationship
+        ``build_delay_pattern`` uses), so the mask is gathered through it.
+        """
+        B, K, _ = targets.shape
+        Tr = region.shape[1]
+        if Tr < L:
+            region = torch.cat([region, region[:, -1:].expand(-1, L - Tr)],
+                               dim=1)
+        else:
+            region = region[:, :L]
+        frame = (torch.arange(L, device=region.device)[None, :]
+                 - torch.arange(K, device=region.device)[:, None])  # (K, L)
+        frame = frame.clamp(0, L - 1)
+        reg_t = region[:, frame]  # (B, L)[B, frame] -> (B, K, L)
+        pad = torch.tensor(self.pad_ids, device=region.device).view(1, K, 1)
+        return (reg_t == 3) & (targets != pad)
+
+    # ------------------------------------------------------------------ #
     # Core computation
     # ------------------------------------------------------------------ #
     def encode(
@@ -649,6 +844,9 @@ class CodeTransformer(nn.Module):
         epoch: Optional[int] = None,
         complete: Optional[torch.Tensor] = None,  # (B,) bool, for EOS
         diagnostics: bool = True,
+        fim_mask: Optional[torch.Tensor] = None,       # (B,) bool
+        fim_prefix_len: Optional[torch.Tensor] = None,  # (B,) long
+        fim_mid_len: Optional[torch.Tensor] = None,     # (B,) long
     ) -> dict:
         """Delayed next-token loss over all codebooks.
 
@@ -696,6 +894,19 @@ class CodeTransformer(nn.Module):
             the effective weights used for this batch, for logging.
         """
         B, K, T = codes.shape
+        region = None
+        if self.fim and fim_mask is not None:
+            # Reorder FIM items to prefix <SUF> suffix <MID> middle.  When the
+            # suffix is empty the middle reaches the clip's real end, so EOS
+            # still belongs after the middle; a mid-clip middle (suffix present)
+            # ends at MID_END-by-end-of-sequence and gets no EOS, like a
+            # mid-clip AR crop.
+            if complete is None:
+                complete = torch.ones(B, dtype=torch.bool, device=codes.device)
+            suffix_zero = (code_lengths - fim_prefix_len - fim_mid_len) <= 0
+            complete = complete & (~fim_mask.bool() | suffix_zero)
+            codes, code_lengths, region = self.apply_fim(
+                codes, code_lengths, fim_mask, fim_prefix_len, fim_mid_len)
         if self.eos_token:
             codes, code_lengths = self._append_eos(codes, code_lengths, complete)
         delayed = self.build_delay_pattern(codes, code_lengths)  # (B, K, L)
@@ -706,10 +917,20 @@ class CodeTransformer(nn.Module):
         inputs = seq[..., :L]
         targets = seq[..., 1:]
 
+        region_col = None
+        mid_target_mask = None
+        if region is not None:
+            region_col = self._region_to_columns(region, codes.shape[2], L)
+            if diagnostics:
+                mid_target_mask = self._middle_target_mask(region, targets, L)
+
         # list of (B, L, v + 1) -- or (B, L, v + 2) with the EOS class
-        logits = self.decoder(inputs, memory, memory_mask, sid=sid)
+        logits = self.decoder(inputs, memory, memory_mask, sid=sid,
+                              region=region_col)
 
         losses, accs, entropies = [], [], []
+        fim_num = None
+        fim_den = None
         for k in range(K):
             # fp32 for both CE and the diagnostics: under bf16-mixed the
             # logits come back bf16, which is fine for CE but too coarse for
@@ -748,6 +969,20 @@ class CodeTransformer(nn.Module):
             # rare, target), so the normaliser stays as is.
             entropies.append(ent / math.log(max(probs.size(-1) - 1, 2)))
 
+            # ``fim_middle_loss``: mean CE over middle-region targets only, the
+            # "can it fill the hole?" yardstick.  Diagnostics-only (a second,
+            # reduction='none' CE per codebook), so it costs nothing on the
+            # unlogged steps.
+            if mid_target_mask is not None:
+                ce_none = F.cross_entropy(
+                    flat_logits, flat_targets,
+                    ignore_index=self.pad_ids[k], reduction="none")
+                mk = mid_target_mask[:, k].reshape(-1).to(ce_none.dtype)
+                num = (ce_none * mk).sum()
+                den = mk.sum()
+                fim_num = num if fim_num is None else fim_num + num
+                fim_den = den if fim_den is None else fim_den + den
+
         losses = torch.stack(losses)  # (K,)
         weights = self.loss_weights(epoch).to(device=losses.device,
                                              dtype=losses.dtype)
@@ -771,6 +1006,10 @@ class CodeTransformer(nn.Module):
                 "code_accs": accs,
                 "code_usage_entropy": entropies,
             })
+            if fim_den is not None:
+                out["fim_middle_loss"] = fim_num / fim_den.clamp_min(1e-6)
+        if fim_mask is not None:
+            out["fim_frac"] = fim_mask.to(losses.dtype).mean()
         return out
 
     @staticmethod
@@ -796,6 +1035,9 @@ class CodeTransformer(nn.Module):
         epoch: Optional[int] = None,
         complete: Optional[torch.Tensor] = None,
         diagnostics: bool = True,
+        fim_mask: Optional[torch.Tensor] = None,
+        fim_prefix_len: Optional[torch.Tensor] = None,
+        fim_mid_len: Optional[torch.Tensor] = None,
     ) -> dict:
         """Training forward pass: phonemes + speaker -> spec/pitch code loss.
 
@@ -804,13 +1046,17 @@ class CodeTransformer(nn.Module):
         ``complete`` (``(B,)`` bool) marks the samples whose segment reaches the
         end of the clip and therefore get an EOS target (no-op unless
         ``transformer.eos_token`` is set).  ``diagnostics`` is forwarded to
-        :meth:`code_loss`.
+        :meth:`code_loss`.  ``fim_mask``/``fim_prefix_len``/``fim_mid_len``
+        select the prefix-suffix-middle reorder (no-op unless
+        ``transformer.fim``).
         """
         memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
         return self.code_loss(
             memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch,
-            complete=complete, diagnostics=diagnostics)
+            complete=complete, diagnostics=diagnostics,
+            fim_mask=fim_mask, fim_prefix_len=fim_prefix_len,
+            fim_mid_len=fim_mid_len)
 
     def compute_batch_loss(self, batch: dict,
                            epoch: Optional[int] = None,
@@ -833,6 +1079,9 @@ class CodeTransformer(nn.Module):
             epoch=epoch,
             complete=batch.get("complete"),
             diagnostics=diagnostics,
+            fim_mask=batch.get("fim"),
+            fim_prefix_len=batch.get("fim_prefix_len"),
+            fim_mid_len=batch.get("fim_mid_len"),
         )
 
     # ------------------------------------------------------------------ #
@@ -913,6 +1162,11 @@ class CodeTransformer(nn.Module):
                     # size, i.e. out of range for the stage-1 codec.
                     if self.eos_token and (k > 0 or not use_eos):
                         lg[..., self.eos_ids[k]] = float("-inf")
+                    # FIM sentinels are never real output tokens: mask them in
+                    # every codebook so they can't leak into the stage-1 codec.
+                    if self.fim:
+                        lg[..., self.suf_ids[k]] = float("-inf")
+                        lg[..., self.mid_ids[k]] = float("-inf")
                     if top_k is not None:
                         kth = torch.topk(lg, min(top_k, lg.size(-1)), dim=-1).values[..., -1:]
                         lg = torch.where(lg < kth, torch.full_like(lg, float("-inf")), lg)
@@ -969,6 +1223,132 @@ class CodeTransformer(nn.Module):
             if was_training:
                 self.train()
 
+    @torch.no_grad()
+    def infill(
+        self,
+        phone_ids: torch.Tensor,
+        phone_lengths: Optional[torch.Tensor],
+        sid: torch.Tensor,
+        prefix_codes: torch.Tensor,  # (B, K, p) known prefix
+        suffix_codes: torch.Tensor,  # (B, K, s) known suffix
+        middle_frames: int,          # fixed number of middle frames to generate
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Fixed-length span regeneration: ``(prefix, suffix) -> middle``.
+
+        Builds the delayed prompt ``prefix <SUF> suffix <MID>`` and then samples
+        exactly ``middle_frames`` fresh frames, conditioned on both sides.  This
+        is the inference counterpart of :meth:`apply_fim` for the "regenerate
+        this span" UX: the caller supplies the untouched prefix and suffix and
+        decides the length, so the duration problem disappears and no MID_END
+        terminator is needed.  The result must be spliced back into the *time*
+        order ``prefix + middle + suffix`` (the PSM order puts the middle last in
+        the *sequence* only).
+
+        The prefix/suffix sentinel is never sampled; sentinels and EOS are
+        masked out of every sampled column.  The region tag (prefix/suffix/
+        middle) is fed per column, matching :meth:`apply_fim`.
+
+        Args:
+            prefix_codes, suffix_codes: ``(B, K, p)`` / ``(B, K, s)`` known codes.
+                Either may be empty (``p``/``s`` == 0).
+            middle_frames: number of frames to generate (> 0).
+            temperature, top_k: decoding knobs (``top_k=None`` disables).
+
+        Returns:
+            ``(B, K, middle_frames)`` freshly generated middle codes.
+        """
+        was_training = self.training
+        if not self.fim:
+            raise ValueError(
+                "CodeTransformer.infill requires transformer.fim (the SUF/MID "
+                "sentinel classes); this model was built without it.")
+        self.eval()
+        try:
+            memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
+            B = phone_ids.shape[0]
+            K = self.codebook_num
+            device = phone_ids.device
+            m = int(middle_frames)
+            p = int(prefix_codes.shape[-1])
+            s = int(suffix_codes.shape[-1])
+            if m <= 0:
+                return prefix_codes.new_zeros((B, K, 0))
+
+            suf_col = torch.tensor(self.suf_ids, device=device,
+                                   dtype=torch.long).view(1, K, 1).expand(B, K, 1)
+            mid_col = torch.tensor(self.mid_ids, device=device,
+                                   dtype=torch.long).view(1, K, 1).expand(B, K, 1)
+            known = torch.cat([prefix_codes.long(), suf_col,
+                               suffix_codes.long(), mid_col], dim=2)  # (B,K,Kp)
+            Kp = known.shape[2]
+            Tn = Kp + m
+            L = Tn + K - 1
+            pad = torch.tensor(self.pad_ids, device=device).view(1, K)
+
+            # Region per reordered frame: prefix 1, SUF+suffix 2, MID+middle 3.
+            region_frames = torch.full((B, Tn), 3, dtype=torch.long,
+                                       device=device)
+            if p > 0:
+                region_frames[:, :p] = 1
+            region_frames[:, p:p + s + 1] = 2  # SUF at p, suffix p+1..p+s
+
+            seq = self._pad_column(B, device)
+            regs = [torch.zeros(B, 1, dtype=torch.long, device=device)]  # BOS
+            cols = []
+            ar = torch.arange(K, device=device)
+            for i in range(L):
+                frame = i - ar
+                if i < Kp:
+                    # Pure prefill column (known frames only): no decoder call.
+                    fk = frame.clamp(0, Kp - 1)
+                    col = known[:, ar, fk]
+                    valid = (frame >= 0) & (frame < Kp)
+                    col = torch.where(valid.view(1, K), col, pad)
+                else:
+                    region = torch.cat(regs, dim=1)
+                    logits = self.decoder(seq, memory, memory_mask,
+                                          sid=sid, region=region)
+                    col = []
+                    for k in range(K):
+                        lg = logits[k][:, -1] / max(temperature, 1e-6)
+                        lg = lg.clone()
+                        lg[..., self.pad_ids[k]] = float("-inf")
+                        lg[..., self.suf_ids[k]] = float("-inf")
+                        lg[..., self.mid_ids[k]] = float("-inf")
+                        if self.eos_token:
+                            lg[..., self.eos_ids[k]] = float("-inf")
+                        if top_k is not None:
+                            kth = torch.topk(lg, min(top_k, lg.size(-1)),
+                                             dim=-1).values[..., -1:]
+                            lg = torch.where(lg < kth,
+                                             torch.full_like(lg, float("-inf")), lg)
+                        probs = F.softmax(lg, dim=-1)
+                        col.append(torch.multinomial(probs, num_samples=1).squeeze(-1))
+                    col = torch.stack(col, dim=1)
+                    # Keep known tokens where this column still touches the
+                    # prefix/suffix (delay boundary).
+                    is_known = (frame >= 0) & (frame < Kp)
+                    fk = frame.clamp(0, Kp - 1)
+                    known_tok = known[:, ar, fk]
+                    col = torch.where(is_known.view(1, K), known_tok, col)
+                    valid = (frame >= 0) & (frame < Tn)
+                    col = torch.where(valid.view(1, K), col, pad)
+                cols.append(col)
+                rc = min(i, Tn - 1)
+                regs.append(region_frames[:, rc:rc + 1])
+                seq = torch.cat([seq, col.unsqueeze(-1)], dim=2)
+
+            cols = torch.stack(cols, dim=2)  # (B, K, L)
+            out = cols.new_zeros((B, K, m))
+            for k in range(K):
+                out[:, k, :] = cols[:, k, Kp + k : Kp + k + m]
+            return out
+        finally:
+            if was_training:
+                self.train()
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
@@ -980,52 +1360,62 @@ class CodeTransformer(nn.Module):
             f"{self.spec_codebook_num} spec + {self.pitch_codebook_num} pitch, "
             f"speaker={spk}, memory_norm={self.memory_norm}, "
             f"residual_scale={self.residual_scale}, eos={self.eos_token}, "
+            f"fim={self.fim}, region_cond={self.region_cond}, "
             f"params={n / 1e6:.2f}M)"
         )
 
 
-def expand_state_dict_with_eos(model: "CodeTransformer", state_dict: dict,
-                               prefix: str = "net.") -> dict:
-    """Grow EOS-less ``v + 1`` codebook weights to this model's ``v + 2`` layout.
+def expand_state_dict_with_special(model: "CodeTransformer", state_dict: dict,
+                                   prefix: str = "net.") -> dict:
+    """Grow a checkpoint's codebook weights to this model's class count.
 
-    Enabling ``transformer.eos_token`` widens every codebook embedding and output
-    head by one row (and each head's bias by one element), so
+    Enabling ``transformer.eos_token`` and/or ``transformer.fim`` widens every
+    codebook embedding and output head (and each head's bias), so
     :func:`commons.load_state_dict_mismatch` would *skip the whole tensor* when
-    warm-starting from an EOS-less checkpoint -- silently re-initialising all
+    warm-starting from a narrower checkpoint -- silently re-initialising all
     input embeddings and output heads, i.e. much of what the stage-2 model knows
     about codes.
 
-    This returns a copy of ``state_dict`` whose matching entries are padded with
-    one extra zero row (zero bias for the EOS class), so the old rows load and
-    only the new EOS class is fresh.  Zero (not a copy of another row) is
-    deliberate: the EOS *logit* then starts at the head's own bias, i.e. 0, an
-    unremarkable ``1/(v+2)`` probability instead of inheriting the pad class's
-    logit, which would make a fresh model stop at frame 0.
+    This returns a copy of ``state_dict`` whose matching entries are zero-padded
+    to ``model.decoder.num_classes[k]`` (one row per new special class: EOS,
+    SUF, MID), so the old rows load and only the new classes are fresh.  Zero
+    (not a copy of another row) is deliberate: the new logit then starts at the
+    head's own bias, i.e. 0, an unremarkable ``1/num_classes`` probability
+    instead of inheriting the pad class's logit (which would make a fresh model
+    stop/sentinel at frame 0).  A checkpoint *wider* than the model (e.g. EOS/FIM
+    going the other way) is left untouched; ``check_special_layout`` in
+    ``2_training.py`` reports it.
 
     Args:
-        model: the (EOS-enabled) model being loaded into.
+        model: the model being loaded into.
         state_dict: checkpoint state dict, with or without ``prefix``.
         prefix: key prefix used by the checkpoint (``"net."`` for Lightning
             stage-2 checkpoints, ``""`` for a bare ``CodeTransformer``).
 
     Returns:
-        A new dict; the input is returned unchanged when the model has no EOS
-        class or nothing matches (so a stale/other checkpoint still loads).
+        A new dict (the input when nothing matches, so a stale/other checkpoint
+        still loads).
     """
-    if not getattr(model, "eos_token", False):
-        return state_dict
     out = dict(state_dict)
+    num_classes = model.decoder.num_classes
+    changed = False
     for k, vocab in enumerate(model.vocab_sizes):
+        target = int(num_classes[k])
         names = (f"embeds.{k}.weight", f"heads.{k}.weight", f"heads.{k}.bias")
         for name in names:
             for key in (prefix + f"decoder.{name}", f"decoder.{name}"):
                 src = out.get(key)
-                if src is None or src.shape[0] != vocab + 1:
+                if src is None or src.shape[0] >= target:
                     continue
-                grown = src.new_zeros((vocab + 2, *src.shape[1:]))
-                grown[: vocab + 1] = src
+                grown = src.new_zeros((target, *src.shape[1:]))
+                grown[: src.shape[0]] = src
                 out[key] = grown
-    return out
+                changed = True
+    return out if changed else state_dict
+
+
+# Backwards-compatible alias (the pre-FIM name, still used by older scripts).
+expand_state_dict_with_eos = expand_state_dict_with_special
 
 
 if __name__ == "__main__":
