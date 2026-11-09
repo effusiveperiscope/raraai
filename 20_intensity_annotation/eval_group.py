@@ -1,13 +1,12 @@
 import torch
-from dataset import WhisperContext
-from model import IntensityModel
 from omegaconf import OmegaConf
 import argparse
 import librosa
 import numpy as np
-from commons import load_submodule_prefix, sequence_mask
+from commons import sequence_mask
 from pathlib import Path
 from tqdm import tqdm
+from inference import load_model_and_context
 
 def process_audio_file(audio_path, context, model):
     """Process a single audio file and return total subjective intensity."""
@@ -30,7 +29,6 @@ def process_audio_file(audio_path, context, model):
     return total_pred
 
 if __name__ == '__main__':
-    context = WhisperContext()
     parser = argparse.ArgumentParser()
     parser.add_argument('audio_dir', type=str, help='Directory containing audio files')
     parser.add_argument('--ckpt', type=str, required=True)
@@ -42,9 +40,9 @@ if __name__ == '__main__':
     
     # Load model once
     config = OmegaConf.load(args.config)
-    model = IntensityModel(**config.model).to('cuda').half()
-    state = torch.load(args.ckpt, map_location='cpu', weights_only=False)['state_dict']
-    load_submodule_prefix(model, 'model.', state)
+    model, context, config = load_model_and_context(
+        args.ckpt, config, device='cuda' if torch.cuda.is_available() else 'cpu',
+        dtype=torch.float16)
     model.eval()
     
     # Find all audio files

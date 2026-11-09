@@ -5,10 +5,16 @@ import librosa
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import WhisperFeatureExtractor, WhisperModel
-from svc_helper.augmentation.pedalboard import PedalboardRandomAugmentor
+
+def normalize_wave(wave):
+    """Peak-normalize. Intensity is deliberately loudness-independent, so the
+    model should not see absolute level."""
+    return librosa.util.normalize(wave)
 
 class LiveDataContext:
     def __init__(self, whisper_model = 'openai/whisper-base'):
+        # imported lazily so inference-only scripts don't need the augmentation stack
+        from svc_helper.augmentation.pedalboard import PedalboardRandomAugmentor
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model)
         self.device = 'cuda'
         self.augmentor = PedalboardRandomAugmentor(
@@ -51,7 +57,7 @@ class LiveDataContext:
 
     def process_wave_action(self, row):
         row['wave'] = row['wave'].squeeze().numpy()
-        row['wave'] = librosa.util.normalize(row['wave']) # normalize
+        row['wave'] = normalize_wave(row['wave']) # normalize
         row['wave'] = self.augmentor.process(row['wave'], 16000) # augment
         row['wave'] = self.extract_features(
             row['wave'] # problem here?
@@ -59,6 +65,13 @@ class LiveDataContext:
         return row
 
 class WhisperContext:
+    """Frozen whisper encoder used as a feature extractor.
+
+    Length convention: `feature_len` counts **10 ms output frames** (mel frames),
+    i.e. it is the length of the feature sequence *after* `interp2` (which
+    doubles whisper's 20 ms encoder frames). Use it directly for
+    `sequence_mask(feature_len)` on `interp2(...)` output.
+    """
     def __init__(self, whisper_model = 'openai/whisper-small'):
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_model)
         self.device = 'cuda'
@@ -83,35 +96,65 @@ class WhisperContext:
         return encoder_features, feature_len
 
     def interp2(self, tensor):
-        tensor = tensor.squeeze(0)
+        """Upsample time by 2 (20 ms encoder frames -> 10 ms output frames).
+
+        Accepts (T, D), (B, T, D) or a legacy (1, B, T, D) call and returns
+        (B, 2T, D), so batch size 1 works.
+        """
+        if tensor.dim() == 4:
+            tensor = tensor.squeeze(0)
+        if tensor.dim() == 2:
+            tensor = tensor.unsqueeze(0)
         tensor = rearrange(tensor, "b t d -> b d t")
         tensor = F.interpolate(tensor, scale_factor=2)
         tensor = rearrange(tensor, "b d t -> b t d")
         return tensor
 
 class PedalboardContext:
-    def __init__(self):
-        self.augmentor = PedalboardRandomAugmentor(
-            {'base': 0.5,
-            'comp_gentle': 0.5, 'comp_hard': 0.5, 'limit': 0.2,
-            'resample_8k': 0, 'resample_16k': 0,
-            'resample_22k': 0, 'resample_24k': 0,
-            'bitcrush_8': 0, 'mp3_vbr2': 0, 'mp3_vbr0': 0}
-        )
+    def __init__(self, augment: bool = True):
+        self.augmentor = None
+        if augment:
+            # imported lazily so inference-only scripts don't need the augmentation stack
+            from svc_helper.augmentation.pedalboard import PedalboardRandomAugmentor
+            self.augmentor = PedalboardRandomAugmentor(
+                {'base': 0.5,
+                'comp_gentle': 0.5, 'comp_hard': 0.5, 'limit': 0.2,
+                'resample_8k': 0, 'resample_16k': 0,
+                'resample_22k': 0, 'resample_24k': 0,
+                'bitcrush_8': 0, 'mp3_vbr2': 0, 'mp3_vbr0': 0}
+            )
 
-    def process_wave(self, wave):
+    def process_wave(self, wave, augment: bool = True):
         wave = wave.squeeze()
-        wave = librosa.util.normalize(wave) # normalize
-        wave = self.augmentor.process(wave, 16000) # augment
+        wave = normalize_wave(wave) # normalize
+        if augment and self.augmentor is not None:
+            wave = self.augmentor.process(wave, 16000) # augment
         return wave
 
 
 def process_row(row):
-    return {'wave': row['wave'].squeeze(), 'intensity': row['intensity']}
+    # NOTE: datatia's collate_fn requires '__filelist_entry__' to survive this
+    # live map, so carry it over instead of building a fresh dict.
+    return {
+        **{k: v for k, v in row.items() if k == '__filelist_entry__'},
+        'wave': row['wave'].squeeze(),
+        'intensity': row['intensity'],
+    }
 
-def dataset2(filelist, is_train: bool): # Provide raw wave only
+def dataset2(filelist, is_train: bool, max_crop_sec: float = 2.0): # Provide raw wave only
+    """Clip-level dataset.
+
+    is_train is forwarded to datatia: on validation the random time-subsample is
+    replaced by a deterministic crop from index 0 (previously it was ignored, so
+    validation was randomly cropped and the val loss was noisy).
+
+    max_crop_sec / training applies a random crop of at most this many seconds;
+    train.py further randomises the *length* inside that window so the model
+    becomes length-robust (it is scored on 0.5-4 s windows at inference).
+    """
     return dt.Dataset(
         filelist=filelist,
+        is_train=is_train,
         field_specs=[
             dt.FieldSpec(name='wave', datatype=torch.Tensor,
                 dim=torch.Size([-1]), 
@@ -121,7 +164,7 @@ def dataset2(filelist, is_train: bool): # Provide raw wave only
         ],
         actions=[
             dt.LiveMapRow(operation=process_row),
-            dt.RandomSubsample(fields=['wave'], dims=[0], length=320*100),
+            dt.RandomSubsample(fields=['wave'], dims=[0], length=int(max_crop_sec*16000)),
             dt.PadGroup(fields=['wave'], dims=[0], values=[0]),
         ]
     )

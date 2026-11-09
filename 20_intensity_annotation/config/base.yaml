@@ -1,4 +1,5 @@
 exp_name: intensity_whisper_small
+whisper_model: openai/whisper-small
 model:
   in_channels: 768
   hidden_dim: 128
@@ -9,6 +10,20 @@ train:
   num_workers: 8
   keep_ckpts: 5
   label_noise: 0.0
+  # --- length-robust / multi-scale training ---
+  # every step sees a random-length crop in [crop_min_sec, crop_max_sec] so the
+  # model is calibrated for the sliding-window scoring used at inference
+  crop_min_sec: 0.5
+  crop_max_sec: 4.0
+  # K random sub-windows of the same crop are also supervised against the label
+  num_windows: 2
+  window_loss_weight: 0.5
+  # extra pull so that "clip score == mean of window scores"
+  window_consistency_weight: 0.25
+  # validation on clean (unaugmented) audio
+  val_augment: false
 data:
   train_filelist: data/v0.5/train_filelist.txt
   val_filelist: data/v0.5/val_filelist.txt
+  # validation uses (almost) whole clips, deterministic crop from index 0
+  val_crop_sec: 30.0

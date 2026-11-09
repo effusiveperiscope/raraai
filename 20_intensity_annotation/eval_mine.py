@@ -9,10 +9,8 @@ from collections import defaultdict
 from omegaconf import OmegaConf
 
 # Imports assuming the same project structure as the example
-from dataset import WhisperContext
-from model import IntensityModel
-from commons import load_submodule_prefix, sequence_mask
-
+from commons import sequence_mask
+from inference import load_model_and_context
 def process_audio_file(audio_path, context, model, device='cuda'):
     """
     Process a single audio file and return total subjective intensity.
@@ -63,12 +61,10 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Loading model on {device}...")
     
-    context = WhisperContext()
     config = OmegaConf.load(args.config)
-    
-    model = IntensityModel(**config.model).to(device).half()
-    state = torch.load(args.ckpt, map_location='cpu', weights_only=False)['state_dict']
-    load_submodule_prefix(model, 'model.', state)
+
+    model, context, config = load_model_and_context(
+        args.ckpt, config, device=device, dtype=torch.float16)
     model.eval()
 
     # ---------------------------------------------------------

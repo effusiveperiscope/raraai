@@ -1,0 +1,24 @@
+# Full copy of base.yaml pointing at the Linux-path filelists
+# (OmegaConf.load() does not do inheritance, so this file is self-contained).
+exp_name: intensity_whisper_small_local
+whisper_model: openai/whisper-small
+model:
+  in_channels: 768
+  hidden_dim: 128
+  dropout: 0.3
+train:
+  lr: 5e-5
+  batch_size: 24
+  num_workers: 8
+  keep_ckpts: 3
+  label_noise: 0.0
+  crop_min_sec: 0.5
+  crop_max_sec: 4.0
+  num_windows: 2
+  window_loss_weight: 0.5
+  window_consistency_weight: 0.25
+  val_augment: false
+data:
+  train_filelist: data/v0.5/train_filelist_linux.txt
+  val_filelist: data/v0.5/val_filelist_linux.txt
+  val_crop_sec: 30.0
