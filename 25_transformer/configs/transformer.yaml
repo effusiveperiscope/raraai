@@ -339,8 +339,8 @@ train:
   # it somewhere else (e.g. a bigger disk).
   log_dir: logs_stage2
   num_workers: 12
-  train_filelist: data/genshin_full_stage2/train_stage2.txt
-  val_filelist: data/genshin_full_stage2/val_stage2.txt
+  train_filelist: data/genshin_plus_extras/train_stage2.txt
+  val_filelist: data/genshin_plus_extras/val_stage2.txt
   # Optional speaker map (see speaker_map.py). Stage-1 and stage-2 speaker
   # ids are NOT guaranteed to line up, but the stage-1 Generator's speaker
   # embedding is what determines the synthesized voice. Canonicalise the
@@ -353,7 +353,7 @@ train:
   # audio for TensorBoard. Set to null to disable audio logging.
   # This is a *stage-1* run, so it lives in checkpoints_stage1/ (stage 2 writes
   # to checkpoints_stage2/ -- see AGENTS.md §4/§6).
-  generator_checkpoint: checkpoints_stage1/base_v0.7/last.ckpt
+  generator_checkpoint: base_v0.7_last.ckpt
   # Voicing decision threshold used by Generator.infer_from_codes when no
   # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
   pitch_uv_threshold: 0.5
