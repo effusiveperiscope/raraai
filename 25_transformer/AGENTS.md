@@ -808,7 +808,8 @@ hole.
   *time* order `prefix + middle + suffix`. `generate` still does plain AR and now
   also masks the sentinel ids. `2_training.py:_log_infill` runs this probe every
   `sample_interval` epochs on a val item and logs target-vs-regenerated codes /
-  audio plus `sample/fim_middle_code_match_{j}`.
+  audio plus `sample/fim_middle_code_match_{j}`. `scratch/stage2_repl.py`'s `n`
+  is the interactive version of the same probe on whatever was sampled last.
 - **EOS + FIM.** EOS is appended after the middle only when the suffix is empty
   (the middle reaches the clip's real end); a mid-clip middle gets no EOS,
   exactly like a mid-clip AR crop.
@@ -1432,12 +1433,23 @@ python -c "import torch; sd = torch.load('checkpoints_stage2/<exp>/last.ckpt', m
 # against a val item's ground truth (`v`), writes wavs (`w`), plays them live
 # through pydub (`b`, or `--play` to play every clip as it is decoded; needs
 # simpleaudio or the ffplay binary) and switches to another stage-2 checkpoint at
-# runtime (`s`, prompt; `?` lists the runs under checkpoints_stage2/).  No
-# infill: the shipped runs are pre-FIM, so the SUF/MID classes are untrained.
+# runtime (`s`, prompt; `?` lists the runs under checkpoints_stage2/).
+# `n` (fill / infill) is the fill-in-the-middle test: it drops a span out of the
+# last sample -- the last `g`/`v` result -- and re-generates it through
+# CodeTransformer.infill from the kept prefix + suffix, printing an ASCII `#`/`.`
+# map of where in the clip the span sat and the code match against the span it
+# replaced.  The generation is not modified (the filled clip is a separate
+# result), so `n` can be repeated on the same sample without compounding the
+# damage; `a`/`b`/`c`/`w`/`x` act on the filled clip, `g`/`v`/`s` drop it.
+# Span length/position default to the training draw
+# (transformer.fim_min_frames / fim_mid_frac), `n 14:24` pins start:frames.  Only a FIM
+# checkpoint supports it (currently checkpoints_stage2/transformer_fim.ckpt);
+# on a pre-FIM run the SUF/MID classes are untrained, so `n` refuses with a note.
 # The eos_token/fim/region_cond layout is read back from the checkpoint on every
 # load, so a config newer than its checkpoint (or several runs with different
 # layouts in one session) still loads the right thing.
 python scratch/stage2_repl.py
+python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_fim.ckpt
 python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_v0.5a/last.ckpt --no_audio
 python scratch/stage2_repl.py --list_checkpoints            # just list the runs
 python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \

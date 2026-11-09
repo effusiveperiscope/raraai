@@ -181,7 +181,7 @@ def main(argv=None) -> int:
                              'comparison; requires --compare).')
     parser.add_argument('--compare', default=None,
                         help='Fine-tuned stage-1 checkpoint to compare against.')
-    parser.add_argument('--filelist', default='data/base/val.txt',
+    parser.add_argument('--filelist', default='data/genshin_full_stage1/val.txt',
                         help='Stage-1 filelist used to pick items; the .spec/'
                              '.f0 tensors are read next to the listed .wave.')
     parser.add_argument('--max_items', type=int, default=4)

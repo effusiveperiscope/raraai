@@ -7,10 +7,15 @@ from a single-keystroke menu: phonemize a sentence, pick a speaker, sample
 codes, listen to / save the result, or compare a free-running sample against a
 validation item's ground truth.
 
-Fill-in-the-middle (:meth:`CodeTransformer.infill`) is deliberately *not* wired
-in: the shipped runs are pre-FIM, so the SUF/MID sentinel classes are untrained
-and infill output would be meaningless. ``generate`` (plain AR) is the only
-sampling path used here.
+Fill-in-the-middle is wired in as ``n``: it drops a random span from the *last*
+sample and re-generates it with :meth:`CodeTransformer.infill`, keeping the
+untouched prefix and suffix, and prints an ASCII map of where in the clip the
+span sat.  The sample itself is left alone -- the filled clip is a separate
+result, so ``n`` can be repeated on the same generation -- and only a FIM-trained
+checkpoint can do it (right now that means
+``checkpoints_stage2/transformer_fim.ckpt``): a pre-FIM run has untrained
+SUF/MID sentinel classes, so ``n`` refuses with a note instead of sampling
+garbage.  ``generate`` (plain AR) is the other sampling path.
 
 Usage
 -----
@@ -40,6 +45,11 @@ Keys (press ``m`` inside the REPL for the same list)
     x  dump the last codes tensor  q  quit (^C / ^D also work)
     b  play the last audio (pydub; space does the same)
 
+    n  fill a random span of the last sample -- re-generate it from its own
+       kept prefix/suffix without touching the sample (prompt: frames, or
+       start:frames; blank = random span, as training draws it).  FIM
+       checkpoints only; a/b/c/w/x then act on the filled clip.
+
     s  switch stage-2 checkpoint (prompt: run name or path; ``?`` lists runs)
 
 Notes
@@ -62,6 +72,7 @@ import argparse
 import importlib.util
 import logging
 import os
+import random
 import shutil
 import sys
 import threading
@@ -101,6 +112,7 @@ LINE_ALIASES = {
     "save": "w", "dump": "x", "codes": "c", "play": "b", "hear": "b",
     "switch": "s", "load": "s", "open": "s", "ckpt": "s",
     "checkpoint": "s", "checkpoints": "s",
+    "fill": "n", "infill": "n", "in_fill": "n", "middle": "n", "fim": "n",
     "quit": "q", "exit": "q",
 }
 
@@ -420,6 +432,49 @@ def load_generator(checkpoint_path: str, config, device: str):
 
 
 # ---------------------------------------------------------------------- #
+# Fill-in-the-middle ASCII map
+# ---------------------------------------------------------------------- #
+def ascii_fill_map(n: int, start: int, span: int, width: int = 64):
+    """Two aligned rows showing *where* a FIM span sits in a clip.
+
+    Row 1 renders the clip as ``width`` columns of code frames: ``#`` for the
+    span the model re-generates and ``.`` for the audio that is kept, so the
+    hole's position *and* its share of the clip are visible at a glance.  Row 2
+    puts a ``^`` under each end of the span (they land on the same column for a
+    sub-column span).  ``width`` is capped at ``n``, so a column never covers
+    more than one frame unless the clip is longer than the map; the caller
+    prints the frame/second numbers, which are the precise answer.
+
+    Args:
+        n: total number of code frames in the clip.
+        start, span: the re-generated span is ``[start, start + span)``.
+
+    Returns:
+        ``[map_row, caret_row]`` -- same columns, no prefix (the caret row is
+        right-trimmed, so it is usually shorter).
+    """
+    n = max(1, int(n))
+    start = min(max(int(start), 0), n)
+    end = min(max(start, start + int(span)), n)
+    width = max(1, min(int(width), n))
+
+    def col(frame: int) -> int:
+        """Map a frame index to a column, clamped into the map."""
+        return max(0, min(width - 1, int(frame * width / n)))
+
+    cells = []
+    for c in range(width):
+        lo, hi = c * n / width, (c + 1) * n / width
+        # A column is '#' when it overlaps the span at all: a short span must
+        # still show up, even when it is thinner than one column.
+        cells.append("#" if hi > start and lo < end else ".")
+    carets = [" "] * width
+    carets[col(start)] = "^"
+    carets[col(end)] = "^"
+    return ["".join(cells).rstrip(), "".join(carets).rstrip()]
+
+
+# ---------------------------------------------------------------------- #
 # REPL
 # ---------------------------------------------------------------------- #
 class Stage2REPL:
@@ -471,10 +526,27 @@ class Stage2REPL:
         self._val_cursor = 0
         self._writes = 0
 
-        self.last_codes = None     # (K, n) long, on self.device
+        self.last_codes = None     # (K, n) long, on self.device -- the generation
         self.last_sid: Optional[int] = None
         self.last_audio = None     # (T,) float32 CPU waveform
         self.last_f0 = None        # (T,) float32 CPU f0 in Hz
+        # The most recent `n` (fill): where the span sat and the spliced codes
+        # that replaced it.  `last_codes` stays untouched, so a second `n`
+        # fills a span of the same clean generation instead of piling one
+        # re-generated span on top of another (`fill_codes` is only what the
+        # output commands look at, see `current_codes`).
+        self.last_fill: Optional[Tuple[int, int]] = None  # (start, span)
+        self.fill_codes = None     # (K, n) long -- generation with that span filled
+
+    @property
+    def current_codes(self):
+        """What ``a``/``b``/``c``/``w``/``x`` look at: filled clip if any."""
+        return self.fill_codes if self.fill_codes is not None else self.last_codes
+
+    def clear_fill(self) -> None:
+        """Forget the last fill result (a new generation, or a new model)."""
+        self.last_fill = None
+        self.fill_codes = None
 
     # ------------------------------------------------------------------ #
     # Models
@@ -659,6 +731,7 @@ class Stage2REPL:
         # than letting `w`/`a`/`c` silently serve stale results.
         self.last_codes = self.last_sid = None
         self.last_audio = self.last_f0 = None
+        self.clear_fill()
         self.frames = self._clamp_frames(self.frames)
         print("Last codes/audio cleared (they came from the old checkpoint).")
         return True
@@ -734,6 +807,7 @@ class Stage2REPL:
             print(f"  EOS length {int(lens[0])} of at most {frames} frames")
         self.last_codes, self.last_sid = codes, int(self.sid)
         self.last_audio = self.last_f0 = None
+        self.clear_fill()
         self._report_codes(codes)
         self._decode_audio(codes, self.sid)
         return True
@@ -790,6 +864,126 @@ class Stage2REPL:
                                 int(self.config.data.sampling_rate))
 
     # ------------------------------------------------------------------ #
+    # Fill-in-the-middle
+    # ------------------------------------------------------------------ #
+    def fill_middle(self, span: Optional[int] = None,
+                    start: Optional[int] = None) -> bool:
+        """Re-generate a span of the *last generation* (``n``, ``fill``).
+
+        This is the "regenerate the bad bit" direction of FIM: throw away
+        ``span`` code frames starting at ``start`` of the last sampled codes and
+        sample them again with :meth:`CodeTransformer.infill`, conditioned on
+        the untouched prefix *and* suffix of the same clip.  Nothing else
+        changes, so the clip keeps its length and its speaker.
+
+        With ``span``/``start`` left at ``None`` the draw mirrors
+        ``dataset_codes.CodeDataset._sample_fim`` (training conditions the model
+        on exactly that span distribution): ``span`` in
+        ``[fim_min_frames, fim_mid_frac * n]``, ``start`` uniform -- except
+        that a non-empty prefix *and* suffix are preferred, because a "middle"
+        needs two sides to be interesting.
+
+        The result goes to :attr:`fill_codes` and **not** to
+        :attr:`last_codes`: the generation stays pristine, so a second ``n``
+        fills a different span of the same clean sample instead of re-filling
+        whatever the previous fill produced (which would compound the
+        damage).  ``a``/``b``/``c``/``w``/``x`` look at
+        :attr:`current_codes`, i.e. the filled clip while a fill exists, so you
+        can still listen to and save it; ``g``/``v``/``s`` drop it.
+
+        Needs a FIM checkpoint (``net.fim``, i.e. the SUF/MID classes were
+        trained) and something already sampled to work on.
+        """
+        if self.net is None:
+            print("Model not loaded.")
+            return False
+        if not self.net.fim:
+            print("This checkpoint has no FIM support (fim=False): its SUF/MID "
+                  "sentinel classes were never trained, so an infill would be "
+                  "noise.")
+            print("  Only checkpoints_stage2/transformer_fim.ckpt can do this "
+                  "-- press s to switch to it.")
+            return False
+        if self.last_codes is None or self.last_sid is None:
+            print("Nothing sampled yet -- press g (generate) or v (val item) "
+                  "first; n fills a span of what those produced.")
+            return False
+        if not self.phone_ids:
+            print("No phonemes for the current codes -- press t (text) first.")
+            return False
+
+        n = int(self.last_codes.shape[-1])
+        if n < 2:
+            print(f"The last sample is only {n} frame(s) long, nothing to fill.")
+            return False
+
+        # Span length: the training distribution, capped so the clip keeps at
+        # least one known frame (`infill` splices prefix + middle + suffix).
+        tcfg = self.config.transformer
+        min_mid = max(1, int(tcfg.get("fim_min_frames", 1) or 1))
+        mid_frac = float(tcfg.get("fim_mid_frac", 0.5) or 0.5)
+        lo = min(min_mid, n - 1)
+        hi = max(lo, min(n - 1, int(round(mid_frac * n))))
+        if span is None:
+            span = random.randint(lo, hi)
+        span = max(1, min(int(span), n - 1))
+        if start is None:
+            # Prefer both sides non-empty (a real "middle"); any split is
+            # allowed when the span leaves room for only one of them.
+            lo_s, hi_s = (1, n - span - 1) if n - span >= 2 else (0, n - span)
+            start = random.randint(lo_s, hi_s)
+        start = max(0, min(int(start), n - span))
+
+        print(f"fill: frames {start}..{start + span - 1} of {n} "
+              f"({span / self.frame_rate:.2f} s at "
+              f"{start / self.frame_rate:.2f} s .. "
+              f"{(start + span) / self.frame_rate:.2f} s of "
+              f"{n / self.frame_rate:.2f} s)")
+        print(f"  # = re-generated, . = kept "
+              f"(kept prefix {start}, suffix {n - start - span} frames)")
+        for line in ascii_fill_map(n, start, span):
+            print("  " + line)
+
+        codes = self.last_codes.to(self.device)
+        prefix = codes[:, :start].unsqueeze(0)        # (1, K, start)
+        suffix = codes[:, start + span:].unsqueeze(0)  # (1, K, n-start-span)
+        original = codes[:, start:start + span]
+        phone = torch.tensor([list(self.phone_ids)], dtype=torch.long,
+                             device=self.device)
+        plen = torch.tensor([len(self.phone_ids)], dtype=torch.long,
+                            device=self.device)
+        sid_t = torch.tensor([int(self.last_sid)], dtype=torch.long,
+                             device=self.device)
+        t0 = time.perf_counter()
+        try:
+            middle = self.net.infill(
+                phone, plen, sid_t, prefix, suffix, span,
+                temperature=self.temperature, top_k=self.top_k)
+        except Exception as exc:
+            print(f"  infill failed: {exc}")
+            return False
+        dt = time.perf_counter() - t0
+        middle = middle[0]
+
+        self.fill_codes = torch.cat(
+            [codes[:, :start], middle, codes[:, start + span:]], dim=-1)
+        self.last_fill = (start, span)
+        self.last_audio = self.last_f0 = None
+        print(f"  sampled {span} middle frames in {dt * 1e3:.0f} ms "
+              f"(sid {self.last_sid}, temp {self.temperature:g}, "
+              f"top_k {self.top_k})")
+        self._report_codes(self.fill_codes)
+        # How close the re-generated span is to the codes it replaced.  Both
+        # sides are in-distribution, so this is the "did it actually use the
+        # context" number, not a sampling-quality score.
+        print("  re-generated middle vs the span it replaced:")
+        self._report_match(original, middle)
+        self._decode_audio(self.fill_codes, self.last_sid)
+        print("  (a/b/c/w/x now act on the filled clip, g/v/s drop it; the "
+              "next n fills another span of the same generation)")
+        return True
+
+    # ------------------------------------------------------------------ #
     # Validation-item comparison
     # ------------------------------------------------------------------ #
     def _val_dataset(self):
@@ -844,6 +1038,7 @@ class Stage2REPL:
                        dim=0)[:, :n]
         self.last_codes, self.last_sid = pred, self.sid
         self.last_audio = self.last_f0 = None
+        self.clear_fill()
         print(f"generated {n} of at most {frames} frames"
               + (f" (EOS length {int(lens[0])})" if self.net.eos_token else ""))
         self._report_codes(pred)
@@ -883,15 +1078,17 @@ class Stage2REPL:
     def save_audio(self, path: Optional[str] = None) -> bool:
         """Write the last decoded waveform to a wav (stage-1 sample rate)."""
         if self.last_audio is None:
-            print("Nothing decoded yet -- press g (generate) or a (audio).")
+            print("Nothing decoded yet -- press g (generate), v or n (fill).")
             return False
         path = (path or "").strip()
         if not path:
             os.makedirs(self.out_dir, exist_ok=True)
             self._writes += 1
+            tag = "fill_" if self.fill_codes is not None else ""
             path = os.path.join(
                 self.out_dir,
-                f"say_sid{self.last_sid}_{int(self.last_codes.shape[-1])}f_"
+                f"{tag}say_sid{self.last_sid}_"
+                f"{int(self.current_codes.shape[-1])}f_"
                 f"{time.strftime('%H%M%S')}_{self._writes}.wav")
         parent = os.path.dirname(path)
         if parent:
@@ -906,20 +1103,22 @@ class Stage2REPL:
         return True
 
     def dump_codes(self, path: Optional[str] = None) -> bool:
-        """``torch.save`` the last sampled ``(K, n)`` code tensor."""
-        if self.last_codes is None:
-            print("Nothing sampled yet -- press g (generate).")
+        """``torch.save`` the last ``(K, n)`` code tensor (``x``)."""
+        codes = self.current_codes
+        if codes is None:
+            print("Nothing sampled yet -- press g (generate), v or n (fill).")
             return False
         path = (path or "").strip()
         if not path:
             os.makedirs(self.out_dir, exist_ok=True)
-            path = os.path.join(self.out_dir, f"codes_sid{self.last_sid}_"
+            tag = "fill_codes" if self.fill_codes is not None else "codes"
+            path = os.path.join(self.out_dir, f"{tag}_sid{self.last_sid}_"
                                               f"{time.strftime('%H%M%S')}.pt")
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        torch.save(self.last_codes.cpu(), path)
-        print(f"wrote {path}  (K, n) = {tuple(self.last_codes.shape)}")
+        torch.save(codes.cpu(), path)
+        print(f"wrote {path}  (K, n) = {tuple(codes.shape)}")
         return True
 
     def list_speakers(self) -> None:
@@ -972,6 +1171,13 @@ class Stage2REPL:
                      if self.last_audio is not None else ", not decoded")
             print(f"last codes : {tuple(self.last_codes.shape)}, "
                   f"sid {self.last_sid}{extra}")
+        if self.last_fill is not None and self.fill_codes is not None:
+            start, span = self.last_fill
+            n = int(self.fill_codes.shape[-1])
+            print(f"last fill  : frames {start}..{start + span - 1} of {n} "
+                  f"({span / self.frame_rate:.2f} s at "
+                  f"{start / self.frame_rate:.2f} s) re-generated -- "
+                  f"a/b/c/w/x use this clip, g/v/s drop it")
 
     def print_help(self) -> None:
         print(HELP_TEXT)
@@ -990,13 +1196,42 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
   x  dump the last codes tensor   q  quit (^C / ^D also work)
   s  switch stage-2 checkpoint (prompt: run name or path; `?` lists them)
   b  play the last audio (pydub; space does the same)
+  n  fill a random span of the last sample (prompt: frames or start:frames)
 
   Blank at a prompt keeps the current value; blank at a wav/codes prompt
   writes into the output directory with a generated name.  `s` rebuilds the
   model in place, re-deriving eos_token/fim/region_cond from the new
   checkpoint, and clears the last codes/audio (they came from the old one).
   `--play` plays every clip as soon as it is decoded (`b` replays it).
+  `n` needs a FIM checkpoint (checkpoints_stage2/transformer_fim.ckpt) and a
+  sample to work on: it drops a span of the last codes and re-generates it
+  from the kept prefix + suffix, printing a `#`/`.` map of where the span sat.
+  The generation itself is untouched, so `n` again fills another span of the
+  same sample, and `a`/`b`/`c`/`w`/`x` look at the filled clip until the next
+  `g`/`v`/`s` clears it.
 """
+
+
+def _parse_fill_spec(raw):
+    """Parse a fill prompt into ``(start, span)``, or ``None`` if unparsable.
+
+    ``"40"`` -> ``(None, 40)`` -- a 40-frame span somewhere; ``"20:40"`` ->
+    ``(20, 40)`` -- start pinned too (a ``20,40`` comma works as well); blank /
+    ``None`` -> ``(None, None)``, i.e. both drawn at random.
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip().replace(",", ":")
+    if not text:
+        return None, None
+    try:
+        if ":" in text:
+            a, b = text.split(":", 1)
+            return int(a, 0), int(b, 0)
+        return None, int(text, 0)
+    except ValueError:
+        print(f"not a fill span: {text!r} (use `frames` or `start:frames`)")
+        return None
 
 
 def _parse_int(raw) -> Optional[int]:
@@ -1066,10 +1301,10 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
             if raw is not None:
                 repl.switch_checkpoint(raw)
         elif key == "c":
-            if repl.last_codes is None:
+            if repl.current_codes is None:
                 print("Nothing sampled yet -- press g (generate).")
             else:
-                repl._report_codes(repl.last_codes)
+                repl._report_codes(repl.current_codes)
         elif key == "t":
             text = rest or repl.reader.read_line("Text: ")
             if text is not None:
@@ -1121,12 +1356,18 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
                         repl.top_k = value if value > 0 else None
                 print(f"top_k = {repl.top_k}")
         elif key == "a":
-            if repl.last_codes is None:
+            if repl.current_codes is None:
                 print("Nothing sampled yet -- press g (generate).")
             else:
-                repl._decode_audio(repl.last_codes, repl.last_sid)
+                repl._decode_audio(repl.current_codes, repl.last_sid)
         elif key == "b":
             repl.play()
+        elif key == "n":
+            raw = rest or repl.reader.read_line(
+                "Fill span (frames, or start:frames; blank = random): ")
+            spec = _parse_fill_spec(raw)
+            if spec is not None:
+                repl.fill_middle(span=spec[1], start=spec[0])
         elif key == "w":
             path = rest or repl.reader.read_line(
                 f"Wav path [{repl.out_dir}/...]: ")
