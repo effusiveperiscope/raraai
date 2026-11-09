@@ -518,7 +518,7 @@ class Stage2REPL:
         # (`s`) always starts from the same place instead of compounding.
         self._layout_originals = {
             k: config.transformer.get(k, None)
-            for k in ("eos_token", "fim", "region_cond")}
+            for k in ("eos_token", "fim", "region_cond", "length_cond")}
         self._fe = None            # FeatureExtractor (lazy: g2p + tokenizer)
         self._net_g = None         # stage-1 Generator (lazy)
         self._net_g_failed = False
@@ -621,6 +621,13 @@ class Stage2REPL:
         if bool(tcfg.get("region_cond")) != region:
             print(f"NOTE: region_cond={region} in {source}; using that.")
             tcfg.region_cond = region
+        # Span-length conditioning (v0.6-fim2) adds its own table; a config that
+        # is newer than its checkpoint would otherwise build a fresh, untrained
+        # len_emb and quietly degrade every infill.
+        length = "decoder.len_emb.weight" in state
+        if bool(tcfg.get("length_cond")) != length:
+            print(f"NOTE: length_cond={length} in {source}; using that.")
+            tcfg.length_cond = length
 
     def _generator(self):
         """The frozen stage-1 Generator, or ``None`` when audio is off."""
@@ -1140,7 +1147,8 @@ class Stage2REPL:
     def print_status(self) -> None:
         if self.net is not None:
             layout = (f"eos_token={self.net.eos_token}, fim={self.net.fim}, "
-                      f"region_cond={self.net.region_cond}")
+                      f"region_cond={self.net.region_cond}, "
+                      f"length_cond={self.net.length_cond}")
         else:
             layout = "model not loaded"
         if self._audio_disabled:

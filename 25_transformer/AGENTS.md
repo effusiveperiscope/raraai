@@ -771,7 +771,7 @@ codebook **one extra output class** at index `vocab_size + 1` (pad/BOS stays at
   simply ignores it.
 
 
-### Fill-in-the-middle / span regeneration (stage 2, v0.6-fim)
+### Fill-in-the-middle / span regeneration (stage 2, v0.6-fim, v0.6-fim2)
 
 `transformer.fim: true` adds **two sentinel classes per codebook** (`SUF`, `MID`,
 at `vocab+2`/`vocab+3` when EOS is on, `vocab+1`/`+2` otherwise) and, with
@@ -782,7 +782,9 @@ hole.
 
 - **Order is `prefix <SUF> suffix <MID> middle` (PSM).** The middle is generated
   *last* in the sequence, so its length is free — but for the "regenerate this
-  span" UX we fix it (below), which removes the duration problem entirely.
+  span" UX we fix it (below), which removes the duration problem *only together
+  with `length_cond`*: without a length signal the model just emits its best
+  continuation and the caller chops it (see the next bullet).
 - **Frame-level reorder.** `CodeTransformer.apply_fim` moves whole frames (all
   `K` codebooks together) and drops the sentinels in as full frames *before*
   `build_delay_pattern`, so the delay pattern, masking and `code_loss` are
@@ -790,6 +792,36 @@ hole.
   adds no GPU→CPU sync. AR and FIM items can share a batch: AR items are padded
   to the same width and masked exactly like the existing padding. The 2 extra
   frames per FIM item are ≈0.8 % of `max_frames`.
+- **`transformer.length_cond` (v0.6-fim2) is what makes the span length
+  mean anything.** By default nothing in the model's input depends on
+  `middle_frames`: the prompt tokens, sentinels, region tags and positions are
+  *identical* for a 6-frame and a 72-frame hole, and the middle is always the
+  tail of the reordered sequence (causally, the decoder cannot even see that the
+  span ends), so it could only ever infer the duration from the phonemes + the
+  suffix — which a weakly text-conditioned model cannot do, and the symptom is
+  exactly "infill ignores the span length" (measured on
+  `checkpoints_stage2/transformer_fim.ckpt`: chance-level free-running code
+  match, teacher-forced middle acc ≈0.33 at the start of the span, and the same
+  first frames sampled for `m=6` and `m=72`). It adds a second per-column
+  additive embedding (`decoder.len_emb`, `n_len_buckets` = 9 rows) tagging every
+  column inside a span with a log2 bucket of the **frames left in it**
+  (1 / 2-3 / 4-7 / … ; bucket 0 = "not in a span", which is what AR, prefix and
+  suffix columns get). `apply_fim` fills it from the drawn span
+  (`remaining = first_middle + m − pos`, so `MID` reports `m+1` and the last
+  middle frame `1`), `infill` from the caller's `middle_frames` with the *same*
+  formula. One new `(9, hidden)` table → new `exp_name` + `--transfer_from`
+  (`check_special_layout` reports the missing table as a NOTE there, and refuses
+  `--resume_from` / the reverse direction).
+- **The per-column tags are aligned to the column's *target*, not to the token
+  it holds.** `code_loss` tags input column `j` with frame `j`'s tag
+  (`_tag_to_columns`), i.e. the tag of the token about to be predicted. `infill`
+  used to append each frame's tag *after* emitting the column, which lagged the
+  whole side channel by one column: the model was told "prefix" while emitting
+  `SUF` and "suffix" while emitting `MID`, i.e. it started the span under the
+  wrong region (measured: |Δlogit| ≈3.2-3.8 against the training path, versus
+  ≈1e-2 now). `test_fim.py:test_infill_alignment` force-feeds the ground-truth
+  middle through `infill`'s loop and asserts the logits match `code_loss`'s, so
+  the two paths cannot drift apart again.
 - **`transformer.region_cond`** (independent switch) adds a decoder-side
   **region embedding** (0 normal / 1 prefix / 2 suffix / 3 middle) to every
   column, like `spk_emb`. It is a *dense* side channel that says what role a
@@ -800,8 +832,24 @@ hole.
 - **Spans** are chosen in `dataset_codes.CodeDataset._sample_fim` (training items
   only, never validation): `mid_len ∈ [fim_min_frames, fim_mid_frac·T]`,
   `prefix_len ∈ [0, T−mid_len]` uniform. `2_training.py` passes the batch fields
-  through; `code_loss` reports `fim_middle_loss` (CE over middle targets only,
-  diagnostics steps) and `fim_frac` (fraction of the batch that was FIM).
+  through; `code_loss` reports `fim_middle_loss` (CE over middle targets only),
+  `fim_middle_acc` and `fim_middle_acc_{early,mid,late}` (teacher-forced top-1 by
+  third of the span — a profile that only looks good at the *end* means the
+  model wraps up rather than paces) and `fim_frac` (fraction of the batch that
+  was FIM), all on diagnostics steps only.
+- **`train.fim_probe_batches`** (default 2) runs the epoch-level FIM diagnostics
+  on the first N *validation* batches. Val items are plain AR, so the probe
+  synthesises one split for the whole batch (`p = m = T//3`, `T =
+  min(code_lengths)`) and then teacher-forces four control arms that change
+  exactly one input: `val_fim_text_delta` (phonemes rotated),
+  `val_fim_suffix_delta` (suffix frames taken from the next sample),
+  `val_fim_region_delta` / `val_fim_length_delta` (`ablate_region` /
+  `ablate_length`, which zero that side channel for the call only). Plus
+  `val_fim_middle_loss` / `val_fim_middle_acc` (+ `/early|mid|late`) for the base
+  arm. This is the number that answers "is FIM working, and on which input?" —
+  `sample/fim_middle_code_match_{j}` cannot: free-running code match at 100 Hz is
+  at chance even for a healthy model (measured 0.025-0.069 vs 0.35 teacher-forced
+  on `transformer_fim.ckpt`), so it reads "broken" for good and bad runs alike.
 - **Inference**: `CodeTransformer.infill(phonemes, sid, prefix_codes,
   suffix_codes, middle_frames)` builds the `prefix <SUF> suffix <MID>` prompt and
   samples exactly `middle_frames`, masking sentinels/pad/EOS. Splice the result in
@@ -819,8 +867,9 @@ hole.
   zero-pads the new rows). `2_training.py:check_special_layout` guards both
   directions. **No re-preprocessing** — the codes are unchanged.
 
-`test_fim.py` is the CPU smoke test (apply_fim reorder, mixed-batch loss,
-sentinel masking in `generate`, `infill`), safe to run next to a GPU job.
+`test_fim.py` is the CPU smoke test (apply_fim reorder + length buckets,
+mixed-batch loss, sentinel masking in `generate`, `infill`, and the
+`infill`-vs-training tag alignment), safe to run next to a GPU job.
 
 ### Optimizers & manual optimization (stage 2)
 
@@ -1039,7 +1088,12 @@ a *batch-independent* per-step loop.
   it, because acoustic continuity alone keeps the loss falling. ~0 nats means
   the decoder ignores the encoder memory (see §4 and
   `test_stage2_conditioning.py`); `0` in `train.text_delta_batches` disables
-  the probe. Every `train.sample_interval`
+  the probe. Its FIM counterpart is the `_fim_probe` block (same cadence, first
+  `train.fim_probe_batches` val batches): `val_fim_middle_loss`,
+  `val_fim_middle_acc` (+ `/early|mid|late`) and the four control-arm deltas
+  `val_fim_{text,suffix,region,length}_delta` — see §4's FIM section. Per-step
+  FIM scalars (`{train,val}_fim_middle_loss`, `_fim_middle_acc*`, `_fim_frac`)
+  come from `code_loss` on diagnostics steps. Every `train.sample_interval`
   epochs (and at train start) it also samples
   `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
   `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the
@@ -1252,11 +1306,17 @@ a *batch-independent* per-step loop.
     zero-pads the new rows). `2_training.py:check_special_layout` guards both
     directions (it also covers `eos_token` now). `transformer.region_cond` adds
     a `decoder.region_emb` table — also new params, also fine via
-    `--transfer_from`. **No re-preprocessing** is needed: the codes are
-    unchanged, so only `train.fim_rate` / `fim_min_frames` / `fim_mid_frac`
-    change, and those are pure training knobs. The sentinel ids are out of
-    range for the stage-1 codec, so `generate`/`infill` mask them out of every
-    sampled column — if you add another sampling path, do the same.
+    `--transfer_from`. `transformer.length_cond` (v0.6-fim2) adds
+    `decoder.len_emb`, which `check_special_layout` treats differently: a
+    checkpoint *predating* it is the intended warm-start case (printed NOTE under
+    `--transfer_from`, the table starts fresh), while a checkpoint *with* trained
+    length conditioning going into a `length_cond: false` model is a hard error
+    — that would silently throw the trained table away. **No re-preprocessing**
+    is needed: the codes are unchanged, so only `train.fim_rate` /
+    `fim_min_frames` / `fim_mid_frac` change, and those are pure training knobs.
+    The sentinel ids are out of range for the stage-1 codec, so
+    `generate`/`infill` mask them out of every sampled column — if you add
+    another sampling path, do the same.
 
 18. **`fairseq` turns the root logger to DEBUG at import time.** Importing
     `modeling.generator` pulls in the vendored NSF decoder
@@ -1465,7 +1525,8 @@ python test_stage2_conditioning.py \
     --checkpoint checkpoints_stage2/transformer_v0.4.1/last.ckpt --batches 4
 
 # FIM / span-regeneration smoke test (CPU; safe next to a GPU training job):
-# apply_fim reorder, mixed AR+FIM loss, sentinel masking in generate, infill
+# apply_fim reorder + length buckets, mixed AR+FIM loss, sentinel masking in
+# generate, infill, and infill's per-column tags matching the training path
 python test_fim.py
 
 # Phonemization smoke test: both stage-2 paths (transcript-only vs aligner),

@@ -71,6 +71,29 @@ plain AR items in the same batch are untouched.  ``transformer.region_cond``
 additionally adds a decoder-side prefix/suffix/middle region tag.  At inference
 ``infill`` builds the ``prefix <SUF> suffix <MID>`` prompt and samples a
 fixed-length middle.  See ``configs/transformer.yaml`` and ``test_fim.py``.
+
+Length conditioning (``transformer.length_cond``)
+-------------------------------------------------
+Without it nothing in the model's input depends on *how long* the span to
+regenerate is: the prompt, the region tags and the positions are identical for a
+6-frame and a 72-frame hole, there is no ``MID_END`` terminator, and the middle
+is always the *tail* of the reordered sequence (so the decoder cannot even see
+that the span ends).  The caller's ``middle_frames`` only decides when the loop
+stops sampling, i.e. the model emits its best continuation and gets chopped.
+The only remaining route was "infer the duration from the phonemes plus the
+suffix", which a weakly text-conditioned model cannot do.
+
+``length_cond`` adds one more per-column additive embedding
+(``decoder.len_emb``, ``n_len_buckets`` rows, exactly like ``region_emb``):
+every column inside a middle span is tagged with a log2 bucket of the number of
+frames left in the span (bucket 1 = 1 frame left, 2 = 2-3, 3 = 4-7, ...; bucket 0
+= "not inside a span", which is what plain AR columns and the prefix/suffix
+get).  ``apply_fim`` fills the tags from the drawn span at train time and
+``infill`` from the caller's ``middle_frames``, so the decoder knows both the
+budget and its progress through it, and can pace the content instead of
+overrunning (repetition at the tail) or stopping mid-word.  It changes the
+parameter set -- one ``(n_len_buckets, hidden_size)`` table -- so a checkpoint
+trained without it needs a fresh ``exp_name`` + ``--transfer_from``.
 """
 
 from __future__ import annotations
@@ -280,6 +303,8 @@ class DelayCodebookDecoder(nn.Module):
         fim: bool = False,
         region_cond: bool = False,
         n_regions: int = 4,
+        length_cond: bool = False,
+        n_len_buckets: int = 9,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -319,6 +344,21 @@ class DelayCodebookDecoder(nn.Module):
             self.region_emb = nn.Embedding(n_regions, hidden_size)
         else:
             self.region_emb = None
+
+        # FIM span-length budget (see the module docstring).  Same mechanism as
+        # ``region_emb``: bucket ``0`` means "this column is not inside a middle
+        # span" (plain AR, prefix, suffix, sentinels), buckets ``1..n-1`` are a
+        # log2 bucket of *frames left in the span*.  Without it the decoder has
+        # no way to know how much audio the requested span is supposed to hold.
+        self.n_len_buckets = int(n_len_buckets)
+        if length_cond:
+            if self.n_len_buckets < 2:
+                raise ValueError(
+                    "length_cond=True requires n_len_buckets >= 2, got "
+                    f"{self.n_len_buckets}")
+            self.len_emb = nn.Embedding(self.n_len_buckets, hidden_size)
+        else:
+            self.len_emb = None
 
         self.embeds = nn.ModuleList(
             [nn.Embedding(c, hidden_size) for c in self.num_classes]
@@ -372,6 +412,7 @@ class DelayCodebookDecoder(nn.Module):
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
         region: Optional[torch.Tensor] = None,  # (B, L) long, FIM region ids
+        length: Optional[torch.Tensor] = None,  # (B, L) long, span-length buckets
         use_mask_cache: bool = True,
     ) -> List[torch.Tensor]:
         """Body of :meth:`forward`, with the causal-mask source selectable.
@@ -408,6 +449,15 @@ class DelayCodebookDecoder(nn.Module):
                                      device=codes.device)
             x = x + self.region_emb(region.to(codes.device))
 
+        # FIM span-length budget, same shape/convention as ``region``: bucket 0
+        # ("not inside a middle span") is what every AR/prefix/suffix column
+        # gets, so a plain AR caller changes nothing by omitting it.
+        if self.len_emb is not None:
+            if length is None:
+                length = torch.zeros(B, x.size(1), dtype=torch.long,
+                                     device=codes.device)
+            x = x + self.len_emb(length.to(codes.device))
+
         if use_mask_cache:
             tgt_mask = self._causal_mask(L, x.device, x.dtype)
         else:
@@ -430,8 +480,9 @@ class DelayCodebookDecoder(nn.Module):
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
         region: Optional[torch.Tensor] = None,  # (B, L) long, FIM region ids
+        length: Optional[torch.Tensor] = None,  # (B, L) long, length buckets
     ) -> List[torch.Tensor]:
-        return self._forward_impl(codes, memory, memory_mask, sid, region,
+        return self._forward_impl(codes, memory, memory_mask, sid, region, length,
                                   use_mask_cache=True)
 
 
@@ -468,6 +519,12 @@ class CodeTransformer(nn.Module):
         # Cheap additive embedding, only meaningful together with ``fim`` but
         # independent to allow the "sentinel-only" ablation.
         region_cond = bool(_get_cfg(tcfg, "region_cond", False))
+        # FIM span-length budget (see the module docstring): a second additive
+        # per-column embedding telling the decoder how many frames are left in
+        # the span it is filling.  Independent switch so the "no length info"
+        # variant stays available as an ablation.
+        length_cond = bool(_get_cfg(tcfg, "length_cond", False))
+        n_len_buckets = int(_get_cfg(tcfg, "n_len_buckets", 9))
         # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
         memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
         residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
@@ -496,6 +553,8 @@ class CodeTransformer(nn.Module):
         self.fim = fim
         self.region_cond = region_cond
         self.n_regions = 4
+        self.length_cond = length_cond
+        self.n_len_buckets = max(int(n_len_buckets), 2)
         _special_base = 1 + int(eos_token)
         self.suf_ids = ([v + _special_base for v in self.vocab_sizes]
                         if fim else None)
@@ -540,6 +599,8 @@ class CodeTransformer(nn.Module):
             fim=fim,
             region_cond=region_cond,
             n_regions=self.n_regions,
+            length_cond=length_cond,
+            n_len_buckets=self.n_len_buckets,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
@@ -666,6 +727,27 @@ class CodeTransformer(nn.Module):
     # ------------------------------------------------------------------ #
     # Fill-in-the-middle (v0.6-fim)
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _len_buckets(remaining: torch.Tensor, n_buckets: int) -> torch.Tensor:
+        """Map "frames left in the span" to log2 bucket ids.
+
+        ``0`` means "not inside a middle span" and is preserved (a span never
+        has 0 frames left: the last frame of a span is bucket 1).  For ``r >= 1``
+        the bucket is ``1 + floor(log2(r))`` clamped into ``[1, n_buckets - 1]``,
+        i.e. 1 / 2-3 / 4-7 / 8-15 / 16-31 / 32-63 / 64-127 / 128+ for the default
+        ``n_buckets = 9``.  Log spacing because "how much is left" needs to be
+        coarse far from the end and precise near it; the clamp is a ``where``
+        on ``r > 0`` so the trailing-padding frames of a short item (which get
+        bucket 0) cost no branch.
+
+        Pure elementwise tensor maths: no GPU->CPU sync, so this can run once per
+        batch inside ``apply_fim``.
+        """
+        r = remaining.to(torch.float32)
+        bucket = torch.floor(torch.log2(r.clamp(min=1.0))) + 1.0
+        bucket = torch.where(r > 0, bucket, torch.zeros_like(bucket))
+        return bucket.clamp(min=0.0, max=float(n_buckets - 1)).long()
+
     def apply_fim(self, codes, code_lengths, fim_mask, prefix_len, mid_len):
         """Reorder each FIM item to ``prefix <SUF> suffix <MID> middle``.
 
@@ -687,10 +769,13 @@ class CodeTransformer(nn.Module):
             prefix_len, mid_len: ``(B,)`` span lengths (suffix = len - p - m).
 
         Returns:
-            ``(codes_new, lengths_new, region)``: ``(B, K, T+2)``,
-            ``(B,)`` (``T+2`` for FIM items, the original length for AR items)
-            and ``(B, T+2)`` region ids (0 normal, 1 prefix, 2 suffix,
-            3 middle).
+            ``(codes_new, lengths_new, region, len_bucket)``: ``(B, K, T+2)``,
+            ``(B,)`` (``T+2`` for FIM items, the original length for AR items),
+            ``(B, T+2)`` region ids (0 normal, 1 prefix, 2 suffix, 3 middle) and
+            ``(B, T+2)`` span-length buckets (``transformer.length_cond``):
+            ``0`` outside the middle, else the log2 bucket of the number of
+            frames left in the span *including* the current one, so ``MID``
+            itself is ``m + 1`` and the last middle frame is ``1``.
         """
         B, K, T = codes.shape
         device = codes.device
@@ -751,26 +836,50 @@ class CodeTransformer(nn.Module):
         out = torch.where(valid[:, None, :].expand(B, K, Tn),
                           out, pad.expand(B, K, Tn))
         lengths_new = torch.where(fim_mask.to(device).bool(), cl + 2, cl)
-        return out, lengths_new.long(), region
+
+        # Span-length budget (``transformer.length_cond``): frames left in the
+        # middle *including* the current frame, so the ``MID`` sentinel reports
+        # ``m + 1`` and the last middle frame reports ``1`` -- the same formula
+        # ``infill`` uses (``Tn - pos``), which is what makes the tag mean the
+        # same thing at train and inference time.
+        mid_first = p + s + 2                       # first middle frame
+        remaining = torch.where(
+            (in_mid | is_mid),
+            (mid_first + m) - pos2,
+            torch.zeros_like(pos2))
+        len_bucket = torch.where(
+            isfim,
+            self._len_buckets(remaining, self.n_len_buckets),
+            torch.zeros((B, Tn), dtype=torch.long, device=device))
+        return out, lengths_new.long(), region, len_bucket
+
+    def _tag_to_columns(self, tag: torch.Tensor, out_width: int,
+                        L: int) -> torch.Tensor:
+        """Map a per-frame tag ``(B, Tn)`` to per-column ids ``(B, L)``.
+
+        Column ``c`` of the delayed matrix carries (among others) codebook 0's
+        frame ``c``, so its tag is ``tag[:, c]`` (clamped into the last frame for
+        the ``K - 1`` delay-tail columns).  ``tag`` is first grown to the
+        post-EOS ``out_width`` by repeating its last frame, so the EOS frame
+        inherits the tag of the frame it terminates.
+
+        Used for both the FIM **region** ids and the FIM **span-length** buckets:
+        the two side channels share the alignment rule, which is what keeps
+        training and :meth:`infill` consistent (see ``CodeTransformer.infill``).
+        """
+        Tr = tag.shape[1]
+        if Tr < out_width:
+            tail = tag[:, -1:].expand(-1, out_width - Tr)
+            tag = torch.cat([tag, tail], dim=1)
+        elif Tr > out_width:
+            tag = tag[:, :out_width]
+        idx = torch.arange(L, device=tag.device).clamp(max=out_width - 1)
+        return tag[:, idx]
 
     def _region_to_columns(self, region: torch.Tensor, out_width: int,
                            L: int) -> torch.Tensor:
-        """Map a per-frame ``region`` (B, Tn) to per-column ids (B, L).
-
-        Column ``c`` of the delayed matrix carries (among others) codebook 0's
-        frame ``c``, so its region tag is ``region[:, c]`` (clamped into the last
-        frame for the ``K - 1`` delay-tail columns).  ``region`` is first grown
-        to the post-EOS ``out_width`` by repeating its last frame, so the EOS
-        frame inherits the region it terminates.
-        """
-        Tr = region.shape[1]
-        if Tr < out_width:
-            tail = region[:, -1:].expand(-1, out_width - Tr)
-            region = torch.cat([region, tail], dim=1)
-        elif Tr > out_width:
-            region = region[:, :out_width]
-        idx = torch.arange(L, device=region.device).clamp(max=out_width - 1)
-        return region[:, idx]
+        """Backwards-compatible alias of :meth:`_tag_to_columns` for regions."""
+        return self._tag_to_columns(region, out_width, L)
 
     def _middle_target_mask(self, region: torch.Tensor, targets: torch.Tensor,
                             L: int) -> torch.Tensor:
@@ -847,6 +956,8 @@ class CodeTransformer(nn.Module):
         fim_mask: Optional[torch.Tensor] = None,       # (B,) bool
         fim_prefix_len: Optional[torch.Tensor] = None,  # (B,) long
         fim_mid_len: Optional[torch.Tensor] = None,     # (B,) long
+        ablate_region: bool = False,
+        ablate_length: bool = False,
     ) -> dict:
         """Delayed next-token loss over all codebooks.
 
@@ -856,7 +967,7 @@ class CodeTransformer(nn.Module):
         (see ``_append_eos``).  Only samples flagged ``complete`` get one.
 
         Per-codebook cross-entropies are combined as
-        ``loss = sum_k w_k * CE_k / sum_k w_k`` with ``w = loss_weights(epoch)``
+        ``loss = sum_k w_k * CE_k / sum(w)`` with ``w = loss_weights(epoch)``
         (uniform unless ``transformer.codebook_weights`` is set), so the
         coarse codebooks can be prioritised over the fine residual ones.
 
@@ -870,6 +981,12 @@ class CodeTransformer(nn.Module):
                 returned dict then simply omits ``acc``/``spec_acc``/
                 ``pitch_acc``/``code_accs``/``code_usage_entropy``; the loss
                 scalars are bit-identical either way.
+            ablate_region, ablate_length: zero the FIM region tags / span-length
+                buckets for this call.  Only ``2_training.py``'s FIM probe uses
+                these, as the "is this side channel load-bearing?" control arms:
+                everything else (masks, targets, spans) stays identical, so the
+                resulting ``fim_middle_loss`` difference is directly attributable
+                to that channel.
 
         Returns a dict with the total loss plus per-group (spec/pitch) losses
         and diagnostics that make "is it learning?" answerable from
@@ -890,11 +1007,21 @@ class CodeTransformer(nn.Module):
             collapsed onto a handful of codes even if the loss still looks
             healthy.  ``code_accs``/``code_usage_entropy`` are omitted when
             ``diagnostics=False``; ``code_losses`` never is.
+        ``fim_middle_loss``/``fim_middle_acc`` (+ ``_early``/``_mid``/``_late``)
+            diagnostics over the *middle* targets only, i.e. "can it fill the
+            hole?" rather than "can it continue?".  The accuracy is split into
+            thirds of the span because that is where a model with no sense of the
+            span's budget shows up: flat across the span means it is pacing the
+            content, a rise at the end means it is only good at wrapping up.
+            Diagnostics only.
+        ``fim_frac``
+            fraction of the batch that was FIM (no-op items included).
         ``loss_weights`` (K,)
             the effective weights used for this batch, for logging.
         """
         B, K, T = codes.shape
         region = None
+        len_bucket = None
         if self.fim and fim_mask is not None:
             # Reorder FIM items to prefix <SUF> suffix <MID> middle.  When the
             # suffix is empty the middle reaches the clip's real end, so EOS
@@ -905,7 +1032,7 @@ class CodeTransformer(nn.Module):
                 complete = torch.ones(B, dtype=torch.bool, device=codes.device)
             suffix_zero = (code_lengths - fim_prefix_len - fim_mid_len) <= 0
             complete = complete & (~fim_mask.bool() | suffix_zero)
-            codes, code_lengths, region = self.apply_fim(
+            codes, code_lengths, region, len_bucket = self.apply_fim(
                 codes, code_lengths, fim_mask, fim_prefix_len, fim_mid_len)
         if self.eos_token:
             codes, code_lengths = self._append_eos(codes, code_lengths, complete)
@@ -918,19 +1045,33 @@ class CodeTransformer(nn.Module):
         targets = seq[..., 1:]
 
         region_col = None
+        len_col = None
         mid_target_mask = None
         if region is not None:
-            region_col = self._region_to_columns(region, codes.shape[2], L)
+            region_col = self._tag_to_columns(region, codes.shape[2], L)
             if diagnostics:
                 mid_target_mask = self._middle_target_mask(region, targets, L)
+        if len_bucket is not None and self.decoder.len_emb is not None:
+            # Span-length budget, aligned exactly like the region tags (entry j
+            # = tag of frame j, see ``_tag_to_columns``).  ``ablate_length``
+            # zeroes it for the diagnostic control arm in ``2_training.py``.
+            len_col = self._tag_to_columns(len_bucket, codes.shape[2], L)
+        if ablate_region:
+            region_col = None
+        if ablate_length:
+            len_col = None
 
         # list of (B, L, v + 1) -- or (B, L, v + 2) with the EOS class
         logits = self.decoder(inputs, memory, memory_mask, sid=sid,
-                              region=region_col)
+                              region=region_col, length=len_col)
 
         losses, accs, entropies = [], [], []
         fim_num = None
         fim_den = None
+        fim_acc_num = None
+        fim_acc_den = None
+        fim_bin_num = None
+        fim_bin_den = None
         for k in range(K):
             # fp32 for both CE and the diagnostics: under bf16-mixed the
             # logits come back bf16, which is fine for CE but too coarse for
@@ -972,16 +1113,47 @@ class CodeTransformer(nn.Module):
             # ``fim_middle_loss``: mean CE over middle-region targets only, the
             # "can it fill the hole?" yardstick.  Diagnostics-only (a second,
             # reduction='none' CE per codebook), so it costs nothing on the
-            # unlogged steps.
+            # unlogged steps.  ``fim_middle_acc`` (plus its early/mid/late
+            # split) is the meaningful companion: the CE alone cannot say
+            # *where* in the span the model fails, and the position profile is
+            # exactly the "does it have a sense of the span's budget?" signal
+            # (a profile that only looks good at the end of the span means the
+            # model is good at wrapping up, not at pacing the content).
             if mid_target_mask is not None:
                 ce_none = F.cross_entropy(
                     flat_logits, flat_targets,
                     ignore_index=self.pad_ids[k], reduction="none")
-                mk = mid_target_mask[:, k].reshape(-1).to(ce_none.dtype)
+                mk_b = mid_target_mask[:, k]                    # (B, L) bool
+                mk = mk_b.reshape(-1).to(ce_none.dtype)
                 num = (ce_none * mk).sum()
                 den = mk.sum()
                 fim_num = num if fim_num is None else fim_num + num
                 fim_den = den if fim_den is None else fim_den + den
+
+                # Position within the span, derived from the mask itself (the
+                # middle targets of one item/codebook are one contiguous run),
+                # so no extra per-frame tensor has to be carried through
+                # `apply_fim`.  ``run`` counts 0..m-1 from the span's start.
+                cnt = mk_b.to(lg.dtype)
+                run = torch.cumsum(cnt, dim=1) - 1.0
+                total = cnt.sum(-1, keepdim=True).clamp_min(1.0)
+                bin_id = ((run / total) * 3).clamp(min=0, max=2).long()
+                ok = correct.to(lg.dtype).reshape(cnt.shape) * cnt
+                fim_acc_num = (ok.sum() if fim_acc_num is None
+                               else fim_acc_num + ok.sum())
+                fim_acc_den = (cnt.sum() if fim_acc_den is None
+                               else fim_acc_den + cnt.sum())
+                bin_num = []
+                bin_den = []
+                for b in range(3):
+                    sel = cnt * (bin_id == b).to(lg.dtype)
+                    bin_num.append((ok * sel).sum())
+                    bin_den.append(sel.sum())
+                if fim_bin_num is None:
+                    fim_bin_num, fim_bin_den = bin_num, bin_den
+                else:
+                    fim_bin_num = [a + b for a, b in zip(fim_bin_num, bin_num)]
+                    fim_bin_den = [a + b for a, b in zip(fim_bin_den, bin_den)]
 
         losses = torch.stack(losses)  # (K,)
         weights = self.loss_weights(epoch).to(device=losses.device,
@@ -1008,6 +1180,12 @@ class CodeTransformer(nn.Module):
             })
             if fim_den is not None:
                 out["fim_middle_loss"] = fim_num / fim_den.clamp_min(1e-6)
+            if fim_acc_den is not None:
+                out["fim_middle_acc"] = (fim_acc_num
+                                         / fim_acc_den.clamp_min(1e-6))
+                for name, num, den in zip(("early", "mid", "late"),
+                                          fim_bin_num, fim_bin_den):
+                    out[f"fim_middle_acc_{name}"] = num / den.clamp_min(1e-6)
         if fim_mask is not None:
             out["fim_frac"] = fim_mask.to(losses.dtype).mean()
         return out
@@ -1247,8 +1425,20 @@ class CodeTransformer(nn.Module):
         the *sequence* only).
 
         The prefix/suffix sentinel is never sampled; sentinels and EOS are
-        masked out of every sampled column.  The region tag (prefix/suffix/
-        middle) is fed per column, matching :meth:`apply_fim`.
+        masked out of every sampled column.
+
+        **The per-column side channels are built exactly like training.**  In
+        :meth:`code_loss` column ``j`` of the delayed matrix is tagged with the
+        region/length of frame ``j`` (``_tag_to_columns``), i.e. with the tag of
+        the token it is about to predict -- *not* of the token it holds.  Doing
+        it the other way round (tagging each column with the tag of the token
+        just appended, as this method used to) shifts the whole side channel one
+        column: the model sees "prefix" where training saw "suffix" and "suffix"
+        where training saw "middle", i.e. it is asked to emit ``SUF``/``MID`` and
+        to hand off into the span under the wrong region.  The tags are therefore
+        laid out once for the whole column range and sliced by ``seq`` length,
+        which reproduces the training alignment to within float noise
+        (``test_fim.py`` asserts that).
 
         Args:
             prefix_codes, suffix_codes: ``(B, K, p)`` / ``(B, K, s)`` known codes.
@@ -1294,8 +1484,28 @@ class CodeTransformer(nn.Module):
                 region_frames[:, :p] = 1
             region_frames[:, p:p + s + 1] = 2  # SUF at p, suffix p+1..p+s
 
+            # Per-column tags, indexed by *column*: entry j is the tag of frame j
+            # (the frame that column j predicts), with the ``K - 1`` delay-tail
+            # columns repeating the last one -- the layout ``_tag_to_columns``
+            # produces at train time.  The BOS column gets frame 0's tag, again
+            # like training.
+            region_cols = torch.cat([region_frames,
+                                     region_frames[:, -1:].expand(B, K - 1)], 1)
+            len_cols = None
+            if self.decoder.len_emb is not None:
+                # Frames left in the span *including* the current frame, i.e.
+                # ``Tn - pos``, so ``MID`` at ``Kp - 1`` reports ``m + 1`` and the
+                # last middle frame reports 1 -- the convention ``apply_fim``
+                # uses.  Before the span the tag is bucket 0 ("no span").
+                pos = torch.arange(Tn, device=device).view(1, Tn)
+                remaining = torch.where(pos >= (Kp - 1), Tn - pos,
+                                        torch.zeros_like(pos))
+                len_frames = self._len_buckets(remaining.expand(B, Tn),
+                                               self.n_len_buckets)
+                len_cols = torch.cat([len_frames,
+                                      len_frames[:, -1:].expand(B, K - 1)], 1)
+
             seq = self._pad_column(B, device)
-            regs = [torch.zeros(B, 1, dtype=torch.long, device=device)]  # BOS
             cols = []
             ar = torch.arange(K, device=device)
             for i in range(L):
@@ -1307,9 +1517,11 @@ class CodeTransformer(nn.Module):
                     valid = (frame >= 0) & (frame < Kp)
                     col = torch.where(valid.view(1, K), col, pad)
                 else:
-                    region = torch.cat(regs, dim=1)
-                    logits = self.decoder(seq, memory, memory_mask,
-                                          sid=sid, region=region)
+                    n_cols = seq.shape[2]      # 1 (BOS) + i columns so far
+                    logits = self.decoder(
+                        seq, memory, memory_mask, sid=sid,
+                        region=region_cols[:, :n_cols],
+                        length=None if len_cols is None else len_cols[:, :n_cols])
                     col = []
                     for k in range(K):
                         lg = logits[k][:, -1] / max(temperature, 1e-6)
@@ -1336,8 +1548,6 @@ class CodeTransformer(nn.Module):
                     valid = (frame >= 0) & (frame < Tn)
                     col = torch.where(valid.view(1, K), col, pad)
                 cols.append(col)
-                rc = min(i, Tn - 1)
-                regs.append(region_frames[:, rc:rc + 1])
                 seq = torch.cat([seq, col.unsqueeze(-1)], dim=2)
 
             cols = torch.stack(cols, dim=2)  # (B, K, L)
@@ -1361,7 +1571,10 @@ class CodeTransformer(nn.Module):
             f"speaker={spk}, memory_norm={self.memory_norm}, "
             f"residual_scale={self.residual_scale}, eos={self.eos_token}, "
             f"fim={self.fim}, region_cond={self.region_cond}, "
-            f"params={n / 1e6:.2f}M)"
+            f"length_cond={self.length_cond}"
+            + (f" (n_len_buckets={self.n_len_buckets})"
+               if self.length_cond else "")
+            + f", params={n / 1e6:.2f}M)"
         )
 
 

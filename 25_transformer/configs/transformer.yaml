@@ -32,7 +32,17 @@
 #          tag, mixed with AR training (train.fim_rate).  Enables fixed-length
 #          span regeneration (CodeTransformer.infill).  Shape change (+2 rows per
 #          codebook): new exp_name + --transfer_from, no re-preprocessing.
-exp_name: transformer_v0.6_fim
+# v0.7-fim2 - span-length conditioning (transformer.length_cond): the decoder now
+#          sees how many frames are left in the span it is filling, which is the
+#          only way it can pace content into a requested length (before this,
+#          nothing in the model's input depended on middle_frames at all).
+#          Also fixes CodeTransformer.infill's region tag, which lagged one
+#          column behind the training alignment (so the model was asked to emit
+#          SUF/MID under the wrong region), and adds the FIM diagnostics probe
+#          (train.fim_probe_batches).  One new parameter table: new exp_name +
+#          --transfer_from, still no re-preprocessing.
+#          - Also using expanded corpus.
+exp_name: transformer_v0.7_fim2
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -104,6 +114,19 @@ transformer:
   # smeared across K columns by the delay pattern.  Independent of `fim` so the
   # "sentinel-only" variant can be ablated (region_cond: false).
   region_cond: true
+  # Span-length conditioning (v0.6-fim2).  Adds a second decoder-side embedding
+  # (decoder.len_emb, n_len_buckets rows) telling every column inside a middle
+  # span how many frames are *left* in it, as a log2 bucket (bucket 1 = 1 frame
+  # left, 2 = 2-3, 3 = 4-7, ... bucket 0 = "not in a span").  Training takes the
+  # tag from the drawn span, CodeTransformer.infill from the caller's
+  # middle_frames.  Without it the model has no length signal at all: the prompt,
+  # region tags and positions are identical for a 6-frame and a 72-frame hole, so
+  # it can only emit its best continuation and have it chopped -- which is what
+  # "infill ignores the span length" looked like.  Shape change (one
+  # (n_len_buckets, 768) table), so a fresh exp_name + --transfer_from is needed
+  # (2_training.py:check_special_layout refuses the mismatch).
+  length_cond: true
+  n_len_buckets: 9
   # Span sampling for FIM items (training only; val stays plain AR so val_loss is
   # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
   fim_min_frames: 8
@@ -293,6 +316,15 @@ train:
   # 0.0 disables it (leaving only transformer.fim's extra classes, unused).
   # Validation is always plain AR, so val_loss/val_text_delta stay comparable.
   fim_rate: 0.5
+  # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a synthetic
+  # prefix/middle/suffix split on the first N validation batches and log the
+  # middle-only CE / teacher-forced accuracy (split into span thirds) plus three
+  # control-arm deltas in nats: val_fim_{text,suffix,region,length}_delta.  This
+  # is the "is FIM actually working, and on which input?" signal --
+  # sample/fim_middle_code_match_* cannot provide it (free-running code match is
+  # at chance even for a healthy model).  Costs N * 5 teacher-forced forwards per
+  # epoch, no sampling.  0 disables the probe.
+  fim_probe_batches: 2
   val_interval: 1
   # TensorBoard step logging. Also gates the per-codebook *diagnostics* in
   # training_step: code_loss only computes accuracy / usage entropy (a second

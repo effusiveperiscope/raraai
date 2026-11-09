@@ -381,6 +381,21 @@ class TrainModule(pl.LightningModule):
             config.train.get("text_delta_batches", 0) or 0)
         self._reset_text_delta()
 
+        # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a *synthetic*
+        # prefix/suffix split on the first `fim_probe_batches` validation batches
+        # and compare the middle-only CE against three control arms (phonemes
+        # rotated, suffix taken from another sample, region / length tags
+        # zeroed).  Validation items are never FIM (`dataset_codes` gates it to
+        # training), so the split is made here instead of by the dataset -- that
+        # is also what makes the arms comparable: identical spans, identical
+        # targets, one input changed.  `fim_middle_code_match` from the sampling
+        # pass cannot answer this (free-running code match is at chance for a
+        # healthy model), so these deltas are the "is FIM working?" signal.
+        # 0 disables the probe.
+        self.fim_probe_batches = int(
+            config.train.get("fim_probe_batches", 0) or 0)
+        self._reset_fim_probe()
+
         # Out-of-distribution text probe (see `_log_ood_generation`). The
         # phoneme ids are built lazily, on first use, and cached: the first
         # sampling pass pays a one-off CPU phonemization cost, later epochs
@@ -440,6 +455,19 @@ class TrainModule(pl.LightningModule):
         self._text_delta_spec_sum = 0.0
         self._text_delta_pitch_sum = 0.0
         self._text_delta_count = 0
+
+    def _reset_fim_probe(self):
+        """Clear the per-epoch accumulators of the FIM diagnostics probe."""
+        # Base (correct inputs) middle CE / accuracy plus the three control arms.
+        self._fim_base = 0.0
+        self._fim_text = 0.0
+        self._fim_suffix = 0.0
+        self._fim_region = 0.0
+        self._fim_length = 0.0
+        self._fim_acc = 0.0
+        self._fim_acc_bins = [0.0, 0.0, 0.0]
+        self._fim_length_count = 0
+        self._fim_probe_count = 0
 
     def setup(self, stage=None):
         hp = self.config
@@ -647,16 +675,16 @@ class TrainModule(pl.LightningModule):
         impl = self.net.decoder._forward_impl
 
         def compiled_forward(codes, memory, memory_mask=None, sid=None,
-                             region=None):
-            # Explicit signature (not a ``lambda``) because ``code_loss`` calls
-            # the decoder as ``decoder(inputs, memory, memory_mask, sid=sid,
-            # region=region)`` and ``torch.compile`` rejects unknown keyword
-            # arguments.
-            return impl(codes, memory, memory_mask, sid, region, False)
+                             region=None, length=None):
+            # Explicit signature (not a ``lambda``) because ``code_loss`` and
+            # ``infill`` call the decoder as ``decoder(inputs, memory,
+            # memory_mask, sid=sid, region=region, length=length)`` and
+            # ``torch.compile`` rejects unknown keyword arguments.
+            return impl(codes, memory, memory_mask, sid, region, length, False)
 
         try:
             compiled = torch.compile(compiled_forward, dynamic=True)
-            compiled(codes, memory, memory_mask, sid, None)
+            compiled(codes, memory, memory_mask, sid, None, None)
             self.net.decoder.forward = compiled
             print("torch.compile: decoder (DelayCodebookDecoder._forward_impl)")
         except Exception as exc:
@@ -1178,7 +1206,9 @@ class TrainModule(pl.LightningModule):
         kw = dict(on_step=on_step, on_epoch=on_epoch, logger=True)
         self.log(f"{prefix}_loss", out["loss"], prog_bar=True, **kw)
         for key in ("spec_loss", "pitch_loss", "acc", "spec_acc", "pitch_acc",
-                    "fim_middle_loss", "fim_frac"):
+                    "fim_middle_loss", "fim_middle_acc",
+                    "fim_middle_acc_early", "fim_middle_acc_mid",
+                    "fim_middle_acc_late", "fim_frac"):
             if key in out:
                 self.log(f"{prefix}_{key}", out[key], **kw)
 
@@ -1338,6 +1368,139 @@ class TrainModule(pl.LightningModule):
 
     def on_validation_epoch_start(self):
         self._reset_text_delta()
+        self._reset_fim_probe()
+
+    @torch.no_grad()
+    def _fim_probe(self, batch):
+        """Teacher-forced FIM diagnostics on one *validation* batch.
+
+        Validation items are plain AR (``dataset_codes`` only draws spans for
+        training items), so the prefix/suffix split is synthesised here: with
+        ``T = min(code_lengths)``, ``p = T // 3``, ``m = T // 3`` and
+        ``s = T - p - m`` every item in the batch gets the *same* span, which is
+        what makes the control arms comparable -- targets, masks and span stay
+        fixed, only the probed input changes:
+
+        ``val_fim_text_delta``
+            middle CE with the batch's phonemes rotated (``> 0`` = text is used)
+        ``val_fim_suffix_delta``
+            middle CE with the suffix frames taken from the next sample; the
+            suffix is the only thing that says what happens *after* the hole, so
+            this should be clearly positive
+        ``val_fim_region_delta`` / ``val_fim_length_delta``
+            middle CE with the region tags / span-length buckets zeroed, i.e. the
+            "is this side channel load-bearing?" controls
+
+        ``val_fim_middle_acc`` (+ ``_early``/``_mid``/``_late``) is the base run's
+        teacher-forced top-1 by third of the span.  Free-running code match
+        (``sample/fim_middle_code_match_*``) is at chance even for a healthy
+        model, so this teacher-forced profile is the number that actually says
+        whether the model paces content across the span or only wraps up at its
+        end.
+
+        Cost: five teacher-forced forwards on ``fim_probe_batches`` validation
+        batches per epoch, no sampling -- negligible next to validation itself.
+        """
+        if not self.net.fim or self.fim_probe_batches <= 0:
+            return
+        codes = torch.cat([batch["spec_codes"], batch["pitch_codes"]],
+                          dim=1).long()
+        lengths = batch["code_lengths"]
+        T = int(lengths.min())
+        p = max(1, T // 3)
+        m = max(1, T // 3)
+        if p + m >= T:               # keep at least one suffix frame
+            m = max(1, T - p - 1)
+        if T < 4 or m < 1:
+            return
+        B = codes.shape[0]
+        dev = codes.device
+        fim = torch.ones(B, dtype=torch.bool, device=dev)
+        pfx = torch.full((B,), p, dtype=torch.long, device=dev)
+        mid = torch.full((B,), m, dtype=torch.long, device=dev)
+        rotate = torch.roll(torch.arange(B, device=dev), 1)
+
+        # The encoder output is the same in four of the five arms, so encode
+        # once per distinct text (twice in total) instead of five times.
+        mem, mmask = self.net.encode(batch["phone_ids"], batch["phone_lengths"],
+                                     batch["sid"])
+        mem_rot, mmask_rot = self.net.encode(batch["phone_ids"][rotate],
+                                             batch["phone_lengths"][rotate],
+                                             batch["sid"])
+
+        def run(memory, mask, codes_use=None, **override):
+            return self.net.code_loss(
+                memory, mask, codes if codes_use is None else codes_use,
+                code_lengths=lengths, sid=batch["sid"],
+                complete=batch["complete"], diagnostics=True,
+                fim_mask=fim, fim_prefix_len=pfx, fim_mid_len=mid, **override)
+
+        base = run(mem, mmask)
+        if "fim_middle_loss" not in base:
+            return
+        ce_base = float(base["fim_middle_loss"])
+        wrong_text = run(mem_rot, mmask_rot)
+        codes_swap = codes.clone()
+        codes_swap[:, :, p + m:] = codes[rotate][:, :, p + m:]
+        wrong_suffix = run(mem, mmask, codes_use=codes_swap)
+        no_region = run(mem, mmask, ablate_region=True)
+        # The length arm only means something when the model actually has the
+        # table; on a ``length_cond: false`` model it would be a no-op reported
+        # as "0.000 nats", i.e. indistinguishable from "the channel is dead".
+        no_length = (run(mem, mmask, ablate_length=True)
+                     if self.net.decoder.len_emb is not None else None)
+
+        self._fim_base += ce_base
+        self._fim_text += float(wrong_text["fim_middle_loss"]) - ce_base
+        self._fim_suffix += float(wrong_suffix["fim_middle_loss"]) - ce_base
+        self._fim_region += float(no_region["fim_middle_loss"]) - ce_base
+        if no_length is not None:
+            self._fim_length += float(no_length["fim_middle_loss"]) - ce_base
+            self._fim_length_count += 1
+        if "fim_middle_acc" in base:
+            self._fim_acc += float(base["fim_middle_acc"])
+            for i, name in enumerate(("early", "mid", "late")):
+                key = f"fim_middle_acc_{name}"
+                if key in base:
+                    self._fim_acc_bins[i] += float(base[key])
+        self._fim_probe_count += 1
+
+    def _log_fim_probe(self):
+        """Log the accumulated ``_fim_probe`` values (one line per epoch)."""
+        if not self._fim_probe_count:
+            return
+        n = float(self._fim_probe_count)
+        length_delta = (self._fim_length / self._fim_length_count
+                        if self._fim_length_count else None)
+        vals = {
+            "val_fim_middle_loss": self._fim_base / n,
+            "val_fim_middle_acc": self._fim_acc / n,
+            "val_fim_text_delta": self._fim_text / n,
+            "val_fim_suffix_delta": self._fim_suffix / n,
+            "val_fim_region_delta": self._fim_region / n,
+        }
+        if length_delta is not None:
+            vals["val_fim_length_delta"] = length_delta
+        for i, name in enumerate(("early", "mid", "late")):
+            vals[f"val_fim_middle_acc/{name}"] = self._fim_acc_bins[i] / n
+        for tag, v in vals.items():
+            self._add_scalar(tag, torch.tensor(float(v)))
+        print("FIM probe: middle CE {:.3f} (acc {:.3f}, span thirds "
+              "{:.2f}/{:.2f}/{:.2f}) | deltas (nats): text {:+.3f}, suffix "
+              "{:+.3f}, region {:+.3f}, length {}".format(
+                  vals["val_fim_middle_loss"], vals["val_fim_middle_acc"],
+                  vals["val_fim_middle_acc/early"],
+                  vals["val_fim_middle_acc/mid"],
+                  vals["val_fim_middle_acc/late"],
+                  vals["val_fim_text_delta"], vals["val_fim_suffix_delta"],
+                  vals["val_fim_region_delta"],
+                  "n/a (length_cond off)" if length_delta is None
+                  else f"{length_delta:+.3f}"))
+        if vals["val_fim_suffix_delta"] < 0.05:
+            print("  NOTE: the model barely uses the *suffix* when filling the "
+                  "hole (delta < 0.05 nats); a span cannot be paced from what "
+                  "comes before it alone, so check this before the length "
+                  "conditioning (transformer.length_cond).")
 
     @torch.no_grad()
     def _accumulate_text_delta(self, batch, out):
@@ -1372,6 +1535,7 @@ class TrainModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         """Log ``val_text_delta`` (the "is the text conditioning alive?" metric)."""
+        self._log_fim_probe()
         if self.text_delta_batches <= 0 or not self._text_delta_count:
             return
         n = float(self._text_delta_count)
@@ -1396,6 +1560,8 @@ class TrainModule(pl.LightningModule):
         self._log_step_metrics("val", out, on_step=False)
         if batch_idx < self.text_delta_batches:
             self._accumulate_text_delta(batch, out)
+        if batch_idx < self.fim_probe_batches:
+            self._fim_probe(batch)
         return out["loss"]
 
 
@@ -1412,7 +1578,7 @@ def parse_args():
     return config, args
 
 
-def check_special_layout(state_dict, net, source):
+def check_special_layout(state_dict, net, source, strict: bool = True):
     """Fail loudly when a checkpoint's special-class layout disagrees with ``net``.
 
     ``transformer.eos_token`` and ``transformer.fim`` each add classes to every
@@ -1421,7 +1587,9 @@ def check_special_layout(state_dict, net, source):
     would fail on ~30 tensors and the optimizer state is positional), and a
     ``--transfer_from`` can only *grow* a narrower checkpoint
     (``expand_state_dict_with_special`` has no way to shrink one), so both paths
-    call this first.
+    call this first.  ``transformer.length_cond`` changes the parameter *set*
+    without touching any class count, so it is checked separately (a missing
+    ``decoder.len_emb`` table would otherwise be silently re-initialised).
 
     Args:
         state_dict: checkpoint tensors, keyed with the ``net.`` prefix.
@@ -1431,16 +1599,45 @@ def check_special_layout(state_dict, net, source):
     key = "net.decoder.embeds.0.weight"
     w = state_dict.get(key)
     want = net.decoder.num_classes[0]
-    if w is None or w.shape[0] == want:
-        return
-    advice = (f"Either match transformer.eos_token / transformer.fim to this "
-              f"checkpoint, or start a new exp_name and warm-start with "
-              f"--transfer_from {source} (which zero-pads the smaller layout up "
-              f"to the new special classes).  There is no helper to *drop* a "
-              f"special class again.")
-    raise SystemExit(
-        f"ERROR: {source} has {key} with {w.shape[0]} rows, but this model "
-        f"needs {want} (eos_token={net.eos_token}, fim={net.fim}).  {advice}")
+    if w is not None and w.shape[0] != want:
+        advice = (f"Either match transformer.eos_token / transformer.fim to this "
+                  f"checkpoint, or start a new exp_name and warm-start with "
+                  f"--transfer_from {source} (which zero-pads the smaller layout up "
+                  f"to the new special classes).  There is no helper to *drop* a "
+                  f"special class again.")
+        raise SystemExit(
+            f"ERROR: {source} has {key} with {w.shape[0]} rows, but this model "
+            f"needs {want} (eos_token={net.eos_token}, fim={net.fim}).  {advice}")
+
+    # ``transformer.length_cond`` adds a table (no class-count change), so it
+    # has to be detected separately: a shape mismatch would not show up in the
+    # check above, and silently dropping/re-initing the table is exactly the
+    # kind of half-load that makes an infill run look broken for weeks.
+    #
+    # Only the "checkpoint has it, model does not" direction is fatal: those are
+    # trained weights that would be thrown away.  The other direction (model
+    # wants the table, checkpoint predates it) is what ``--transfer_from`` is
+    # *for* -- ``load_state_dict_mismatch`` leaves the new table freshly
+    # initialised and everything else transfers -- so it is a printed note there
+    # and an error only for ``--resume_from`` (whose strict load cannot absorb a
+    # missing key anyway).
+    has_len = "net.decoder.len_emb.weight" in state_dict
+    if has_len and not net.length_cond:
+        raise SystemExit(
+            f"ERROR: {source} has net.decoder.len_emb.weight (trained span-length "
+            f"conditioning), but this model was built with length_cond=False.  "
+            f"Set transformer.length_cond: true and n_len_buckets to the trained "
+            f"value ({int(state_dict['net.decoder.len_emb.weight'].shape[0])}).")
+    if net.length_cond and not has_len:
+        message = (f"{source} has no net.decoder.len_emb.weight, but this model "
+                   f"was built with length_cond=True: the span-length table "
+                   f"starts from scratch and has to be learned.")
+        if strict:
+            raise SystemExit(
+                f"ERROR: {message}  Use --transfer_from {source} instead of "
+                f"--resume_from (a strict load cannot absorb the missing key), "
+                f"or start a fresh exp_name.")
+        print(f"NOTE: {message}")
 
 
 def train(config, resume_from=None, transfer_from=None):
@@ -1492,7 +1689,12 @@ def train(config, resume_from=None, transfer_from=None):
         # afterwards catches what the helper cannot fix (a *wider* checkpoint
         # going into a smaller config).
         state = expand_state_dict_with_special(net, state)
-        check_special_layout(state, net, transfer_from)
+        # strict=False: a checkpoint that predates ``transformer.length_cond``
+        # is the *expected* warm-start case here -- the new table stays fresh and
+        # is reported, the rest transfers.  (The fatal direction, a checkpoint
+        # with trained length conditioning going into a model without it, still
+        # raises.)
+        check_special_layout(state, net, transfer_from, strict=False)
         load_submodule_prefix(net, "net.", state)
     else:
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
