@@ -18,15 +18,22 @@ def resample_audio(audio, orig_sr, target_sr=16000):
     return audio
 
 
-def process_audio_file(audio_path, output_dir, target_sr=16000):
+def process_audio_file(audio_path, output_dir, target_sr=16000,
+                       unique_names=False):
     """
     Load audio file, convert to tensor, resample to target sample rate, and save.
-    
+
+    WARNING: by default the output is named by the source stem only.  If the
+    input tree has repeated basenames (e.g.
+    `MareFairData/<character>/_001.flac`), later files overwrite earlier ones.
+    Use `--unique-names` to prefix the parent directory and avoid collisions.
+
     Args:
         audio_path: Path to input audio file
         output_dir: Directory to save processed tensor
         target_sr: Target sample rate (default: 16000 Hz)
-    
+        unique_names: Prefix the output with the source parent directory
+
     Returns:
         Path to saved tensor file
     """
@@ -45,6 +52,10 @@ def process_audio_file(audio_path, output_dir, target_sr=16000):
     
     # Create output filename based on input filename
     input_filename = Path(audio_path).stem
+    if unique_names:
+        parent = Path(audio_path).parent.name
+        if parent:
+            input_filename = f'{parent}__{input_filename}'
     output_filename = f"{input_filename}.pt"
     output_path = os.path.join(output_dir, output_filename)
     
@@ -62,6 +73,9 @@ def main():
                         help='Directory to save processed audio tensors and filelist')
     parser.add_argument('--sample_rate', type=int, default=16000,
                         help='Target sample rate (default: 16000 Hz)')
+    parser.add_argument('--unique-names', action='store_true',
+                        help='prefix output with the source parent directory to '
+                             'avoid basename collisions (MareFairData)')
     parser.add_argument('--val_fraction', type=float, default=0.1,
                         help='Fraction of data to use for validation (default: 0.1)')
     parser.add_argument('--seed', type=int, default=42,
@@ -87,7 +101,9 @@ def main():
     for audio_path, metadata in tqdm(annotations.items()):
         try:
             # Process audio file
-            output_path = process_audio_file(audio_path, args.output_dir, args.sample_rate)
+            output_path = process_audio_file(audio_path, args.output_dir,
+                                             args.sample_rate,
+                                             args.unique_names)
             
             # Get intensity value
             intensity = metadata.get('intensity', 0)

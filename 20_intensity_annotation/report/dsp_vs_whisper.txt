@@ -1,0 +1,21 @@
+/home/vul/miniconda3/envs/raraai/lib/python3.12/site-packages/sklearn/impute/_base.py:653: UserWarning: Skipping features without any observed values: [8]. At least one non-missing value is needed for imputation with strategy='median'.
+  warnings.warn(
+120 eval clips (['val'])
+[inference] features=openai/whisper-small (d_model=768), ckpt=checkpoints/intensity_whisper_small_local/best-checkpoint.ckpt (epoch=9, step=1700)
+8/120 whisper-scored16/120 whisper-scored24/120 whisper-scored32/120 whisper-scored40/120 whisper-scored48/120 whisper-scored56/120 whisper-scored64/120 whisper-scored72/120 whisper-scored80/120 whisper-scored88/120 whisper-scored96/120 whisper-scored104/120 whisper-scored112/120 whisper-scored120/120 whisper-scored
+
+=== 120 clips, 2s / 0.5s ===
+whisper whole          pooled r=+0.634  MAE=0.551  R2=+0.395  within r=+0.547
+whisper window mean    pooled r=+0.735  MAE=0.510  R2=+0.506  within r=+0.609
+DSP tier1 no gate      pooled r=+0.690  MAE=0.531  R2=+0.471  within r=+0.562
+DSP tier1 gated        pooled r=+0.670  MAE=0.547  R2=+0.432  within r=+0.530
+
+per corpus:
+  whisper    genshin  n=  44  r=+0.771  MAE=0.454  within=+0.498
+  whisper    mlp      n=  34  r=+0.641  MAE=0.587  within=+0.736
+  whisper    vctk     n=  23  r=+0.002  MAE=0.510  within=+0.981
+  DSP        genshin  n=  44  r=+0.580  MAE=0.569  within=+0.147
+  DSP        mlp      n=  34  r=+0.548  MAE=0.621  within=+0.622
+  DSP        vctk     n=  23  r=+0.215  MAE=0.448  within=-0.694
+
+wrote report/dsp_vs_whisper_val.csv

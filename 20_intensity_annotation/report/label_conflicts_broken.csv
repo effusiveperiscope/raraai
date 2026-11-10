@@ -1,0 +1,163 @@
+path,label,labels,label_min,label_max,label_span,label_nunique,n_rows,label_median,label_mean,label_mode,splits,split,leak,speaker,corpus,singing,whisper
+data/v0.5/_046.pt,5,"[3, 4, 5, 6, 7]",3,7,4,5,7,5.0,5.0,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_017.pt,6,"[4, 5, 6, 8]",4,8,4,4,5,5.5,5.75,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_021.pt,5,"[4, 5, 8]",4,8,4,3,3,5.0,5.666666666666667,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_005.pt,6,"[4, 5, 6, 7]",4,7,3,4,7,5.5,5.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_044.pt,6,"[4, 5, 6, 7]",4,7,3,4,6,5.5,5.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_020.pt,5,"[3, 4, 5, 6]",3,6,3,4,5,4.5,4.5,3,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_034.pt,6,"[4, 5, 6, 7]",4,7,3,4,5,5.5,5.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_110.pt,5,"[3, 4, 5, 6]",3,6,3,4,4,4.5,4.5,3,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_036.pt,6,"[4, 6, 7]",4,7,3,3,5,6.0,5.666666666666667,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_002.pt,5,"[4, 5, 7]",4,7,3,3,4,5.0,5.333333333333333,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_012.pt,5,"[4, 5, 7]",4,7,3,3,4,5.0,5.333333333333333,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_099.pt,6,"[4, 6, 7]",4,7,3,3,4,6.0,5.666666666666667,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_118.pt,5,"[4, 5, 7]",4,7,3,3,3,5.0,5.333333333333333,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_132.pt,5,"[4, 5, 7]",4,7,3,3,3,5.0,5.333333333333333,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_006.pt,5,"[4, 5, 6]",4,6,2,3,9,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_003.pt,6,"[5, 6, 7]",5,7,2,3,9,6.0,6.0,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_013.pt,5,"[4, 5, 6]",4,6,2,3,7,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_010.pt,5,"[4, 5, 6]",4,6,2,3,7,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_001.pt,5,"[4, 5, 6]",4,6,2,3,7,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_032.pt,5,"[4, 5, 6]",4,6,2,3,6,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_009.pt,5,"[4, 5, 6]",4,6,2,3,6,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_029.pt,5,"[4, 5, 6]",4,6,2,3,6,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_031.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_100.pt,4,"[3, 4, 5]",3,5,2,3,5,4.0,4.0,3,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_057.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_040.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_096.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_038.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_043.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_024.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_004.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_077.pt,5,"[4, 5, 6]",4,6,2,3,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_105.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_090.pt,4,"[3, 4, 5]",3,5,2,3,4,4.0,4.0,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_143.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_064.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_028.pt,6,"[5, 6, 7]",5,7,2,3,4,6.0,6.0,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_054.pt,4,"[3, 4, 5]",3,5,2,3,4,4.0,4.0,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_107.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_048.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_072.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_089.pt,5,"[4, 5, 6]",4,6,2,3,4,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_073.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_081.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_162.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_071.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_120.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_078.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_131.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_085.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_030.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_122.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_121.pt,5,"[4, 5, 6]",4,6,2,3,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_056.pt,5,"[4, 6]",4,6,2,2,5,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_047.pt,5,"[4, 6]",4,6,2,2,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_019.pt,5,"[4, 6]",4,6,2,2,5,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_094.pt,5,"[4, 6]",4,6,2,2,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_134.pt,5,"[4, 6]",4,6,2,2,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_007.pt,5,"[4, 6]",4,6,2,2,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_159.pt,5,"[4, 6]",4,6,2,2,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_115.pt,5,"[4, 6]",4,6,2,2,3,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_124.pt,6,"[5, 7]",5,7,2,2,2,6.0,6.0,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_129.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_045.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_098.pt,6,"[5, 7]",5,7,2,2,2,6.0,6.0,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_074.pt,4,"[3, 5]",3,5,2,2,2,4.0,4.0,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_113.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_178.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_302.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_197.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_108.pt,4,"[3, 5]",3,5,2,2,2,4.0,4.0,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_232.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_097.pt,5,"[4, 6]",4,6,2,2,2,5.0,5.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_053.pt,5,"[4, 5]",4,5,1,2,5,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_049.pt,5,"[4, 5]",4,5,1,2,5,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_026.pt,6,"[5, 6]",5,6,1,2,5,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_114.pt,5,"[4, 5]",4,5,1,2,5,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_027.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_065.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_109.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_025.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_135.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_127.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_014.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_093.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_103.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_141.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_058.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_037.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_068.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_067.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_015.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_011.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_042.pt,6,"[5, 6]",5,6,1,2,4,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_050.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_008.pt,5,"[4, 5]",4,5,1,2,4,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_022.pt,6,"[5, 6]",5,6,1,2,3,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_069.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_163.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_060.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_091.pt,4,"[3, 4]",3,4,1,2,3,3.5,3.5,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_137.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_087.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_140.pt,4,"[3, 4]",3,4,1,2,3,3.5,3.5,3,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_160.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_070.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_126.pt,6,"[5, 6]",5,6,1,2,3,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_035.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_023.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_139.pt,6,"[5, 6]",5,6,1,2,3,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_128.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_171.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_119.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_088.pt,6,"[5, 6]",5,6,1,2,3,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_033.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_101.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_086.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_168.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_095.pt,5,"[4, 5]",4,5,1,2,3,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_061.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_164.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_116.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_222.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_278.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_252.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_142.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_145.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_063.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_250.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_144.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_173.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_240.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_212.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_283.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_231.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_230.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_308.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_018.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_284.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_186.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_219.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_157.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_161.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_083.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_156.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_217.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_243.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_206.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_216.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_223.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_102.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_082.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train,train,0,unnamed_numeric,unnamed,0,0
+data/v0.5/_111.pt,5,"[4, 5]",4,5,1,2,2,4.5,4.5,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_125.pt,6,"[5, 6]",5,6,1,2,2,5.5,5.5,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_055.pt,4,[4],4,4,0,1,6,4.0,4.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_066.pt,5,[5],5,5,0,1,3,5.0,5.0,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_041.pt,5,[5],5,5,0,1,3,5.0,5.0,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_079.pt,4,[4],4,4,0,1,2,4.0,4.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_312.pt,5,[5],5,5,0,1,2,5.0,5.0,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_275.pt,5,[5],5,5,0,1,2,5.0,5.0,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_221.pt,5,[5],5,5,0,1,2,5.0,5.0,5,train+val,leak,1,unnamed_numeric,unnamed,0,0
+data/v0.5/_213.pt,4,[4],4,4,0,1,2,4.0,4.0,4,train+val,leak,1,unnamed_numeric,unnamed,0,0

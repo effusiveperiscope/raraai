@@ -1,0 +1,711 @@
+source,pt,label,character,split,src_sr,src_frames,src_dur,pt_frames,pt_dur,ratio
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_118.flac,data/v0.5_fixed/marefair/FunRaiser/_118.pt,7,FunRaiser,train,48000,231441,4.822,77147,4.822,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_126.flac,data/v0.5_fixed/marefair/Fair Flier/_126.pt,6,Fair Flier,train,48000,260979,5.437,86993,5.437,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_057.flac,data/v0.5_fixed/marefair/BGM/_057.pt,6,BGM,train,48000,257315,5.361,85772,5.361,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_320.flac,data/v0.5_fixed/marefair/Mimosa/_320.pt,5,Mimosa,val,48000,242905,5.061,80969,5.061,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_056.flac,data/v0.5_fixed/marefair/Soiree/_056.pt,6,Soiree,train,48000,431931,8.999,143977,8.999,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_117.flac,data/v0.5_fixed/marefair/Mimosa/_117.pt,5,Mimosa,train,48000,193286,4.027,64429,4.027,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_092.flac,data/v0.5_fixed/marefair/Matinee/_092.pt,4,Matinee,train,48000,749901,15.623,249967,15.623,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_036.flac,data/v0.5_fixed/marefair/Mimosa/_036.pt,6,Mimosa,train,48000,354920,7.394,118307,7.394,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_182.flac,data/v0.5_fixed/marefair/Soiree/_182.pt,4,Soiree,train,48000,260376,5.425,86792,5.425,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_032.flac,data/v0.5_fixed/marefair/DeadAnon/_032.pt,6,DeadAnon,train,48000,142515,2.969,47505,2.969,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_088.flac,data/v0.5_fixed/marefair/Mimosa/_088.pt,5,Mimosa,val,48000,333273,6.943,111091,6.943,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_022.flac,data/v0.5_fixed/marefair/BeelzTheBub/_022.pt,6,BeelzTheBub,train,48000,91475,1.906,30492,1.906,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_090.flac,data/v0.5_fixed/marefair/Mimosa/_090.pt,5,Mimosa,train,48000,350788,7.308,116930,7.308,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_001.flac,data/v0.5_fixed/marefair/ShobieShy/_001.pt,5,ShobieShy,train,48000,297761,6.203,99254,6.203,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_087.flac,data/v0.5_fixed/marefair/BeelzTheBub/_087.pt,4,BeelzTheBub,train,48000,598895,12.477,199632,12.477,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_069.flac,data/v0.5_fixed/marefair/Mimosa/_069.pt,5,Mimosa,train,48000,148031,3.084,49344,3.084,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_020.flac,data/v0.5_fixed/marefair/BeelzTheBub/_020.pt,5,BeelzTheBub,train,48000,233245,4.859,77749,4.859,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_010.flac,data/v0.5_fixed/marefair/BGM/_010.pt,5,BGM,train,48000,83734,1.744,27912,1.744,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_067.flac,data/v0.5_fixed/marefair/Mimosa/_067.pt,5,Mimosa,train,48000,126992,2.646,42331,2.646,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_188.flac,data/v0.5_fixed/marefair/Mimosa/_188.pt,3,Mimosa,train,48000,210230,4.38,70077,4.38,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_039.flac,data/v0.5_fixed/marefair/Soiree/_039.pt,5,Soiree,train,48000,191976,3.999,63992,3.999,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_293.flac,data/v0.5_fixed/marefair/Fair Flier/_293.pt,4,Fair Flier,train,48000,156734,3.265,52245,3.265,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_017.flac,data/v0.5_fixed/marefair/FunRaiser/_017.pt,8,FunRaiser,train,48000,432300,9.006,144100,9.006,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_178.flac,data/v0.5_fixed/marefair/Mimosa/_178.pt,6,Mimosa,train,48000,172002,3.583,57334,3.583,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_049.flac,data/v0.5_fixed/marefair/Soiree/_049.pt,4,Soiree,val,48000,241208,5.025,80403,5.025,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_127.flac,data/v0.5_fixed/marefair/Mimosa/_127.pt,6,Mimosa,train,48000,283117,5.898,94373,5.898,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_175.flac,data/v0.5_fixed/marefair/Mimosa/_175.pt,5,Mimosa,train,48000,157102,3.273,52368,3.273,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_096.flac,data/v0.5_fixed/marefair/Soiree/_096.pt,4,Soiree,train,48000,201676,4.202,67226,4.202,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_120.flac,data/v0.5_fixed/marefair/Mimosa/_120.pt,6,Mimosa,train,48000,669632,13.951,223211,13.951,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_012.flac,data/v0.5_fixed/marefair/Mimosa/_012.pt,5,Mimosa,train,48000,118924,2.478,39642,2.478,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_252.flac,data/v0.5_fixed/marefair/Fair Flier/_252.pt,5,Fair Flier,train,48000,241586,5.033,80529,5.033,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_140.flac,data/v0.5_fixed/marefair/Fair Flier/_140.pt,4,Fair Flier,train,48000,332789,6.933,110930,6.933,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_171.flac,data/v0.5_fixed/marefair/Fair Flier/_171.pt,5,Fair Flier,train,48000,241586,5.033,80529,5.033,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_001.flac,data/v0.5_fixed/marefair/FunRaiser/_001.pt,5,FunRaiser,train,48000,1637996,34.125,545999,34.125,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_163.flac,data/v0.5_fixed/marefair/Soiree/_163.pt,5,Soiree,train,48000,367964,7.666,122655,7.666,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_010.flac,data/v0.5_fixed/marefair/Algo/_010.pt,4,Algo,train,48000,164515,3.427,54839,3.427,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_005.flac,data/v0.5_fixed/marefair/Mimosa/_005.pt,7,Mimosa,train,48000,282479,5.885,94160,5.885,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_008.flac,data/v0.5_fixed/marefair/DeadAnon/_008.pt,4,DeadAnon,train,48000,134363,2.799,44788,2.799,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_001.flac,data/v0.5_fixed/marefair/Fair Flier/_001.pt,5,Fair Flier,train,48000,176646,3.68,58882,3.68,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_049.flac,data/v0.5_fixed/marefair/Mimosa/_049.pt,5,Mimosa,train,48000,80990,1.687,26997,1.687,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_137.flac,data/v0.5_fixed/marefair/Matinee/_137.pt,4,Matinee,train,48000,254892,5.31,84964,5.31,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_309.flac,data/v0.5_fixed/marefair/Mimosa/_309.pt,4,Mimosa,train,48000,327032,6.813,109011,6.813,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_139.flac,data/v0.5_fixed/marefair/Fair Flier/_139.pt,5,Fair Flier,train,48000,336823,7.017,112275,7.017,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_163.flac,data/v0.5_fixed/marefair/Mimosa/_163.pt,4,Mimosa,val,48000,201229,4.192,67077,4.192,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_306.flac,data/v0.5_fixed/marefair/Mimosa/_306.pt,4,Mimosa,train,48000,223820,4.663,74607,4.663,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_124.flac,data/v0.5_fixed/marefair/Fair Flier/_124.pt,5,Fair Flier,train,48000,130231,2.713,43411,2.713,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_003.flac,data/v0.5_fixed/marefair/BeelzTheBub/_003.pt,6,BeelzTheBub,train,48000,2022509,42.136,674170,42.136,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_009.flac,data/v0.5_fixed/marefair/BeelzTheBub/_009.pt,6,BeelzTheBub,train,48000,177184,3.691,59062,3.691,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_125.flac,data/v0.5_fixed/marefair/Mimosa/_125.pt,6,Mimosa,train,48000,347891,7.248,115964,7.248,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_129.flac,data/v0.5_fixed/marefair/Fair Flier/_129.pt,6,Fair Flier,train,48000,229047,4.772,76349,4.772,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_008.flac,data/v0.5_fixed/marefair/BGM/_008.pt,4,BGM,train,48000,170410,3.55,56804,3.55,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_136.flac,data/v0.5_fixed/marefair/Fair Flier/_136.pt,4,Fair Flier,train,48000,362423,7.55,120808,7.551,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_029.flac,data/v0.5_fixed/marefair/Soiree/_029.pt,6,Soiree,val,48000,195037,4.063,65013,4.063,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_104.flac,data/v0.5_fixed/marefair/Fair Flier/_104.pt,6,Fair Flier,train,48000,339393,7.071,113131,7.071,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_019.flac,data/v0.5_fixed/marefair/BGM/_019.pt,4,BGM,val,48000,155413,3.238,51805,3.238,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_012.flac,data/v0.5_fixed/marefair/FunRaiser/_012.pt,7,FunRaiser,val,48000,722650,15.055,240884,15.055,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_025.flac,data/v0.5_fixed/marefair/DeadAnon/_025.pt,5,DeadAnon,train,48000,375248,7.818,125083,7.818,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_046.flac,data/v0.5_fixed/marefair/FunRaiser/_046.pt,6,FunRaiser,train,48000,233743,4.87,77915,4.87,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_204.flac,data/v0.5_fixed/marefair/Mimosa/_204.pt,5,Mimosa,train,48000,746313,15.548,248771,15.548,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_075.flac,data/v0.5_fixed/marefair/Soiree/_075.pt,4,Soiree,train,48000,461498,9.615,153833,9.615,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_283.flac,data/v0.5_fixed/marefair/Fair Flier/_283.pt,5,Fair Flier,train,48000,183835,3.83,61279,3.83,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_301.flac,data/v0.5_fixed/marefair/Mimosa/_301.pt,4,Mimosa,train,48000,158801,3.308,52934,3.308,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_177.flac,data/v0.5_fixed/marefair/Fair Flier/_177.pt,3,Fair Flier,train,48000,1381890,28.789,460630,28.789,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_005.flac,data/v0.5_fixed/marefair/DeadAnon/_005.pt,5,DeadAnon,train,48000,138564,2.887,46188,2.887,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_095.flac,data/v0.5_fixed/marefair/BeelzTheBub/_095.pt,4,BeelzTheBub,val,48000,194749,4.057,64917,4.057,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_006.flac,data/v0.5_fixed/marefair/Extra/_006.pt,4,Extra,train,48000,525478,10.947,175160,10.947,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_218.flac,data/v0.5_fixed/marefair/Mimosa/_218.pt,6,Mimosa,val,48000,505414,10.529,168472,10.53,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_099.flac,data/v0.5_fixed/marefair/Mimosa/_099.pt,4,Mimosa,train,48000,141456,2.947,47152,2.947,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_321.flac,data/v0.5_fixed/marefair/Mimosa/_321.pt,5,Mimosa,train,48000,363255,7.568,121085,7.568,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_220.flac,data/v0.5_fixed/marefair/Fair Flier/_220.pt,5,Fair Flier,train,48000,336823,7.017,112275,7.017,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_082.flac,data/v0.5_fixed/marefair/BeelzTheBub/_082.pt,5,BeelzTheBub,val,48000,559861,11.664,186621,11.664,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_042.flac,data/v0.5_fixed/marefair/BGM/_042.pt,5,BGM,train,48000,290242,6.047,96748,6.047,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_056.flac,data/v0.5_fixed/marefair/Fair Flier/_056.pt,4,Fair Flier,train,48000,313262,6.526,104421,6.526,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_009.flac,data/v0.5_fixed/marefair/Matinee/_009.pt,6,Matinee,train,48000,267612,5.575,89204,5.575,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_048.flac,data/v0.5_fixed/marefair/BGM/_048.pt,5,BGM,val,48000,286856,5.976,95619,5.976,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_106.flac,data/v0.5_fixed/marefair/Matinee/_106.pt,5,Matinee,train,48000,205257,4.276,68419,4.276,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_110.flac,data/v0.5_fixed/marefair/FunRaiser/_110.pt,3,FunRaiser,train,48000,191470,3.989,63824,3.989,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_239.flac,data/v0.5_fixed/marefair/Mimosa/_239.pt,5,Mimosa,train,48000,723360,15.07,241120,15.07,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_158.flac,data/v0.5_fixed/marefair/Fair Flier/_158.pt,4,Fair Flier,train,48000,255298,5.319,85100,5.319,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_082.flac,data/v0.5_fixed/marefair/Mimosa/_082.pt,6,Mimosa,train,48000,146675,3.056,48892,3.056,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_001.flac,data/v0.5_fixed/marefair/Mimosa/_001.pt,5,Mimosa,train,48000,407127,8.482,135709,8.482,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_002.flac,data/v0.5_fixed/marefair/BGM/_002.pt,5,BGM,train,48000,325726,6.786,108576,6.786,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_037.flac,data/v0.5_fixed/marefair/BeelzTheBub/_037.pt,5,BeelzTheBub,train,48000,168608,3.513,56203,3.513,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_031.flac,data/v0.5_fixed/marefair/Matinee/_031.pt,5,Matinee,train,48000,466996,9.729,155666,9.729,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_056.flac,data/v0.5_fixed/marefair/BeelzTheBub/_056.pt,4,BeelzTheBub,train,48000,163814,3.413,54605,3.413,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_221.flac,data/v0.5_fixed/marefair/Fair Flier/_221.pt,5,Fair Flier,train,48000,332789,6.933,110930,6.933,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_160.flac,data/v0.5_fixed/marefair/Soiree/_160.pt,4,Soiree,train,48000,173408,3.613,57803,3.613,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_010.flac,data/v0.5_fixed/marefair/DeadAnon/_010.pt,4,DeadAnon,train,48000,102928,2.144,34310,2.144,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_090.flac,data/v0.5_fixed/marefair/FunRaiser/_090.pt,3,FunRaiser,val,48000,147654,3.076,49218,3.076,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_088.flac,data/v0.5_fixed/marefair/BeelzTheBub/_088.pt,5,BeelzTheBub,train,48000,418427,8.717,139476,8.717,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_099.flac,data/v0.5_fixed/marefair/Soiree/_099.pt,4,Soiree,train,48000,289294,6.027,96432,6.027,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_087.flac,data/v0.5_fixed/marefair/Mimosa/_087.pt,5,Mimosa,train,48000,641572,13.366,213858,13.366,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_119.flac,data/v0.5_fixed/marefair/Mimosa/_119.pt,5,Mimosa,val,48000,187241,3.901,62414,3.901,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_105.flac,data/v0.5_fixed/marefair/Matinee/_105.pt,4,Matinee,train,48000,425180,8.858,141727,8.858,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_022.flac,data/v0.5_fixed/marefair/FunRaiser/_022.pt,5,FunRaiser,train,48000,203873,4.247,67958,4.247,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_029.flac,data/v0.5_fixed/marefair/BGM/_029.pt,5,BGM,train,48000,390461,8.135,130154,8.135,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_068.flac,data/v0.5_fixed/marefair/Fair Flier/_068.pt,4,Fair Flier,train,48000,134208,2.796,44736,2.796,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_071.flac,data/v0.5_fixed/marefair/Mimosa/_071.pt,5,Mimosa,train,48000,663246,13.818,221082,13.818,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_020.flac,data/v0.5_fixed/marefair/Matinee/_020.pt,6,Matinee,train,48000,361943,7.54,120648,7.54,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_219.flac,data/v0.5_fixed/marefair/Mimosa/_219.pt,5,Mimosa,train,48000,234915,4.894,78305,4.894,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_049.flac,data/v0.5_fixed/marefair/Matinee/_049.pt,4,Matinee,train,48000,381286,7.943,127096,7.944,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_124.flac,data/v0.5_fixed/marefair/Mimosa/_124.pt,7,Mimosa,train,48000,654323,13.632,218108,13.632,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_099.flac,data/v0.5_fixed/marefair/Fair Flier/_099.pt,6,Fair Flier,train,48000,139108,2.898,46370,2.898,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_085.flac,data/v0.5_fixed/marefair/Mimosa/_085.pt,5,Mimosa,train,48000,330517,6.886,110173,6.886,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_144.flac,data/v0.5_fixed/marefair/Fair Flier/_144.pt,4,Fair Flier,train,48000,539067,11.231,179689,11.231,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_143.flac,data/v0.5_fixed/marefair/Fair Flier/_143.pt,5,Fair Flier,train,48000,386592,8.054,128864,8.054,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_217.flac,data/v0.5_fixed/marefair/Fair Flier/_217.pt,5,Fair Flier,val,48000,181387,3.779,60463,3.779,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_002.flac,data/v0.5_fixed/marefair/DeadAnon/_002.pt,7,DeadAnon,train,48000,239420,4.988,79807,4.988,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_073.flac,data/v0.5_fixed/marefair/Fair Flier/_073.pt,4,Fair Flier,val,48000,88932,1.853,29644,1.853,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_192.flac,data/v0.5_fixed/marefair/Fair Flier/_192.pt,4,Fair Flier,train,48000,673772,14.037,224591,14.037,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_001.flac,data/v0.5_fixed/marefair/BGM/_001.pt,4,BGM,val,48000,321619,6.7,107207,6.7,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_054.flac,data/v0.5_fixed/marefair/Soiree/_054.pt,3,Soiree,train,48000,304392,6.341,101464,6.341,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_169.flac,data/v0.5_fixed/marefair/Mimosa/_169.pt,4,Mimosa,train,48000,390948,8.145,130316,8.145,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_234.flac,data/v0.5_fixed/marefair/Mimosa/_234.pt,6,Mimosa,train,48000,355635,7.409,118545,7.409,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_069.flac,data/v0.5_fixed/marefair/FunRaiser/_069.pt,4,FunRaiser,train,48000,652061,13.585,217354,13.585,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_249.flac,data/v0.5_fixed/marefair/Fair Flier/_249.pt,5,Fair Flier,val,48000,238788,4.975,79596,4.975,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_054.flac,data/v0.5_fixed/marefair/Mimosa/_054.pt,5,Mimosa,train,48000,82972,1.729,27658,1.729,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_006.flac,data/v0.5_fixed/marefair/Soiree/_006.pt,5,Soiree,train,48000,109051,2.272,36351,2.272,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_072.flac,data/v0.5_fixed/marefair/Fair Flier/_072.pt,4,Fair Flier,train,48000,195492,4.073,65164,4.073,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_105.flac,data/v0.5_fixed/marefair/Fair Flier/_105.pt,6,Fair Flier,train,48000,345963,7.208,115321,7.208,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_193.flac,data/v0.5_fixed/marefair/Mimosa/_193.pt,5,Mimosa,train,48000,388989,8.104,129663,8.104,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_326.flac,data/v0.5_fixed/marefair/Mimosa/_326.pt,5,Mimosa,train,48000,128481,2.677,42827,2.677,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_053.flac,data/v0.5_fixed/marefair/FunRaiser/_053.pt,4,FunRaiser,train,48000,364828,7.601,121610,7.601,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_004.flac,data/v0.5_fixed/marefair/Algo/_004.pt,6,Algo,train,48000,104365,2.174,34789,2.174,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_009.flac,data/v0.5_fixed/marefair/BGM/_009.pt,4,BGM,train,48000,165499,3.448,55167,3.448,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_185.flac,data/v0.5_fixed/marefair/Mimosa/_185.pt,4,Mimosa,train,48000,203345,4.236,67782,4.236,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_040.flac,data/v0.5_fixed/marefair/FunRaiser/_040.pt,6,FunRaiser,train,48000,835956,17.416,278652,17.416,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_314.flac,data/v0.5_fixed/marefair/Fair Flier/_314.pt,5,Fair Flier,train,48000,132638,2.763,44213,2.763,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_045.flac,data/v0.5_fixed/marefair/BeelzTheBub/_045.pt,4,BeelzTheBub,val,48000,273431,5.696,91144,5.697,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_096.flac,data/v0.5_fixed/marefair/Mimosa/_096.pt,6,Mimosa,train,48000,352829,7.351,117610,7.351,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_247.flac,data/v0.5_fixed/marefair/Mimosa/_247.pt,5,Mimosa,val,48000,151264,3.151,50422,3.151,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_031.flac,data/v0.5_fixed/marefair/DeadAnon/_031.pt,5,DeadAnon,train,48000,214210,4.463,71404,4.463,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_059.flac,data/v0.5_fixed/marefair/FunRaiser/_059.pt,4,FunRaiser,val,48000,411585,8.575,137195,8.575,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_029.flac,data/v0.5_fixed/marefair/Mimosa/_029.pt,6,Mimosa,train,48000,196923,4.103,65641,4.103,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_121.flac,data/v0.5_fixed/marefair/Soiree/_121.pt,4,Soiree,val,48000,140562,2.928,46854,2.928,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_073.flac,data/v0.5_fixed/marefair/FunRaiser/_073.pt,6,FunRaiser,train,48000,413987,8.625,137996,8.625,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_232.flac,data/v0.5_fixed/marefair/Fair Flier/_232.pt,4,Fair Flier,train,48000,166543,3.47,55515,3.47,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_096.flac,data/v0.5_fixed/marefair/FunRaiser/_096.pt,5,FunRaiser,train,48000,598641,12.472,199547,12.472,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_056.flac,data/v0.5_fixed/marefair/Mimosa/_056.pt,4,Mimosa,train,48000,69683,1.452,23228,1.452,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_018.flac,data/v0.5_fixed/marefair/Soiree/_018.pt,4,Soiree,train,48000,303601,6.325,101201,6.325,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_174.flac,data/v0.5_fixed/marefair/Mimosa/_174.pt,4,Mimosa,train,48000,155805,3.246,51935,3.246,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_018.flac,data/v0.5_fixed/marefair/Matinee/_018.pt,5,Matinee,val,48000,350496,7.302,116832,7.302,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_114.flac,data/v0.5_fixed/marefair/Mimosa/_114.pt,5,Mimosa,val,48000,758771,15.808,252924,15.808,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_147.flac,data/v0.5_fixed/marefair/Mimosa/_147.pt,5,Mimosa,train,48000,423688,8.827,141230,8.827,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_024.flac,data/v0.5_fixed/marefair/Mimosa/_024.pt,6,Mimosa,train,48000,193820,4.038,64607,4.038,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_094.flac,data/v0.5_fixed/marefair/BeelzTheBub/_094.pt,4,BeelzTheBub,train,48000,265202,5.525,88401,5.525,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_014.flac,data/v0.5_fixed/marefair/Matinee/_014.pt,5,Matinee,train,48000,190152,3.962,63384,3.962,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_056.flac,data/v0.5_fixed/marefair/FunRaiser/_056.pt,4,FunRaiser,train,48000,198371,4.133,66124,4.133,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_050.flac,data/v0.5_fixed/marefair/Soiree/_050.pt,4,Soiree,train,48000,143383,2.987,47795,2.987,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_021.flac,data/v0.5_fixed/marefair/BeelzTheBub/_021.pt,4,BeelzTheBub,val,48000,161960,3.374,53987,3.374,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_127.flac,data/v0.5_fixed/marefair/Soiree/_127.pt,6,Soiree,train,48000,133821,2.788,44607,2.788,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_249.flac,data/v0.5_fixed/marefair/Mimosa/_249.pt,5,Mimosa,train,48000,508162,10.587,169388,10.587,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_009.flac,data/v0.5_fixed/marefair/Algo/_009.pt,4,Algo,train,48000,159578,3.325,53193,3.325,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_100.flac,data/v0.5_fixed/marefair/BeelzTheBub/_100.pt,4,BeelzTheBub,train,48000,1165832,24.288,388611,24.288,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_080.flac,data/v0.5_fixed/marefair/FunRaiser/_080.pt,4,FunRaiser,train,48000,339793,7.079,113265,7.079,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_185.flac,data/v0.5_fixed/marefair/Fair Flier/_185.pt,4,Fair Flier,train,48000,235847,4.913,78616,4.913,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_046.flac,data/v0.5_fixed/marefair/Soiree/_046.pt,3,Soiree,train,48000,398612,8.304,132871,8.304,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_143.flac,data/v0.5_fixed/marefair/Mimosa/_143.pt,6,Mimosa,val,48000,349588,7.283,116530,7.283,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_036.flac,data/v0.5_fixed/marefair/BGM/_036.pt,4,BGM,train,48000,396602,8.263,132201,8.263,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_034.flac,data/v0.5_fixed/marefair/Soiree/_034.pt,5,Soiree,train,48000,222637,4.638,74213,4.638,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_310.flac,data/v0.5_fixed/marefair/Mimosa/_310.pt,4,Mimosa,train,48000,144022,3.0,48008,3.001,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_154.flac,data/v0.5_fixed/marefair/Fair Flier/_154.pt,5,Fair Flier,train,48000,359176,7.483,119726,7.483,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_036.flac,data/v0.5_fixed/marefair/BeelzTheBub/_036.pt,4,BeelzTheBub,train,48000,173573,3.616,57858,3.616,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_121.flac,data/v0.5_fixed/marefair/Mimosa/_121.pt,5,Mimosa,train,48000,693683,14.452,231228,14.452,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_044.flac,data/v0.5_fixed/marefair/BeelzTheBub/_044.pt,7,BeelzTheBub,train,48000,533109,11.106,177703,11.106,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_211.flac,data/v0.5_fixed/marefair/Mimosa/_211.pt,4,Mimosa,train,48000,298317,6.215,99439,6.215,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_282.flac,data/v0.5_fixed/marefair/Fair Flier/_282.pt,5,Fair Flier,train,48000,162956,3.395,54319,3.395,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_005.flac,data/v0.5_fixed/marefair/Matinee/_005.pt,5,Matinee,train,48000,165378,3.445,55126,3.445,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_114.flac,data/v0.5_fixed/marefair/Fair Flier/_114.pt,4,Fair Flier,train,48000,404030,8.417,134677,8.417,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_005.flac,data/v0.5_fixed/marefair/FunRaiser/_005.pt,6,FunRaiser,train,48000,1640746,34.182,546916,34.182,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_087.flac,data/v0.5_fixed/marefair/Matinee/_087.pt,5,Matinee,val,48000,260645,5.43,86882,5.43,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_302.flac,data/v0.5_fixed/marefair/Fair Flier/_302.pt,6,Fair Flier,train,48000,131885,2.748,43962,2.748,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_143.flac,data/v0.5_fixed/marefair/Soiree/_143.pt,4,Soiree,train,48000,208103,4.335,69368,4.335,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_009.flac,data/v0.5_fixed/marefair/Extra/_009.pt,5,Extra,train,48000,160927,3.353,53643,3.353,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_159.flac,data/v0.5_fixed/marefair/Mimosa/_159.pt,6,Mimosa,train,48000,313023,6.521,104341,6.521,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_091.flac,data/v0.5_fixed/marefair/FunRaiser/_091.pt,3,FunRaiser,train,48000,125638,2.617,41880,2.618,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_063.flac,data/v0.5_fixed/marefair/FunRaiser/_063.pt,4,FunRaiser,train,48000,702348,14.632,234116,14.632,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_122.flac,data/v0.5_fixed/marefair/Fair Flier/_122.pt,6,Fair Flier,train,48000,335128,6.982,111710,6.982,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_153.flac,data/v0.5_fixed/marefair/Mimosa/_153.pt,5,Mimosa,train,48000,343648,7.159,114550,7.159,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_108.flac,data/v0.5_fixed/marefair/Soiree/_108.pt,5,Soiree,train,48000,137330,2.861,45777,2.861,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_055.flac,data/v0.5_fixed/marefair/BGM/_055.pt,4,BGM,train,48000,285573,5.949,95191,5.949,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_058.flac,data/v0.5_fixed/marefair/Matinee/_058.pt,5,Matinee,train,48000,95495,1.989,31832,1.99,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_312.flac,data/v0.5_fixed/marefair/Mimosa/_312.pt,5,Mimosa,train,48000,146563,3.053,48855,3.053,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_266.flac,data/v0.5_fixed/marefair/Mimosa/_266.pt,5,Mimosa,train,48000,1844784,38.433,614928,38.433,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_110.flac,data/v0.5_fixed/marefair/Soiree/_110.pt,5,Soiree,train,48000,169009,3.521,56337,3.521,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_140.flac,data/v0.5_fixed/marefair/FunRaiser/_140.pt,3,FunRaiser,train,48000,169867,3.539,56623,3.539,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_159.flac,data/v0.5_fixed/marefair/Fair Flier/_159.pt,6,Fair Flier,train,48000,177130,3.69,59044,3.69,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_317.flac,data/v0.5_fixed/marefair/Mimosa/_317.pt,5,Mimosa,val,48000,222389,4.633,74130,4.633,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_014.flac,data/v0.5_fixed/marefair/FunRaiser/_014.pt,5,FunRaiser,train,48000,207416,4.321,69139,4.321,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_086.flac,data/v0.5_fixed/marefair/BeelzTheBub/_086.pt,4,BeelzTheBub,val,48000,598895,12.477,199632,12.477,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_028.flac,data/v0.5_fixed/marefair/Mimosa/_028.pt,5,Mimosa,train,48000,253408,5.279,84470,5.279,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_273.flac,data/v0.5_fixed/marefair/Mimosa/_273.pt,4,Mimosa,train,48000,279248,5.818,93083,5.818,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_319.flac,data/v0.5_fixed/marefair/Mimosa/_319.pt,5,Mimosa,train,48000,219206,4.567,73069,4.567,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_100.flac,data/v0.5_fixed/marefair/FunRaiser/_100.pt,3,FunRaiser,train,48000,494486,10.302,164829,10.302,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_003.flac,data/v0.5_fixed/marefair/Mimosa/_003.pt,5,Mimosa,train,48000,190023,3.959,63341,3.959,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_038.flac,data/v0.5_fixed/marefair/DeadAnon/_038.pt,5,DeadAnon,val,48000,330352,6.882,110118,6.882,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_003.flac,data/v0.5_fixed/marefair/FunRaiser/_003.pt,6,FunRaiser,train,48000,1637364,34.112,545788,34.112,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_308.flac,data/v0.5_fixed/marefair/Mimosa/_308.pt,4,Mimosa,train,48000,149881,3.123,49961,3.123,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_079.flac,data/v0.5_fixed/marefair/Soiree/_079.pt,4,Soiree,train,48000,536205,11.171,178735,11.171,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_101.flac,data/v0.5_fixed/marefair/BeelzTheBub/_101.pt,4,BeelzTheBub,train,48000,262246,5.463,87416,5.463,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_131.flac,data/v0.5_fixed/marefair/Fair Flier/_131.pt,6,Fair Flier,train,48000,255749,5.328,85250,5.328,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_028.flac,data/v0.5_fixed/marefair/BeelzTheBub/_028.pt,7,BeelzTheBub,train,48000,530572,11.054,176858,11.054,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_297.flac,data/v0.5_fixed/marefair/Mimosa/_297.pt,5,Mimosa,train,48000,144198,3.004,48066,3.004,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_030.flac,data/v0.5_fixed/marefair/Fair Flier/_030.pt,4,Fair Flier,train,48000,113203,2.358,37735,2.358,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_168.flac,data/v0.5_fixed/marefair/Mimosa/_168.pt,5,Mimosa,train,48000,568763,11.849,189588,11.849,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_055.flac,data/v0.5_fixed/marefair/Fair Flier/_055.pt,4,Fair Flier,train,48000,132971,2.77,44324,2.77,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_296.flac,data/v0.5_fixed/marefair/Mimosa/_296.pt,4,Mimosa,train,48000,312604,6.513,104202,6.513,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_003.flac,data/v0.5_fixed/marefair/Algo/_003.pt,5,Algo,train,48000,86178,1.795,28726,1.795,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_075.flac,data/v0.5_fixed/marefair/Mimosa/_075.pt,4,Mimosa,train,48000,339214,7.067,113072,7.067,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_070.flac,data/v0.5_fixed/marefair/Matinee/_070.pt,5,Matinee,train,48000,191231,3.984,63744,3.984,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_089.flac,data/v0.5_fixed/marefair/Soiree/_089.pt,4,Soiree,train,48000,286114,5.961,95372,5.961,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_069.flac,data/v0.5_fixed/marefair/Matinee/_069.pt,5,Matinee,train,48000,178579,3.72,59527,3.72,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_164.flac,data/v0.5_fixed/marefair/Mimosa/_164.pt,4,Mimosa,train,48000,151579,3.158,50527,3.158,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_015.flac,data/v0.5_fixed/marefair/Soiree/_015.pt,6,Soiree,train,48000,839610,17.492,279870,17.492,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_036.flac,data/v0.5_fixed/marefair/FunRaiser/_036.pt,7,FunRaiser,train,48000,441245,9.193,147082,9.193,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_019.flac,data/v0.5_fixed/marefair/FunRaiser/_019.pt,6,FunRaiser,train,48000,439368,9.153,146456,9.153,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_141.flac,data/v0.5_fixed/marefair/Matinee/_141.pt,4,Matinee,train,48000,309772,6.454,103258,6.454,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_078.flac,data/v0.5_fixed/marefair/Mimosa/_078.pt,6,Mimosa,train,48000,239769,4.995,79923,4.995,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_216.flac,data/v0.5_fixed/marefair/Mimosa/_216.pt,6,Mimosa,train,48000,281302,5.86,93768,5.861,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_008.flac,data/v0.5_fixed/marefair/Extra/_008.pt,5,Extra,train,48000,151574,3.158,50525,3.158,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_034.flac,data/v0.5_fixed/marefair/BGM/_034.pt,4,BGM,train,48000,363300,7.569,121100,7.569,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_086.flac,data/v0.5_fixed/marefair/Fair Flier/_086.pt,5,Fair Flier,val,48000,105141,2.19,35047,2.19,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_224.flac,data/v0.5_fixed/marefair/Mimosa/_224.pt,5,Mimosa,train,48000,676991,14.104,225664,14.104,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_081.flac,data/v0.5_fixed/marefair/FunRaiser/_081.pt,4,FunRaiser,train,48000,421670,8.785,140557,8.785,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_172.flac,data/v0.5_fixed/marefair/Mimosa/_172.pt,4,Mimosa,train,48000,945572,19.699,315191,19.699,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_032.flac,data/v0.5_fixed/marefair/BeelzTheBub/_032.pt,6,BeelzTheBub,train,48000,387319,8.069,129107,8.069,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_156.flac,data/v0.5_fixed/marefair/Soiree/_156.pt,4,Soiree,train,48000,655390,13.654,218464,13.654,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_020.flac,data/v0.5_fixed/marefair/DeadAnon/_020.pt,4,DeadAnon,val,48000,380084,7.918,126695,7.918,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_081.flac,data/v0.5_fixed/marefair/Mimosa/_081.pt,5,Mimosa,train,48000,743306,15.486,247769,15.486,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_017.flac,data/v0.5_fixed/marefair/Mimosa/_017.pt,6,Mimosa,train,48000,126294,2.631,42098,2.631,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_094.flac,data/v0.5_fixed/marefair/FunRaiser/_094.pt,6,FunRaiser,train,48000,2950676,61.472,983559,61.472,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_067.flac,data/v0.5_fixed/marefair/Soiree/_067.pt,4,Soiree,train,48000,1032118,21.502,344040,21.503,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_070.flac,data/v0.5_fixed/marefair/Soiree/_070.pt,4,Soiree,train,48000,170938,3.561,56980,3.561,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_025.flac,data/v0.5_fixed/marefair/BeelzTheBub/_025.pt,4,BeelzTheBub,train,48000,180368,3.758,60123,3.758,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_113.flac,data/v0.5_fixed/marefair/FunRaiser/_113.pt,4,FunRaiser,val,48000,144254,3.005,48085,3.005,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_043.flac,data/v0.5_fixed/marefair/Soiree/_043.pt,5,Soiree,train,48000,208743,4.349,69581,4.349,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_079.flac,data/v0.5_fixed/marefair/BeelzTheBub/_079.pt,4,BeelzTheBub,train,48000,618076,12.877,206026,12.877,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_267.flac,data/v0.5_fixed/marefair/Mimosa/_267.pt,5,Mimosa,train,48000,517140,10.774,172380,10.774,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_132.flac,data/v0.5_fixed/marefair/Mimosa/_132.pt,7,Mimosa,val,48000,296215,6.171,98739,6.171,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_118.flac,data/v0.5_fixed/marefair/Mimosa/_118.pt,5,Mimosa,val,48000,133638,2.784,44546,2.784,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_003.flac,data/v0.5_fixed/marefair/Matinee/_003.pt,5,Matinee,train,48000,253579,5.283,84527,5.283,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_012.flac,data/v0.5_fixed/marefair/Algo/_012.pt,4,Algo,train,48000,879798,18.329,293266,18.329,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_019.flac,data/v0.5_fixed/marefair/Soiree/_019.pt,4,Soiree,train,48000,180270,3.756,60090,3.756,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_278.flac,data/v0.5_fixed/marefair/Mimosa/_278.pt,6,Mimosa,train,48000,1360941,28.353,453647,28.353,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_273.flac,data/v0.5_fixed/marefair/Fair Flier/_273.pt,4,Fair Flier,train,48000,113632,2.367,37878,2.367,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_053.flac,data/v0.5_fixed/marefair/BGM/_053.pt,5,BGM,train,48000,262736,5.474,87579,5.474,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_157.flac,data/v0.5_fixed/marefair/Mimosa/_157.pt,5,Mimosa,train,48000,278845,5.809,92949,5.809,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_217.flac,data/v0.5_fixed/marefair/Mimosa/_217.pt,6,Mimosa,train,48000,487238,10.151,162413,10.151,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_080.flac,data/v0.5_fixed/marefair/Matinee/_080.pt,4,Matinee,train,48000,264902,5.519,88301,5.519,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_179.flac,data/v0.5_fixed/marefair/Mimosa/_179.pt,5,Mimosa,train,48000,157286,3.277,52429,3.277,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_040.flac,data/v0.5_fixed/marefair/DeadAnon/_040.pt,4,DeadAnon,train,48000,132619,2.763,44207,2.763,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_031.flac,data/v0.5_fixed/marefair/Soiree/_031.pt,4,Soiree,train,48000,374620,7.805,124874,7.805,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_029.flac,data/v0.5_fixed/marefair/Matinee/_029.pt,4,Matinee,train,48000,224764,4.683,74922,4.683,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_181.flac,data/v0.5_fixed/marefair/Mimosa/_181.pt,4,Mimosa,train,48000,792014,16.5,264005,16.5,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_298.flac,data/v0.5_fixed/marefair/Mimosa/_298.pt,5,Mimosa,train,48000,142724,2.973,47575,2.973,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_111.flac,data/v0.5_fixed/marefair/Matinee/_111.pt,4,Matinee,val,48000,151193,3.15,50398,3.15,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_046.flac,data/v0.5_fixed/marefair/Fair Flier/_046.pt,4,Fair Flier,train,48000,311977,6.5,103993,6.5,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_109.flac,data/v0.5_fixed/marefair/FunRaiser/_109.pt,5,FunRaiser,train,48000,265392,5.529,88464,5.529,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_048.flac,data/v0.5_fixed/marefair/Matinee/_048.pt,6,Matinee,val,48000,768957,16.02,256319,16.02,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_315.flac,data/v0.5_fixed/marefair/Mimosa/_315.pt,5,Mimosa,train,48000,726152,15.128,242051,15.128,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_037.flac,data/v0.5_fixed/marefair/Matinee/_037.pt,5,Matinee,train,48000,356663,7.43,118888,7.431,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_200.flac,data/v0.5_fixed/marefair/Fair Flier/_200.pt,4,Fair Flier,train,48000,393094,8.189,131032,8.19,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_139.flac,data/v0.5_fixed/marefair/FunRaiser/_139.pt,5,FunRaiser,train,48000,285611,5.95,95204,5.95,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_031.flac,data/v0.5_fixed/marefair/Mimosa/_031.pt,6,Mimosa,train,48000,282872,5.893,94291,5.893,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_240.flac,data/v0.5_fixed/marefair/Fair Flier/_240.pt,5,Fair Flier,train,48000,177130,3.69,59044,3.69,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_107.flac,data/v0.5_fixed/marefair/FunRaiser/_107.pt,4,FunRaiser,train,48000,230600,4.804,76867,4.804,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_289.flac,data/v0.5_fixed/marefair/Fair Flier/_289.pt,5,Fair Flier,val,48000,244493,5.094,81498,5.094,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_132.flac,data/v0.5_fixed/marefair/Matinee/_132.pt,4,Matinee,train,48000,158771,3.308,52924,3.308,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_162.flac,data/v0.5_fixed/marefair/Fair Flier/_162.pt,5,Fair Flier,train,48000,290933,6.061,96978,6.061,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_199.flac,data/v0.5_fixed/marefair/Mimosa/_199.pt,6,Mimosa,train,48000,651471,13.572,217157,13.572,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_107.flac,data/v0.5_fixed/marefair/Soiree/_107.pt,5,Soiree,train,48000,125270,2.61,41757,2.61,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_046.flac,data/v0.5_fixed/marefair/Matinee/_046.pt,4,Matinee,train,48000,101905,2.123,33969,2.123,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_027.flac,data/v0.5_fixed/marefair/Fair Flier/_027.pt,6,Fair Flier,train,48000,408982,8.52,136328,8.521,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_006.flac,data/v0.5_fixed/marefair/Matinee/_006.pt,5,Matinee,train,48000,112315,2.34,37439,2.34,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_112.flac,data/v0.5_fixed/marefair/Mimosa/_112.pt,5,Mimosa,train,48000,341853,7.122,113951,7.122,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_015.flac,data/v0.5_fixed/marefair/Matinee/_015.pt,6,Matinee,train,48000,709648,14.784,236550,14.784,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_032.flac,data/v0.5_fixed/marefair/Matinee/_032.pt,4,Matinee,train,48000,352972,7.354,117658,7.354,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_016.flac,data/v0.5_fixed/marefair/FunRaiser/_016.pt,6,FunRaiser,train,48000,372770,7.766,124257,7.766,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_280.flac,data/v0.5_fixed/marefair/Fair Flier/_280.pt,4,Fair Flier,train,48000,140629,2.93,46877,2.93,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_153.flac,data/v0.5_fixed/marefair/Fair Flier/_153.pt,5,Fair Flier,train,48000,201772,4.204,67258,4.204,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_097.flac,data/v0.5_fixed/marefair/Soiree/_097.pt,4,Soiree,train,48000,659704,13.744,219902,13.744,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_033.flac,data/v0.5_fixed/marefair/Mimosa/_033.pt,5,Mimosa,train,48000,405955,8.457,135319,8.457,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_045.flac,data/v0.5_fixed/marefair/FunRaiser/_045.pt,6,FunRaiser,train,48000,234066,4.876,78022,4.876,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_013.flac,data/v0.5_fixed/marefair/Extra/_013.pt,5,Extra,train,48000,157858,3.289,52620,3.289,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_046.flac,data/v0.5_fixed/marefair/Mimosa/_046.pt,4,Mimosa,train,48000,701698,14.619,233900,14.619,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_010.flac,data/v0.5_fixed/marefair/BeelzTheBub/_010.pt,6,BeelzTheBub,train,48000,110173,2.295,36725,2.295,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_155.flac,data/v0.5_fixed/marefair/Fair Flier/_155.pt,5,Fair Flier,train,48000,399675,8.327,133225,8.327,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_027.flac,data/v0.5_fixed/marefair/FunRaiser/_027.pt,5,FunRaiser,train,48000,184859,3.851,61620,3.851,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_042.flac,data/v0.5_fixed/marefair/Mimosa/_042.pt,5,Mimosa,train,48000,127574,2.658,42525,2.658,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_007.flac,data/v0.5_fixed/marefair/Mimosa/_007.pt,6,Mimosa,train,48000,404725,8.432,134909,8.432,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_112.flac,data/v0.5_fixed/marefair/Fair Flier/_112.pt,5,Fair Flier,train,48000,263056,5.48,87686,5.48,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_132.flac,data/v0.5_fixed/marefair/Fair Flier/_132.pt,5,Fair Flier,train,48000,241852,5.039,80618,5.039,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_160.flac,data/v0.5_fixed/marefair/Fair Flier/_160.pt,4,Fair Flier,val,48000,294023,6.125,98008,6.125,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_057.flac,data/v0.5_fixed/marefair/FunRaiser/_057.pt,4,FunRaiser,train,48000,213805,4.454,71269,4.454,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_130.flac,data/v0.5_fixed/marefair/Soiree/_130.pt,4,Soiree,train,48000,206888,4.31,68963,4.31,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_017.flac,data/v0.5_fixed/marefair/Matinee/_017.pt,5,Matinee,train,48000,253994,5.292,84665,5.292,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_100.flac,data/v0.5_fixed/marefair/Fair Flier/_100.pt,5,Fair Flier,train,48000,248119,5.169,82707,5.169,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_135.flac,data/v0.5_fixed/marefair/Matinee/_135.pt,5,Matinee,train,48000,203168,4.233,67723,4.233,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_052.flac,data/v0.5_fixed/marefair/BGM/_052.pt,4,BGM,train,48000,271913,5.665,90638,5.665,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_240.flac,data/v0.5_fixed/marefair/Mimosa/_240.pt,4,Mimosa,val,48000,542774,11.308,180925,11.308,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_229.flac,data/v0.5_fixed/marefair/Mimosa/_229.pt,7,Mimosa,train,48000,330965,6.895,110322,6.895,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_144.flac,data/v0.5_fixed/marefair/Mimosa/_144.pt,5,Mimosa,train,48000,351980,7.333,117327,7.333,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_095.flac,data/v0.5_fixed/marefair/Soiree/_095.pt,4,Soiree,train,48000,984311,20.506,328104,20.506,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_010.flac,data/v0.5_fixed/marefair/Mimosa/_010.pt,6,Mimosa,train,48000,347720,7.244,115907,7.244,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_054.flac,data/v0.5_fixed/marefair/Fair Flier/_054.pt,5,Fair Flier,train,48000,151290,3.152,50430,3.152,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_093.flac,data/v0.5_fixed/marefair/Soiree/_093.pt,4,Soiree,train,48000,192136,4.003,64046,4.003,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_027.flac,data/v0.5_fixed/marefair/Mimosa/_027.pt,5,Mimosa,train,48000,406245,8.463,135415,8.463,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_228.flac,data/v0.5_fixed/marefair/Mimosa/_228.pt,6,Mimosa,val,48000,329749,6.87,109917,6.87,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_086.flac,data/v0.5_fixed/marefair/FunRaiser/_086.pt,4,FunRaiser,train,48000,784937,16.353,261646,16.353,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_037.flac,data/v0.5_fixed/marefair/Soiree/_037.pt,5,Soiree,train,48000,116762,2.433,38921,2.433,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_017.flac,data/v0.5_fixed/marefair/Fair Flier/_017.pt,5,Fair Flier,train,48000,831850,17.33,277284,17.33,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_050.flac,data/v0.5_fixed/marefair/BGM/_050.pt,5,BGM,train,48000,265462,5.53,88488,5.53,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_092.flac,data/v0.5_fixed/marefair/FunRaiser/_092.pt,4,FunRaiser,train,48000,133208,2.775,44403,2.775,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_077.flac,data/v0.5_fixed/marefair/Matinee/_077.pt,6,Matinee,train,48000,579555,12.074,193185,12.074,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_023.flac,data/v0.5_fixed/marefair/BeelzTheBub/_023.pt,5,BeelzTheBub,train,48000,382223,7.963,127408,7.963,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_057.flac,data/v0.5_fixed/marefair/BeelzTheBub/_057.pt,5,BeelzTheBub,train,48000,261180,5.441,87060,5.441,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_205.flac,data/v0.5_fixed/marefair/Mimosa/_205.pt,5,Mimosa,train,48000,332915,6.936,110972,6.936,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_292.flac,data/v0.5_fixed/marefair/Mimosa/_292.pt,4,Mimosa,train,48000,116201,2.421,38734,2.421,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_085.flac,data/v0.5_fixed/marefair/BeelzTheBub/_085.pt,6,BeelzTheBub,train,48000,562124,11.711,187375,11.711,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_066.flac,data/v0.5_fixed/marefair/Mimosa/_066.pt,5,Mimosa,train,48000,121038,2.522,40346,2.522,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_006.flac,data/v0.5_fixed/marefair/Mimosa/_006.pt,6,Mimosa,train,48000,104722,2.182,34908,2.182,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_025.flac,data/v0.5_fixed/marefair/Mimosa/_025.pt,5,Mimosa,train,48000,112035,2.334,37345,2.334,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_145.flac,data/v0.5_fixed/marefair/Mimosa/_145.pt,5,Mimosa,train,48000,348483,7.26,116161,7.26,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_171.flac,data/v0.5_fixed/marefair/Mimosa/_171.pt,5,Mimosa,train,48000,154862,3.226,51621,3.226,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_012.flac,data/v0.5_fixed/marefair/Extra/_012.pt,5,Extra,train,48000,162666,3.389,54222,3.389,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_043.flac,data/v0.5_fixed/marefair/FunRaiser/_043.pt,6,FunRaiser,val,48000,230050,4.793,76684,4.793,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_270.flac,data/v0.5_fixed/marefair/Fair Flier/_270.pt,5,Fair Flier,train,48000,374584,7.804,124862,7.804,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_171.flac,data/v0.5_fixed/marefair/Soiree/_171.pt,4,Soiree,train,48000,310111,6.461,103371,6.461,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_176.flac,data/v0.5_fixed/marefair/Mimosa/_176.pt,4,Mimosa,train,48000,161084,3.356,53695,3.356,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_006.flac,data/v0.5_fixed/marefair/FunRaiser/_006.pt,6,FunRaiser,train,48000,933758,19.453,311253,19.453,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_103.flac,data/v0.5_fixed/marefair/FunRaiser/_103.pt,4,FunRaiser,train,48000,237539,4.949,79180,4.949,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_066.flac,data/v0.5_fixed/marefair/BeelzTheBub/_066.pt,5,BeelzTheBub,train,48000,569497,11.865,189833,11.865,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_090.flac,data/v0.5_fixed/marefair/Matinee/_090.pt,4,Matinee,train,48000,232242,4.838,77414,4.838,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_048.flac,data/v0.5_fixed/marefair/BeelzTheBub/_048.pt,6,BeelzTheBub,train,48000,387991,8.083,129331,8.083,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_028.flac,data/v0.5_fixed/marefair/FunRaiser/_028.pt,6,FunRaiser,train,48000,168170,3.504,56057,3.504,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_241.flac,data/v0.5_fixed/marefair/Fair Flier/_241.pt,4,Fair Flier,train,48000,294023,6.125,98008,6.125,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_011.flac,data/v0.5_fixed/marefair/Mimosa/_011.pt,5,Mimosa,val,48000,351853,7.33,117285,7.33,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_026.flac,data/v0.5_fixed/marefair/DeadAnon/_026.pt,5,DeadAnon,train,48000,189930,3.957,63310,3.957,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_243.flac,data/v0.5_fixed/marefair/Fair Flier/_243.pt,5,Fair Flier,val,48000,290933,6.061,96978,6.061,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_210.flac,data/v0.5_fixed/marefair/Mimosa/_210.pt,5,Mimosa,train,48000,342559,7.137,114187,7.137,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_283.flac,data/v0.5_fixed/marefair/Mimosa/_283.pt,6,Mimosa,train,48000,361130,7.524,120377,7.524,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_035.flac,data/v0.5_fixed/marefair/BGM/_035.pt,4,BGM,train,48000,133034,2.772,44345,2.772,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_243.flac,data/v0.5_fixed/marefair/Mimosa/_243.pt,6,Mimosa,train,48000,636086,13.252,212029,13.252,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_117.flac,data/v0.5_fixed/marefair/Soiree/_117.pt,5,Soiree,train,48000,166684,3.473,55562,3.473,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_284.flac,data/v0.5_fixed/marefair/Fair Flier/_284.pt,5,Fair Flier,train,48000,169153,3.524,56385,3.524,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_275.flac,data/v0.5_fixed/marefair/Mimosa/_275.pt,5,Mimosa,train,48000,134815,2.809,44939,2.809,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_312.flac,data/v0.5_fixed/marefair/Fair Flier/_312.pt,5,Fair Flier,train,48000,139316,2.902,46439,2.902,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_050.flac,data/v0.5_fixed/marefair/BeelzTheBub/_050.pt,5,BeelzTheBub,train,48000,779158,16.232,259720,16.233,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_102.flac,data/v0.5_fixed/marefair/FunRaiser/_102.pt,4,FunRaiser,train,48000,88703,1.848,29568,1.848,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_115.flac,data/v0.5_fixed/marefair/Fair Flier/_115.pt,4,Fair Flier,train,48000,200727,4.182,66909,4.182,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_257.flac,data/v0.5_fixed/marefair/Mimosa/_257.pt,4,Mimosa,train,48000,152740,3.182,50914,3.182,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_105.flac,data/v0.5_fixed/marefair/Mimosa/_105.pt,5,Mimosa,train,48000,329298,6.86,109766,6.86,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_055.flac,data/v0.5_fixed/marefair/BeelzTheBub/_055.pt,4,BeelzTheBub,train,48000,281402,5.863,93801,5.863,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_068.flac,data/v0.5_fixed/marefair/Matinee/_068.pt,5,Matinee,train,48000,228808,4.767,76270,4.767,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_118.flac,data/v0.5_fixed/marefair/Matinee/_118.pt,4,Matinee,train,48000,205804,4.288,68602,4.288,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_101.flac,data/v0.5_fixed/marefair/FunRaiser/_101.pt,4,FunRaiser,train,48000,466684,9.723,155562,9.723,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_043.flac,data/v0.5_fixed/marefair/Mimosa/_043.pt,4,Mimosa,train,48000,255909,5.331,85303,5.331,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_103.flac,data/v0.5_fixed/marefair/Mimosa/_103.pt,5,Mimosa,train,48000,651955,13.582,217319,13.582,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_237.flac,data/v0.5_fixed/marefair/Fair Flier/_237.pt,5,Fair Flier,train,48000,170479,3.552,56827,3.552,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_120.flac,data/v0.5_fixed/marefair/Matinee/_120.pt,4,Matinee,val,48000,246022,5.125,82008,5.125,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_114.flac,data/v0.5_fixed/marefair/FunRaiser/_114.pt,4,FunRaiser,train,48000,232328,4.84,77443,4.84,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_003.flac,data/v0.5_fixed/marefair/DeadAnon/_003.pt,7,DeadAnon,train,48000,240832,5.017,80278,5.017,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_065.flac,data/v0.5_fixed/marefair/Soiree/_065.pt,6,Soiree,train,48000,1024307,21.34,341436,21.34,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_186.flac,data/v0.5_fixed/marefair/Mimosa/_186.pt,5,Mimosa,train,48000,197777,4.12,65926,4.12,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_061.flac,data/v0.5_fixed/marefair/Matinee/_061.pt,5,Matinee,train,48000,412120,8.586,137374,8.586,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_015.flac,data/v0.5_fixed/marefair/FunRaiser/_015.pt,5,FunRaiser,train,48000,440149,9.17,146717,9.17,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_055.flac,data/v0.5_fixed/marefair/Soiree/_055.pt,4,Soiree,train,48000,251917,5.248,83973,5.248,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_139.flac,data/v0.5_fixed/marefair/Mimosa/_139.pt,6,Mimosa,train,48000,800618,16.68,266873,16.68,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_051.flac,data/v0.5_fixed/marefair/Mimosa/_051.pt,5,Mimosa,train,48000,79941,1.665,26647,1.665,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_021.flac,data/v0.5_fixed/marefair/Fair Flier/_021.pt,5,Fair Flier,train,48000,1113323,23.194,371108,23.194,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_206.flac,data/v0.5_fixed/marefair/Fair Flier/_206.pt,4,Fair Flier,train,48000,710559,14.803,236853,14.803,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_047.flac,data/v0.5_fixed/marefair/BeelzTheBub/_047.pt,6,BeelzTheBub,train,48000,242363,5.049,80788,5.049,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_300.flac,data/v0.5_fixed/marefair/Mimosa/_300.pt,4,Mimosa,train,48000,173008,3.604,57670,3.604,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_305.flac,data/v0.5_fixed/marefair/Fair Flier/_305.pt,5,Fair Flier,train,48000,217415,4.529,72472,4.529,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_013.flac,data/v0.5_fixed/marefair/Soiree/_013.pt,5,Soiree,train,48000,375093,7.814,125031,7.814,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_100.flac,data/v0.5_fixed/marefair/Mimosa/_100.pt,5,Mimosa,train,48000,134928,2.811,44976,2.811,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_038.flac,data/v0.5_fixed/marefair/FunRaiser/_038.pt,6,FunRaiser,train,48000,230396,4.8,76799,4.8,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_006.flac,data/v0.5_fixed/marefair/BeelzTheBub/_006.pt,6,BeelzTheBub,train,48000,92384,1.925,30795,1.925,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_088.flac,data/v0.5_fixed/marefair/Matinee/_088.pt,6,Matinee,train,48000,204147,4.253,68049,4.253,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_278.flac,data/v0.5_fixed/marefair/Fair Flier/_278.pt,5,Fair Flier,train,48000,299841,6.247,99947,6.247,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_023.flac,data/v0.5_fixed/marefair/DeadAnon/_023.pt,4,DeadAnon,train,48000,1387053,28.897,462351,28.897,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_126.flac,data/v0.5_fixed/marefair/Mimosa/_126.pt,6,Mimosa,train,48000,268946,5.603,89649,5.603,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_213.flac,data/v0.5_fixed/marefair/Fair Flier/_213.pt,4,Fair Flier,train,48000,167902,3.498,55968,3.498,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_060.flac,data/v0.5_fixed/marefair/Mimosa/_060.pt,5,Mimosa,train,48000,66185,1.379,22062,1.379,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_095.flac,data/v0.5_fixed/marefair/FunRaiser/_095.pt,5,FunRaiser,train,48000,506661,10.555,168887,10.555,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_187.flac,data/v0.5_fixed/marefair/Mimosa/_187.pt,4,Mimosa,train,48000,147112,3.065,49038,3.065,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_044.flac,data/v0.5_fixed/marefair/BGM/_044.pt,7,BGM,train,48000,290243,6.047,96748,6.047,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_078.flac,data/v0.5_fixed/marefair/Matinee/_078.pt,5,Matinee,train,48000,302542,6.303,100848,6.303,3.0
+/mnt/data/DataAugmentation/MareFairData/LoafAnon/_002.flac,data/v0.5_fixed/marefair/LoafAnon/_002.pt,5,LoafAnon,train,48000,842090,17.544,280697,17.544,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_081.flac,data/v0.5_fixed/marefair/Matinee/_081.pt,6,Matinee,train,48000,188007,3.917,62669,3.917,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_272.flac,data/v0.5_fixed/marefair/Mimosa/_272.pt,4,Mimosa,train,48000,131246,2.734,43749,2.734,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_046.flac,data/v0.5_fixed/marefair/BGM/_046.pt,7,BGM,train,48000,290243,6.047,96748,6.047,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_134.flac,data/v0.5_fixed/marefair/Soiree/_134.pt,4,Soiree,val,48000,163918,3.415,54640,3.415,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_058.flac,data/v0.5_fixed/marefair/Mimosa/_058.pt,5,Mimosa,train,48000,68517,1.427,22839,1.427,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_294.flac,data/v0.5_fixed/marefair/Mimosa/_294.pt,4,Mimosa,train,48000,195928,4.082,65310,4.082,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_013.flac,data/v0.5_fixed/marefair/ShobieShy/_013.pt,5,ShobieShy,train,48000,345604,7.2,115202,7.2,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_048.flac,data/v0.5_fixed/marefair/Soiree/_048.pt,4,Soiree,train,48000,845565,17.616,281855,17.616,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_083.flac,data/v0.5_fixed/marefair/Fair Flier/_083.pt,5,Fair Flier,train,48000,135519,2.823,45173,2.823,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_072.flac,data/v0.5_fixed/marefair/Mimosa/_072.pt,6,Mimosa,train,48000,725211,15.109,241737,15.109,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_286.flac,data/v0.5_fixed/marefair/Mimosa/_286.pt,5,Mimosa,train,48000,1138416,23.717,379472,23.717,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_080.flac,data/v0.5_fixed/marefair/BeelzTheBub/_080.pt,4,BeelzTheBub,train,48000,618705,12.89,206235,12.89,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_128.flac,data/v0.5_fixed/marefair/Soiree/_128.pt,5,Soiree,train,48000,185693,3.869,61898,3.869,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_032.flac,data/v0.5_fixed/marefair/FunRaiser/_032.pt,6,FunRaiser,train,48000,204116,4.252,68039,4.252,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_116.flac,data/v0.5_fixed/marefair/Soiree/_116.pt,5,Soiree,train,48000,183549,3.824,61183,3.824,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_098.flac,data/v0.5_fixed/marefair/Matinee/_098.pt,5,Matinee,val,48000,557846,11.622,185949,11.622,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_091.flac,data/v0.5_fixed/marefair/Matinee/_091.pt,4,Matinee,train,48000,226398,4.717,75466,4.717,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_077.flac,data/v0.5_fixed/marefair/BeelzTheBub/_077.pt,5,BeelzTheBub,val,48000,579385,12.071,193129,12.071,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_145.flac,data/v0.5_fixed/marefair/Fair Flier/_145.pt,6,Fair Flier,train,48000,282099,5.877,94033,5.877,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_148.flac,data/v0.5_fixed/marefair/Fair Flier/_148.pt,5,Fair Flier,train,48000,250588,5.221,83530,5.221,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_053.flac,data/v0.5_fixed/marefair/Matinee/_053.pt,5,Matinee,train,48000,108727,2.265,36243,2.265,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_053.flac,data/v0.5_fixed/marefair/Fair Flier/_053.pt,4,Fair Flier,train,48000,108388,2.258,36130,2.258,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_013.flac,data/v0.5_fixed/marefair/BGM/_013.pt,4,BGM,train,48000,160847,3.351,53616,3.351,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_178.flac,data/v0.5_fixed/marefair/Fair Flier/_178.pt,4,Fair Flier,train,48000,341310,7.111,113770,7.111,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_233.flac,data/v0.5_fixed/marefair/Mimosa/_233.pt,7,Mimosa,train,48000,348138,7.253,116046,7.253,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_160.flac,data/v0.5_fixed/marefair/Mimosa/_160.pt,5,Mimosa,train,48000,132594,2.762,44198,2.762,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_076.flac,data/v0.5_fixed/marefair/FunRaiser/_076.pt,4,FunRaiser,train,48000,227842,4.747,75948,4.747,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_058.flac,data/v0.5_fixed/marefair/Fair Flier/_058.pt,4,Fair Flier,train,48000,97241,2.026,32414,2.026,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_052.flac,data/v0.5_fixed/marefair/Fair Flier/_052.pt,4,Fair Flier,train,48000,143740,2.995,47914,2.995,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_186.flac,data/v0.5_fixed/marefair/Fair Flier/_186.pt,4,Fair Flier,train,48000,179825,3.746,59942,3.746,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_137.flac,data/v0.5_fixed/marefair/Soiree/_137.pt,5,Soiree,train,48000,164898,3.435,54966,3.435,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_142.flac,data/v0.5_fixed/marefair/Mimosa/_142.pt,5,Mimosa,train,48000,349135,7.274,116379,7.274,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_308.flac,data/v0.5_fixed/marefair/Fair Flier/_308.pt,5,Fair Flier,train,48000,222380,4.633,74127,4.633,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_157.flac,data/v0.5_fixed/marefair/Soiree/_157.pt,4,Soiree,train,48000,177939,3.707,59313,3.707,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_004.flac,data/v0.5_fixed/marefair/BGM/_004.pt,4,BGM,val,48000,181676,3.785,60559,3.785,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_065.flac,data/v0.5_fixed/marefair/Matinee/_065.pt,6,Matinee,train,48000,125870,2.622,41957,2.622,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_041.flac,data/v0.5_fixed/marefair/BGM/_041.pt,5,BGM,train,48000,290242,6.047,96748,6.047,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_134.flac,data/v0.5_fixed/marefair/Fair Flier/_134.pt,6,Fair Flier,train,48000,627478,13.072,209160,13.072,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_026.flac,data/v0.5_fixed/marefair/FunRaiser/_026.pt,5,FunRaiser,train,48000,205162,4.274,68388,4.274,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_038.flac,data/v0.5_fixed/marefair/Mimosa/_038.pt,4,Mimosa,train,48000,279143,5.815,93048,5.816,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_064.flac,data/v0.5_fixed/marefair/Fair Flier/_064.pt,5,Fair Flier,train,48000,162540,3.386,54180,3.386,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_266.flac,data/v0.5_fixed/marefair/Fair Flier/_266.pt,5,Fair Flier,train,48000,235846,4.913,78616,4.913,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_212.flac,data/v0.5_fixed/marefair/Fair Flier/_212.pt,4,Fair Flier,train,48000,649596,13.533,216532,13.533,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_010.flac,data/v0.5_fixed/marefair/Fair Flier/_010.pt,5,Fair Flier,train,48000,110220,2.296,36740,2.296,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_131.flac,data/v0.5_fixed/marefair/FunRaiser/_131.pt,4,FunRaiser,val,48000,216639,4.513,72213,4.513,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_014.flac,data/v0.5_fixed/marefair/Fair Flier/_014.pt,5,Fair Flier,train,48000,104836,2.184,34946,2.184,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_269.flac,data/v0.5_fixed/marefair/Mimosa/_269.pt,5,Mimosa,val,48000,129486,2.698,43162,2.698,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_122.flac,data/v0.5_fixed/marefair/Soiree/_122.pt,5,Soiree,train,48000,169456,3.53,56486,3.53,3.0
+/mnt/data/DataAugmentation/MareFairData/LoafAnon/_001.flac,data/v0.5_fixed/marefair/LoafAnon/_001.pt,4,LoafAnon,train,48000,793733,16.536,264578,16.536,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_286.flac,data/v0.5_fixed/marefair/Fair Flier/_286.pt,5,Fair Flier,train,48000,149585,3.116,49862,3.116,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_256.flac,data/v0.5_fixed/marefair/Fair Flier/_256.pt,3,Fair Flier,val,48000,1115029,23.23,371677,23.23,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_010.flac,data/v0.5_fixed/marefair/Extra/_010.pt,4,Extra,train,48000,149496,3.115,49832,3.115,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_008.flac,data/v0.5_fixed/marefair/ShobieShy/_008.pt,5,ShobieShy,train,48000,1313376,27.362,437792,27.362,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_042.flac,data/v0.5_fixed/marefair/Matinee/_042.pt,6,Matinee,val,48000,657016,13.688,219006,13.688,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_250.flac,data/v0.5_fixed/marefair/Fair Flier/_250.pt,4,Fair Flier,train,48000,254692,5.306,84898,5.306,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_291.flac,data/v0.5_fixed/marefair/Mimosa/_291.pt,4,Mimosa,train,48000,302972,6.312,100991,6.312,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_180.flac,data/v0.5_fixed/marefair/Fair Flier/_180.pt,5,Fair Flier,train,48000,177491,3.698,59164,3.698,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_141.flac,data/v0.5_fixed/marefair/Fair Flier/_141.pt,4,Fair Flier,train,48000,395877,8.247,131959,8.247,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_071.flac,data/v0.5_fixed/marefair/Soiree/_071.pt,4,Soiree,train,48000,174375,3.633,58125,3.633,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_033.flac,data/v0.5_fixed/marefair/BGM/_033.pt,5,BGM,train,48000,351739,7.328,117247,7.328,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_003.flac,data/v0.5_fixed/marefair/Soiree/_003.pt,5,Soiree,train,48000,303972,6.333,101324,6.333,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_072.flac,data/v0.5_fixed/marefair/BeelzTheBub/_072.pt,6,BeelzTheBub,train,48000,580514,12.094,193505,12.094,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_307.flac,data/v0.5_fixed/marefair/Mimosa/_307.pt,5,Mimosa,train,48000,741208,15.442,247070,15.442,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_100.flac,data/v0.5_fixed/marefair/Matinee/_100.pt,3,Matinee,train,48000,363484,7.573,121162,7.573,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_060.flac,data/v0.5_fixed/marefair/BeelzTheBub/_060.pt,5,BeelzTheBub,val,48000,168188,3.504,56063,3.504,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_181.flac,data/v0.5_fixed/marefair/Fair Flier/_181.pt,4,Fair Flier,train,48000,270439,5.634,90147,5.634,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_117.flac,data/v0.5_fixed/marefair/Matinee/_117.pt,5,Matinee,train,48000,340461,7.093,113487,7.093,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_251.flac,data/v0.5_fixed/marefair/Mimosa/_251.pt,4,Mimosa,train,48000,137963,2.874,45988,2.874,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_064.flac,data/v0.5_fixed/marefair/BeelzTheBub/_064.pt,6,BeelzTheBub,train,48000,580700,12.098,193567,12.098,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_089.flac,data/v0.5_fixed/marefair/Fair Flier/_089.pt,6,Fair Flier,train,48000,502355,10.466,167452,10.466,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_103.flac,data/v0.5_fixed/marefair/BeelzTheBub/_103.pt,4,BeelzTheBub,train,48000,138019,2.875,46007,2.875,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_093.flac,data/v0.5_fixed/marefair/Matinee/_093.pt,4,Matinee,train,48000,729866,15.206,243289,15.206,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_046.flac,data/v0.5_fixed/marefair/BeelzTheBub/_046.pt,5,BeelzTheBub,train,48000,748610,15.596,249537,15.596,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_231.flac,data/v0.5_fixed/marefair/Mimosa/_231.pt,6,Mimosa,train,48000,350278,7.297,116760,7.298,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_271.flac,data/v0.5_fixed/marefair/Fair Flier/_271.pt,3,Fair Flier,train,48000,204038,4.251,68013,4.251,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_011.flac,data/v0.5_fixed/marefair/ShobieShy/_011.pt,4,ShobieShy,val,48000,129285,2.693,43095,2.693,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_290.flac,data/v0.5_fixed/marefair/Mimosa/_290.pt,5,Mimosa,train,48000,108390,2.258,36130,2.258,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_078.flac,data/v0.5_fixed/marefair/Fair Flier/_078.pt,4,Fair Flier,train,48000,204478,4.26,68160,4.26,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_163.flac,data/v0.5_fixed/marefair/Fair Flier/_163.pt,4,Fair Flier,train,48000,292072,6.085,97358,6.085,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_026.flac,data/v0.5_fixed/marefair/Matinee/_026.pt,6,Matinee,train,48000,288572,6.012,96191,6.012,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_268.flac,data/v0.5_fixed/marefair/Fair Flier/_268.pt,5,Fair Flier,train,48000,184624,3.846,61542,3.846,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_231.flac,data/v0.5_fixed/marefair/Fair Flier/_231.pt,5,Fair Flier,train,48000,159419,3.321,53140,3.321,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_284.flac,data/v0.5_fixed/marefair/Mimosa/_284.pt,6,Mimosa,train,48000,357522,7.448,119174,7.448,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_109.flac,data/v0.5_fixed/marefair/Fair Flier/_109.pt,5,Fair Flier,train,48000,339766,7.078,113256,7.079,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_024.flac,data/v0.5_fixed/marefair/BeelzTheBub/_024.pt,4,BeelzTheBub,train,48000,165159,3.441,55053,3.441,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_316.flac,data/v0.5_fixed/marefair/Fair Flier/_316.pt,5,Fair Flier,train,48000,563200,11.733,187734,11.733,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_146.flac,data/v0.5_fixed/marefair/Mimosa/_146.pt,6,Mimosa,train,48000,346986,7.229,115662,7.229,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_133.flac,data/v0.5_fixed/marefair/Mimosa/_133.pt,4,Mimosa,train,48000,755372,15.737,251791,15.737,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_020.flac,data/v0.5_fixed/marefair/BGM/_020.pt,3,BGM,train,48000,163873,3.414,54625,3.414,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_119.flac,data/v0.5_fixed/marefair/Fair Flier/_119.pt,5,Fair Flier,train,48000,137688,2.869,45896,2.869,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_023.flac,data/v0.5_fixed/marefair/BGM/_023.pt,5,BGM,val,48000,774082,16.127,258028,16.127,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_106.flac,data/v0.5_fixed/marefair/Mimosa/_106.pt,5,Mimosa,train,48000,642275,13.381,214092,13.381,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_232.flac,data/v0.5_fixed/marefair/Mimosa/_232.pt,6,Mimosa,train,48000,349567,7.283,116523,7.283,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_025.flac,data/v0.5_fixed/marefair/BGM/_025.pt,5,BGM,train,48000,515168,10.733,171723,10.733,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_083.flac,data/v0.5_fixed/marefair/Matinee/_083.pt,4,Matinee,train,48000,212638,4.43,70880,4.43,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_275.flac,data/v0.5_fixed/marefair/Fair Flier/_275.pt,5,Fair Flier,train,48000,116447,2.426,38816,2.426,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_016.flac,data/v0.5_fixed/marefair/Mimosa/_016.pt,6,Mimosa,train,48000,205665,4.285,68555,4.285,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_149.flac,data/v0.5_fixed/marefair/Soiree/_149.pt,5,Soiree,train,48000,211060,4.397,70354,4.397,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_097.flac,data/v0.5_fixed/marefair/Mimosa/_097.pt,6,Mimosa,train,48000,146675,3.056,48892,3.056,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_003.flac,data/v0.5_fixed/marefair/ShobieShy/_003.pt,6,ShobieShy,train,48000,329893,6.873,109965,6.873,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_026.flac,data/v0.5_fixed/marefair/BeelzTheBub/_026.pt,5,BeelzTheBub,train,48000,112576,2.345,37526,2.345,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_049.flac,data/v0.5_fixed/marefair/FunRaiser/_049.pt,5,FunRaiser,train,48000,350043,7.293,116681,7.293,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_067.flac,data/v0.5_fixed/marefair/FunRaiser/_067.pt,5,FunRaiser,train,48000,669856,13.955,223286,13.955,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_126.flac,data/v0.5_fixed/marefair/Matinee/_126.pt,5,Matinee,train,48000,133157,2.774,44386,2.774,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_068.flac,data/v0.5_fixed/marefair/BeelzTheBub/_068.pt,5,BeelzTheBub,train,48000,201695,4.202,67232,4.202,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_107.flac,data/v0.5_fixed/marefair/Matinee/_107.pt,5,Matinee,val,48000,205583,4.283,68528,4.283,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_021.flac,data/v0.5_fixed/marefair/FunRaiser/_021.pt,8,FunRaiser,train,48000,439053,9.147,146351,9.147,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_090.flac,data/v0.5_fixed/marefair/Soiree/_090.pt,5,Soiree,train,48000,976736,20.349,325579,20.349,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_038.flac,data/v0.5_fixed/marefair/Soiree/_038.pt,5,Soiree,train,48000,377223,7.859,125741,7.859,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_230.flac,data/v0.5_fixed/marefair/Mimosa/_230.pt,6,Mimosa,train,48000,349460,7.28,116487,7.28,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_089.flac,data/v0.5_fixed/marefair/BeelzTheBub/_089.pt,6,BeelzTheBub,train,48000,238262,4.964,79421,4.964,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_173.flac,data/v0.5_fixed/marefair/Soiree/_173.pt,4,Soiree,train,48000,133552,2.782,44518,2.782,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_302.flac,data/v0.5_fixed/marefair/Mimosa/_302.pt,4,Mimosa,train,48000,315040,6.563,105014,6.563,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_197.flac,data/v0.5_fixed/marefair/Fair Flier/_197.pt,4,Fair Flier,train,48000,703590,14.658,234530,14.658,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_062.flac,data/v0.5_fixed/marefair/Fair Flier/_062.pt,4,Fair Flier,train,48000,139517,2.907,46506,2.907,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_109.flac,data/v0.5_fixed/marefair/Matinee/_109.pt,4,Matinee,train,48000,190717,3.973,63573,3.973,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_065.flac,data/v0.5_fixed/marefair/FunRaiser/_065.pt,5,FunRaiser,train,48000,655313,13.652,218438,13.652,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_068.flac,data/v0.5_fixed/marefair/Soiree/_068.pt,5,Soiree,train,48000,1023780,21.329,341260,21.329,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_002.flac,data/v0.5_fixed/marefair/Extra/_002.pt,4,Extra,train,48000,379024,7.896,126342,7.896,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_184.flac,data/v0.5_fixed/marefair/Fair Flier/_184.pt,4,Fair Flier,train,48000,1132609,23.596,377537,23.596,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_109.flac,data/v0.5_fixed/marefair/BeelzTheBub/_109.pt,4,BeelzTheBub,train,48000,138019,2.875,46007,2.875,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_166.flac,data/v0.5_fixed/marefair/Mimosa/_166.pt,5,Mimosa,train,48000,144477,3.01,48159,3.01,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_044.flac,data/v0.5_fixed/marefair/FunRaiser/_044.pt,6,FunRaiser,train,48000,234156,4.878,78052,4.878,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_050.flac,data/v0.5_fixed/marefair/Mimosa/_050.pt,5,Mimosa,train,48000,81106,1.69,27036,1.69,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_028.flac,data/v0.5_fixed/marefair/BGM/_028.pt,5,BGM,train,48000,176368,3.674,58790,3.674,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_031.flac,data/v0.5_fixed/marefair/BGM/_031.pt,5,BGM,val,48000,138541,2.886,46181,2.886,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_167.flac,data/v0.5_fixed/marefair/Soiree/_167.pt,4,Soiree,train,48000,289210,6.025,96404,6.025,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_063.flac,data/v0.5_fixed/marefair/BeelzTheBub/_063.pt,5,BeelzTheBub,train,48000,280436,5.842,93479,5.842,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_261.flac,data/v0.5_fixed/marefair/Fair Flier/_261.pt,5,Fair Flier,train,48000,177491,3.698,59164,3.698,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_168.flac,data/v0.5_fixed/marefair/Fair Flier/_168.pt,4,Fair Flier,train,48000,238788,4.975,79596,4.975,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_054.flac,data/v0.5_fixed/marefair/BeelzTheBub/_054.pt,4,BeelzTheBub,train,48000,279787,5.829,93263,5.829,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_274.flac,data/v0.5_fixed/marefair/Mimosa/_274.pt,5,Mimosa,train,48000,157579,3.283,52527,3.283,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_247.flac,data/v0.5_fixed/marefair/Fair Flier/_247.pt,5,Fair Flier,train,48000,293080,6.106,97694,6.106,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_004.flac,data/v0.5_fixed/marefair/Matinee/_004.pt,6,Matinee,val,48000,329836,6.872,109946,6.872,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_040.flac,data/v0.5_fixed/marefair/BeelzTheBub/_040.pt,6,BeelzTheBub,val,48000,167481,3.489,55827,3.489,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_006.flac,data/v0.5_fixed/marefair/DeadAnon/_006.pt,4,DeadAnon,train,48000,96565,2.012,32189,2.012,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_115.flac,data/v0.5_fixed/marefair/Mimosa/_115.pt,6,Mimosa,train,48000,152747,3.182,50916,3.182,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_159.flac,data/v0.5_fixed/marefair/Soiree/_159.pt,4,Soiree,train,48000,98497,2.052,32833,2.052,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_017.flac,data/v0.5_fixed/marefair/Soiree/_017.pt,4,Soiree,train,48000,412133,8.586,137378,8.586,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_238.flac,data/v0.5_fixed/marefair/Fair Flier/_238.pt,6,Fair Flier,val,48000,164890,3.435,54964,3.435,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_049.flac,data/v0.5_fixed/marefair/Fair Flier/_049.pt,5,Fair Flier,val,48000,149454,3.114,49818,3.114,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_250.flac,data/v0.5_fixed/marefair/Mimosa/_250.pt,5,Mimosa,train,48000,170977,3.562,56993,3.562,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_093.flac,data/v0.5_fixed/marefair/BeelzTheBub/_093.pt,5,BeelzTheBub,train,48000,1170281,24.381,390094,24.381,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_037.flac,data/v0.5_fixed/marefair/FunRaiser/_037.pt,6,FunRaiser,train,48000,848288,17.673,282763,17.673,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_221.flac,data/v0.5_fixed/marefair/Mimosa/_221.pt,5,Mimosa,train,48000,238347,4.966,79449,4.966,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_057.flac,data/v0.5_fixed/marefair/Fair Flier/_057.pt,4,Fair Flier,train,48000,129635,2.701,43212,2.701,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_043.flac,data/v0.5_fixed/marefair/BeelzTheBub/_043.pt,6,BeelzTheBub,train,48000,465666,9.701,155222,9.701,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_034.flac,data/v0.5_fixed/marefair/BeelzTheBub/_034.pt,4,BeelzTheBub,train,48000,781168,16.274,260390,16.274,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_038.flac,data/v0.5_fixed/marefair/Fair Flier/_038.pt,5,Fair Flier,train,48000,193513,4.032,64505,4.032,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_128.flac,data/v0.5_fixed/marefair/FunRaiser/_128.pt,4,FunRaiser,train,48000,243580,5.075,81194,5.075,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_085.flac,data/v0.5_fixed/marefair/Matinee/_085.pt,4,Matinee,train,48000,302254,6.297,100752,6.297,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_176.flac,data/v0.5_fixed/marefair/Soiree/_176.pt,4,Soiree,train,48000,154503,3.219,51501,3.219,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_067.flac,data/v0.5_fixed/marefair/Fair Flier/_067.pt,4,Fair Flier,train,48000,85653,1.784,28551,1.784,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_001.flac,data/v0.5_fixed/marefair/DeadAnon/_001.pt,6,DeadAnon,train,48000,277227,5.776,92409,5.776,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_127.flac,data/v0.5_fixed/marefair/Fair Flier/_127.pt,5,Fair Flier,train,48000,338236,7.047,112746,7.047,3.0
+/mnt/data/DataAugmentation/MareFairData/Extra/_003.flac,data/v0.5_fixed/marefair/Extra/_003.pt,5,Extra,train,48000,321277,6.693,107093,6.693,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_197.flac,data/v0.5_fixed/marefair/Mimosa/_197.pt,6,Mimosa,train,48000,638534,13.303,212845,13.303,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_279.flac,data/v0.5_fixed/marefair/Mimosa/_279.pt,6,Mimosa,train,48000,278262,5.797,92754,5.797,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_047.flac,data/v0.5_fixed/marefair/Fair Flier/_047.pt,4,Fair Flier,train,48000,132269,2.756,44090,2.756,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_295.flac,data/v0.5_fixed/marefair/Fair Flier/_295.pt,5,Fair Flier,train,48000,399841,8.33,133281,8.33,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_094.flac,data/v0.5_fixed/marefair/Matinee/_094.pt,6,Matinee,train,48000,153508,3.198,51170,3.198,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_074.flac,data/v0.5_fixed/marefair/FunRaiser/_074.pt,5,FunRaiser,train,48000,544432,11.342,181478,11.342,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_039.flac,data/v0.5_fixed/marefair/DeadAnon/_039.pt,5,DeadAnon,val,48000,351725,7.328,117242,7.328,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_064.flac,data/v0.5_fixed/marefair/Mimosa/_064.pt,4,Mimosa,train,48000,104032,2.167,34678,2.167,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_006.flac,data/v0.5_fixed/marefair/ShobieShy/_006.pt,5,ShobieShy,train,48000,141330,2.944,47110,2.944,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_091.flac,data/v0.5_fixed/marefair/Soiree/_091.pt,4,Soiree,train,48000,196623,4.096,65541,4.096,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_110.flac,data/v0.5_fixed/marefair/BeelzTheBub/_110.pt,4,BeelzTheBub,train,48000,139333,2.903,46445,2.903,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_024.flac,data/v0.5_fixed/marefair/Soiree/_024.pt,6,Soiree,train,48000,316886,6.602,105629,6.602,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_141.flac,data/v0.5_fixed/marefair/Mimosa/_141.pt,5,Mimosa,train,48000,351265,7.318,117089,7.318,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_098.flac,data/v0.5_fixed/marefair/FunRaiser/_098.pt,7,FunRaiser,train,48000,1665931,34.707,555311,34.707,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_102.flac,data/v0.5_fixed/marefair/Soiree/_102.pt,5,Soiree,train,48000,666707,13.89,222236,13.89,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_168.flac,data/v0.5_fixed/marefair/Soiree/_168.pt,4,Soiree,train,48000,276779,5.766,92260,5.766,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_029.flac,data/v0.5_fixed/marefair/FunRaiser/_029.pt,6,FunRaiser,train,48000,374942,7.811,124981,7.811,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_035.flac,data/v0.5_fixed/marefair/Fair Flier/_035.pt,5,Fair Flier,train,48000,830801,17.308,276934,17.308,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_222.flac,data/v0.5_fixed/marefair/Fair Flier/_222.pt,4,Fair Flier,train,48000,395877,8.247,131959,8.247,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_074.flac,data/v0.5_fixed/marefair/Soiree/_074.pt,3,Soiree,train,48000,626807,13.058,208936,13.059,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_133.flac,data/v0.5_fixed/marefair/Matinee/_133.pt,4,Matinee,train,48000,114453,2.384,38151,2.384,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_184.flac,data/v0.5_fixed/marefair/Soiree/_184.pt,4,Soiree,train,48000,133659,2.785,44553,2.785,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_129.flac,data/v0.5_fixed/marefair/Matinee/_129.pt,4,Matinee,train,48000,499087,10.398,166363,10.398,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_110.flac,data/v0.5_fixed/marefair/Fair Flier/_110.pt,6,Fair Flier,train,48000,344342,7.174,114781,7.174,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_114.flac,data/v0.5_fixed/marefair/Matinee/_114.pt,4,Matinee,train,48000,684876,14.268,228292,14.268,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_212.flac,data/v0.5_fixed/marefair/Mimosa/_212.pt,5,Mimosa,train,48000,274443,5.718,91481,5.718,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_089.flac,data/v0.5_fixed/marefair/Mimosa/_089.pt,5,Mimosa,train,48000,339214,7.067,113072,7.067,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_026.flac,data/v0.5_fixed/marefair/Mimosa/_026.pt,6,Mimosa,train,48000,283070,5.897,94357,5.897,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_030.flac,data/v0.5_fixed/marefair/Soiree/_030.pt,6,Soiree,train,48000,797805,16.621,265935,16.621,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_064.flac,data/v0.5_fixed/marefair/FunRaiser/_064.pt,5,FunRaiser,train,48000,181294,3.777,60432,3.777,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_143.flac,data/v0.5_fixed/marefair/Matinee/_143.pt,5,Matinee,train,48000,134739,2.807,44913,2.807,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_044.flac,data/v0.5_fixed/marefair/DeadAnon/_044.pt,4,DeadAnon,train,48000,792632,16.513,264211,16.513,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_059.flac,data/v0.5_fixed/marefair/Fair Flier/_059.pt,4,Fair Flier,train,48000,155343,3.236,51781,3.236,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_213.flac,data/v0.5_fixed/marefair/Mimosa/_213.pt,4,Mimosa,train,48000,281267,5.86,93756,5.86,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_005.flac,data/v0.5_fixed/marefair/BeelzTheBub/_005.pt,6,BeelzTheBub,train,48000,163005,3.396,54335,3.396,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_216.flac,data/v0.5_fixed/marefair/Fair Flier/_216.pt,5,Fair Flier,train,48000,252108,5.252,84036,5.252,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_260.flac,data/v0.5_fixed/marefair/Fair Flier/_260.pt,5,Fair Flier,train,48000,825675,17.202,275225,17.202,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_073.flac,data/v0.5_fixed/marefair/Soiree/_073.pt,5,Soiree,train,48000,170053,3.543,56685,3.543,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_004.flac,data/v0.5_fixed/marefair/Fair Flier/_004.pt,5,Fair Flier,train,48000,109746,2.286,36582,2.286,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_053.flac,data/v0.5_fixed/marefair/Soiree/_053.pt,4,Soiree,train,48000,110816,2.309,36939,2.309,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_220.flac,data/v0.5_fixed/marefair/Mimosa/_220.pt,5,Mimosa,train,48000,237716,4.952,79239,4.952,3.0
+/mnt/data/DataAugmentation/MareFairData/ShobieShy/_004.flac,data/v0.5_fixed/marefair/ShobieShy/_004.pt,4,ShobieShy,train,48000,381997,7.958,127333,7.958,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_075.flac,data/v0.5_fixed/marefair/BeelzTheBub/_075.pt,4,BeelzTheBub,val,48000,564090,11.752,188030,11.752,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_013.flac,data/v0.5_fixed/marefair/DeadAnon/_013.pt,4,DeadAnon,train,48000,346403,7.217,115468,7.217,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_287.flac,data/v0.5_fixed/marefair/Fair Flier/_287.pt,4,Fair Flier,train,48000,142767,2.974,47589,2.974,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_011.flac,data/v0.5_fixed/marefair/Algo/_011.pt,4,Algo,train,48000,238527,4.969,79509,4.969,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_120.flac,data/v0.5_fixed/marefair/Soiree/_120.pt,5,Soiree,val,48000,144414,3.009,48138,3.009,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_040.flac,data/v0.5_fixed/marefair/Fair Flier/_040.pt,5,Fair Flier,train,48000,131186,2.733,43729,2.733,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_044.flac,data/v0.5_fixed/marefair/Fair Flier/_044.pt,5,Fair Flier,val,48000,157303,3.277,52435,3.277,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_106.flac,data/v0.5_fixed/marefair/Fair Flier/_106.pt,5,Fair Flier,train,48000,260774,5.433,86925,5.433,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_022.flac,data/v0.5_fixed/marefair/Fair Flier/_022.pt,6,Fair Flier,train,48000,1012350,21.091,337450,21.091,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_121.flac,data/v0.5_fixed/marefair/Fair Flier/_121.pt,6,Fair Flier,train,48000,331713,6.911,110571,6.911,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_035.flac,data/v0.5_fixed/marefair/Soiree/_035.pt,5,Soiree,val,48000,310011,6.459,103337,6.459,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_043.flac,data/v0.5_fixed/marefair/Matinee/_043.pt,6,Matinee,train,48000,646383,13.466,215461,13.466,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_162.flac,data/v0.5_fixed/marefair/Mimosa/_162.pt,6,Mimosa,train,48000,297394,6.196,99132,6.196,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_182.flac,data/v0.5_fixed/marefair/Mimosa/_182.pt,4,Mimosa,train,48000,249619,5.2,83207,5.2,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_140.flac,data/v0.5_fixed/marefair/Matinee/_140.pt,4,Matinee,train,48000,680220,14.171,226740,14.171,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_131.flac,data/v0.5_fixed/marefair/Soiree/_131.pt,5,Soiree,val,48000,108521,2.261,36174,2.261,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_036.flac,data/v0.5_fixed/marefair/Matinee/_036.pt,4,Matinee,train,48000,224764,4.683,74922,4.683,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_007.flac,data/v0.5_fixed/marefair/Matinee/_007.pt,6,Matinee,train,48000,325745,6.786,108582,6.786,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_236.flac,data/v0.5_fixed/marefair/Mimosa/_236.pt,6,Mimosa,train,48000,279781,5.829,93261,5.829,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_116.flac,data/v0.5_fixed/marefair/Matinee/_116.pt,4,Matinee,train,48000,112174,2.337,37392,2.337,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_148.flac,data/v0.5_fixed/marefair/Mimosa/_148.pt,5,Mimosa,train,48000,348670,7.264,116224,7.264,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_219.flac,data/v0.5_fixed/marefair/Fair Flier/_219.pt,4,Fair Flier,train,48000,344110,7.169,114704,7.169,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_134.flac,data/v0.5_fixed/marefair/Mimosa/_134.pt,4,Mimosa,train,48000,347963,7.249,115988,7.249,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_141.flac,data/v0.5_fixed/marefair/Soiree/_141.pt,5,Soiree,train,48000,186085,3.877,62029,3.877,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_009.flac,data/v0.5_fixed/marefair/Fair Flier/_009.pt,5,Fair Flier,train,48000,516805,10.767,172269,10.767,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_206.flac,data/v0.5_fixed/marefair/Mimosa/_206.pt,5,Mimosa,train,48000,696435,14.509,232145,14.509,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_032.flac,data/v0.5_fixed/marefair/Fair Flier/_032.pt,5,Fair Flier,train,48000,107224,2.234,35742,2.234,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_032.flac,data/v0.5_fixed/marefair/Soiree/_032.pt,5,Soiree,train,48000,285502,5.948,95168,5.948,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_040.flac,data/v0.5_fixed/marefair/Matinee/_040.pt,6,Matinee,train,48000,281876,5.872,93959,5.872,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_122.flac,data/v0.5_fixed/marefair/FunRaiser/_122.pt,4,FunRaiser,train,48000,432508,9.011,144170,9.011,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_253.flac,data/v0.5_fixed/marefair/Fair Flier/_253.pt,4,Fair Flier,train,48000,133911,2.79,44637,2.79,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_047.flac,data/v0.5_fixed/marefair/Matinee/_047.pt,6,Matinee,val,48000,102713,2.14,34238,2.14,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_057.flac,data/v0.5_fixed/marefair/Mimosa/_057.pt,5,Mimosa,train,48000,66884,1.393,22295,1.393,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_034.flac,data/v0.5_fixed/marefair/Fair Flier/_034.pt,6,Fair Flier,train,48000,114852,2.393,38284,2.393,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_127.flac,data/v0.5_fixed/marefair/Matinee/_127.pt,5,Matinee,train,48000,133184,2.775,44395,2.775,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_135.flac,data/v0.5_fixed/marefair/Soiree/_135.pt,4,Soiree,val,48000,162026,3.376,54009,3.376,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_150.flac,data/v0.5_fixed/marefair/Soiree/_150.pt,4,Soiree,train,48000,473818,9.871,157940,9.871,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_228.flac,data/v0.5_fixed/marefair/Fair Flier/_228.pt,6,Fair Flier,train,48000,684091,14.252,228031,14.252,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_128.flac,data/v0.5_fixed/marefair/Fair Flier/_128.pt,5,Fair Flier,train,48000,343191,7.15,114397,7.15,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_201.flac,data/v0.5_fixed/marefair/Fair Flier/_201.pt,4,Fair Flier,train,48000,175275,3.652,58425,3.652,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_096.flac,data/v0.5_fixed/marefair/BeelzTheBub/_096.pt,5,BeelzTheBub,val,48000,131851,2.747,43951,2.747,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_105.flac,data/v0.5_fixed/marefair/Soiree/_105.pt,4,Soiree,train,48000,162912,3.394,54304,3.394,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_060.flac,data/v0.5_fixed/marefair/Matinee/_060.pt,4,Matinee,train,48000,143775,2.995,47925,2.995,3.0
+/mnt/data/DataAugmentation/MareFairData/Algo/_013.flac,data/v0.5_fixed/marefair/Algo/_013.pt,4,Algo,val,48000,713018,14.855,237673,14.855,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_107.flac,data/v0.5_fixed/marefair/Fair Flier/_107.pt,6,Fair Flier,train,48000,441037,9.188,147013,9.188,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_276.flac,data/v0.5_fixed/marefair/Fair Flier/_276.pt,5,Fair Flier,train,48000,141091,2.939,47031,2.939,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_138.flac,data/v0.5_fixed/marefair/FunRaiser/_138.pt,4,FunRaiser,train,48000,371815,7.746,123939,7.746,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_137.flac,data/v0.5_fixed/marefair/Fair Flier/_137.pt,5,Fair Flier,train,48000,178921,3.728,59641,3.728,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_019.flac,data/v0.5_fixed/marefair/Matinee/_019.pt,6,Matinee,train,48000,472098,9.835,157366,9.835,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_113.flac,data/v0.5_fixed/marefair/Fair Flier/_113.pt,6,Fair Flier,train,48000,267242,5.568,89081,5.568,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_030.flac,data/v0.5_fixed/marefair/BeelzTheBub/_030.pt,5,BeelzTheBub,train,48000,771471,16.072,257157,16.072,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_020.flac,data/v0.5_fixed/marefair/FunRaiser/_020.pt,6,FunRaiser,train,48000,365647,7.618,121883,7.618,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_111.flac,data/v0.5_fixed/marefair/BeelzTheBub/_111.pt,5,BeelzTheBub,val,48000,247670,5.16,82557,5.16,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_252.flac,data/v0.5_fixed/marefair/Mimosa/_252.pt,6,Mimosa,train,48000,150081,3.127,50027,3.127,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_055.flac,data/v0.5_fixed/marefair/Mimosa/_055.pt,4,Mimosa,train,48000,68517,1.427,22839,1.427,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_215.flac,data/v0.5_fixed/marefair/Mimosa/_215.pt,5,Mimosa,train,48000,298481,6.218,99494,6.218,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_006.flac,data/v0.5_fixed/marefair/Fair Flier/_006.pt,5,Fair Flier,train,48000,232064,4.835,77355,4.835,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_281.flac,data/v0.5_fixed/marefair/Mimosa/_281.pt,6,Mimosa,train,48000,723767,15.078,241256,15.079,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_114.flac,data/v0.5_fixed/marefair/Soiree/_114.pt,4,Soiree,train,48000,416355,8.674,138785,8.674,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_065.flac,data/v0.5_fixed/marefair/BeelzTheBub/_065.pt,6,BeelzTheBub,train,48000,571647,11.909,190549,11.909,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_162.flac,data/v0.5_fixed/marefair/Soiree/_162.pt,4,Soiree,train,48000,824828,17.184,274943,17.184,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_164.flac,data/v0.5_fixed/marefair/Fair Flier/_164.pt,5,Fair Flier,train,48000,213695,4.452,71232,4.452,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_142.flac,data/v0.5_fixed/marefair/Fair Flier/_142.pt,4,Fair Flier,train,48000,674228,14.046,224743,14.046,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_055.flac,data/v0.5_fixed/marefair/Matinee/_055.pt,4,Matinee,train,48000,384898,8.019,128300,8.019,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_077.flac,data/v0.5_fixed/marefair/Fair Flier/_077.pt,4,Fair Flier,train,48000,135774,2.829,45258,2.829,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_014.flac,data/v0.5_fixed/marefair/BeelzTheBub/_014.pt,6,BeelzTheBub,train,48000,750636,15.638,250212,15.638,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_125.flac,data/v0.5_fixed/marefair/Soiree/_125.pt,5,Soiree,train,48000,272655,5.68,90885,5.68,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_161.flac,data/v0.5_fixed/marefair/Mimosa/_161.pt,6,Mimosa,train,48000,316989,6.604,105663,6.604,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_261.flac,data/v0.5_fixed/marefair/Mimosa/_261.pt,5,Mimosa,train,48000,114703,2.39,38235,2.39,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_263.flac,data/v0.5_fixed/marefair/Mimosa/_263.pt,4,Mimosa,train,48000,106928,2.228,35643,2.228,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_077.flac,data/v0.5_fixed/marefair/Mimosa/_077.pt,5,Mimosa,train,48000,128555,2.678,42852,2.678,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_044.flac,data/v0.5_fixed/marefair/Mimosa/_044.pt,5,Mimosa,train,48000,476236,9.922,158746,9.922,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_173.flac,data/v0.5_fixed/marefair/Mimosa/_173.pt,5,Mimosa,train,48000,370271,7.714,123424,7.714,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_047.flac,data/v0.5_fixed/marefair/BGM/_047.pt,4,BGM,train,48000,267614,5.575,89205,5.575,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_135.flac,data/v0.5_fixed/marefair/Fair Flier/_135.pt,4,Fair Flier,train,48000,225510,4.698,75170,4.698,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_007.flac,data/v0.5_fixed/marefair/Soiree/_007.pt,4,Soiree,train,48000,177854,3.705,59285,3.705,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_041.flac,data/v0.5_fixed/marefair/Mimosa/_041.pt,5,Mimosa,train,48000,207458,4.322,69153,4.322,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_325.flac,data/v0.5_fixed/marefair/Mimosa/_325.pt,5,Mimosa,train,48000,155538,3.24,51846,3.24,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_024.flac,data/v0.5_fixed/marefair/Matinee/_024.pt,5,Matinee,train,48000,472098,9.835,157366,9.835,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_005.flac,data/v0.5_fixed/marefair/Soiree/_005.pt,5,Soiree,train,48000,244255,5.089,81419,5.089,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_170.flac,data/v0.5_fixed/marefair/Mimosa/_170.pt,5,Mimosa,train,48000,151028,3.146,50343,3.146,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_196.flac,data/v0.5_fixed/marefair/Mimosa/_196.pt,6,Mimosa,train,48000,204030,4.251,68010,4.251,3.0
+/mnt/data/DataAugmentation/MareFairData/BGM/_005.flac,data/v0.5_fixed/marefair/BGM/_005.pt,4,BGM,train,48000,109666,2.285,36556,2.285,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_135.flac,data/v0.5_fixed/marefair/Mimosa/_135.pt,4,Mimosa,train,48000,757759,15.787,252587,15.787,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_072.flac,data/v0.5_fixed/marefair/Matinee/_072.pt,5,Matinee,train,48000,230832,4.809,76944,4.809,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_077.flac,data/v0.5_fixed/marefair/FunRaiser/_077.pt,5,FunRaiser,train,48000,227513,4.74,75838,4.74,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_115.flac,data/v0.5_fixed/marefair/Soiree/_115.pt,4,Soiree,train,48000,129364,2.695,43122,2.695,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_154.flac,data/v0.5_fixed/marefair/Mimosa/_154.pt,5,Mimosa,train,48000,343436,7.155,114479,7.155,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_096.flac,data/v0.5_fixed/marefair/Matinee/_096.pt,5,Matinee,train,48000,135944,2.832,45315,2.832,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_019.flac,data/v0.5_fixed/marefair/BeelzTheBub/_019.pt,6,BeelzTheBub,train,48000,682582,14.22,227528,14.22,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_029.flac,data/v0.5_fixed/marefair/BeelzTheBub/_029.pt,4,BeelzTheBub,train,48000,267054,5.564,89018,5.564,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_108.flac,data/v0.5_fixed/marefair/FunRaiser/_108.pt,3,FunRaiser,train,48000,146338,3.049,48780,3.049,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_058.flac,data/v0.5_fixed/marefair/BeelzTheBub/_058.pt,4,BeelzTheBub,train,48000,275281,5.735,91761,5.735,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_106.flac,data/v0.5_fixed/marefair/FunRaiser/_106.pt,5,FunRaiser,train,48000,259018,5.396,86340,5.396,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_202.flac,data/v0.5_fixed/marefair/Mimosa/_202.pt,6,Mimosa,train,48000,405083,8.439,135028,8.439,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_011.flac,data/v0.5_fixed/marefair/Soiree/_011.pt,5,Soiree,train,48000,124187,2.587,41396,2.587,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_041.flac,data/v0.5_fixed/marefair/BeelzTheBub/_041.pt,5,BeelzTheBub,train,48000,175999,3.667,58667,3.667,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_101.flac,data/v0.5_fixed/marefair/Soiree/_101.pt,5,Soiree,train,48000,214407,4.467,71469,4.467,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_203.flac,data/v0.5_fixed/marefair/Mimosa/_203.pt,6,Mimosa,train,48000,397260,8.276,132420,8.276,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_156.flac,data/v0.5_fixed/marefair/Mimosa/_156.pt,5,Mimosa,train,48000,507289,10.569,169097,10.569,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_071.flac,data/v0.5_fixed/marefair/BeelzTheBub/_071.pt,6,BeelzTheBub,train,48000,572434,11.926,190812,11.926,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_016.flac,data/v0.5_fixed/marefair/Fair Flier/_016.pt,6,Fair Flier,train,48000,114852,2.393,38284,2.393,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_222.flac,data/v0.5_fixed/marefair/Mimosa/_222.pt,5,Mimosa,train,48000,152184,3.171,50728,3.171,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_042.flac,data/v0.5_fixed/marefair/Fair Flier/_042.pt,5,Fair Flier,train,48000,132317,2.757,44106,2.757,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_013.flac,data/v0.5_fixed/marefair/Matinee/_013.pt,6,Matinee,train,48000,382176,7.962,127392,7.962,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_103.flac,data/v0.5_fixed/marefair/Fair Flier/_103.pt,5,Fair Flier,val,48000,341418,7.113,113806,7.113,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_070.flac,data/v0.5_fixed/marefair/Mimosa/_070.pt,5,Mimosa,train,48000,138528,2.886,46176,2.886,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_223.flac,data/v0.5_fixed/marefair/Fair Flier/_223.pt,4,Fair Flier,train,48000,674228,14.046,224743,14.046,3.0
+/mnt/data/DataAugmentation/MareFairData/DeadAnon/_034.flac,data/v0.5_fixed/marefair/DeadAnon/_034.pt,7,DeadAnon,train,48000,344518,7.177,114840,7.178,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_093.flac,data/v0.5_fixed/marefair/Fair Flier/_093.pt,5,Fair Flier,train,48000,254204,5.296,84735,5.296,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_061.flac,data/v0.5_fixed/marefair/Mimosa/_061.pt,4,Mimosa,train,48000,163406,3.404,54469,3.404,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_024.flac,data/v0.5_fixed/marefair/Fair Flier/_024.pt,5,Fair Flier,train,48000,232063,4.835,77355,4.835,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_327.flac,data/v0.5_fixed/marefair/Mimosa/_327.pt,5,Mimosa,train,48000,129850,2.705,43284,2.705,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_066.flac,data/v0.5_fixed/marefair/Soiree/_066.pt,5,Soiree,train,48000,1028328,21.424,342776,21.424,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_230.flac,data/v0.5_fixed/marefair/Fair Flier/_230.pt,5,Fair Flier,train,48000,172006,3.583,57336,3.583,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_099.flac,data/v0.5_fixed/marefair/FunRaiser/_099.pt,7,FunRaiser,train,48000,860054,17.918,286685,17.918,3.0
+/mnt/data/DataAugmentation/MareFairData/Soiree/_033.flac,data/v0.5_fixed/marefair/Soiree/_033.pt,4,Soiree,train,48000,163781,3.412,54594,3.412,3.0
+/mnt/data/DataAugmentation/MareFairData/Matinee/_027.flac,data/v0.5_fixed/marefair/Matinee/_027.pt,6,Matinee,train,48000,293778,6.12,97926,6.12,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_119.flac,data/v0.5_fixed/marefair/FunRaiser/_119.pt,4,FunRaiser,val,48000,388771,8.099,129591,8.099,3.0
+/mnt/data/DataAugmentation/MareFairData/Mimosa/_223.flac,data/v0.5_fixed/marefair/Mimosa/_223.pt,5,Mimosa,train,48000,328593,6.846,109531,6.846,3.0
+/mnt/data/DataAugmentation/MareFairData/FunRaiser/_047.flac,data/v0.5_fixed/marefair/FunRaiser/_047.pt,4,FunRaiser,train,48000,379035,7.897,126345,7.897,3.0
+/mnt/data/DataAugmentation/MareFairData/Fair Flier/_161.flac,data/v0.5_fixed/marefair/Fair Flier/_161.pt,5,Fair Flier,train,48000,238909,4.977,79637,4.977,3.0
+/mnt/data/DataAugmentation/MareFairData/BeelzTheBub/_015.flac,data/v0.5_fixed/marefair/BeelzTheBub/_015.pt,5,BeelzTheBub,train,48000,228488,4.76,76163,4.76,3.0

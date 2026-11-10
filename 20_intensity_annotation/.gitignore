@@ -4,3 +4,5 @@ peaks
 logs
 eval_sets
 annotations
+dsp_features.csv
+dsp_features_fixed.csv
