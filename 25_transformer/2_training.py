@@ -336,6 +336,19 @@ class TrainModule(pl.LightningModule):
             print(f"Gradient clipping: {self.grad_clip_algorithm} "
                   f"max={self.grad_clip_val}")
 
+        # Learning-rate schedule end.  ``CosineAnnealingLR`` is *periodic* with
+        # period ``2 * T_max``: past ``cosine_anneal_end`` the LR does not stay
+        # at ``eta_min``, it climbs back towards its base value (reaching it at
+        # ``2 * cosine_anneal_end``).  Nothing in Lightning stops the run there,
+        # so a config whose ``max_steps`` is larger than its
+        # ``cosine_anneal_end`` silently turns the tail of the run into an
+        # un-anneal -- the exact opposite of what the key name promises.
+        # ``_check_anneal_end`` warns once, at train start (a resumed run can
+        # already be past it) and at the step it is crossed.
+        self.anneal_end = int(
+            config.train.get("cosine_anneal_end", 1000000) or 0)
+        self._anneal_warned = False
+
         # Muon's Newton-Schulz iteration count (see configure_optimizers). Its
         # cost is per-step and batch-independent, so this is the cheapest perf
         # knob stage 2 has: measured ~1.26 TMAC at ns_steps=5 on this model.
@@ -696,8 +709,48 @@ class TrainModule(pl.LightningModule):
 
     def on_train_start(self):
         self._apply_muon_settings()
+        self._check_anneal_end()
         self._sample_and_log()
         self._maybe_compile_decoder()
+
+    def _check_anneal_end(self, step=None, lr=None):
+        """Warn once when the run is past ``train.cosine_anneal_end``.
+
+        ``torch.optim.lr_scheduler.CosineAnnealingLR`` wraps around: with
+        ``T_max = cosine_anneal_end`` the LR goes ``base -> eta_min`` over the
+        first ``T_max`` steps and then ``eta_min -> base`` over the next
+        ``T_max``.  A run that keeps going therefore *raises* its learning rate
+        again -- typically to the full ``train.lr`` at step
+        ``2 * cosine_anneal_end`` -- while the key name implies it is pinned at
+        the end of the anneal.  Two ways this happens in practice:
+
+        * ``train.max_steps`` is larger than ``cosine_anneal_end`` (the shipped
+          stage-2 config has 1 M vs 300 k), so nothing stops the run at the
+          minimum and the tail re-warms,
+        * a ``--resume_from`` of a checkpoint whose step is already past it.
+
+        The warning is printed once per run (``self._anneal_warned``) and says
+        where the LR is heading, so "the loss changed direction" is attributable
+        without digging through the checkpoint's ``lr_schedulers``.
+        """
+        if self._anneal_warned or self.anneal_end <= 0:
+            return
+        step = self.global_step if step is None else int(step)
+        if step < self.anneal_end:
+            return
+        self._anneal_warned = True
+        if lr is None:
+            optims = self.optimizers()
+            adamw = getattr(optims[0], "optimizer", optims[0])
+            lr = float(adamw.param_groups[0]["lr"])
+        base_lr = float(self.config.train.get("lr", lr))
+        print(
+            f"WARNING: global_step {step} is past train.cosine_anneal_end "
+            f"({self.anneal_end}). CosineAnnealingLR is periodic, so the LR is "
+            f"now *rising* again (currently {lr:.3e}, back to the base "
+            f"{base_lr:.3e} at step {2 * self.anneal_end}) -- the run is no "
+            f"longer annealing. Set train.max_steps to cosine_anneal_end (or "
+            f"raise cosine_anneal_end) if that is not what you want.")
 
     def on_train_epoch_end(self):
         self._log_grad_epoch_stats()
@@ -1364,6 +1417,11 @@ class TrainModule(pl.LightningModule):
         optim_muon.optimizer.step()
         sched_adamw.step()
         sched_muon.step()
+        # One-time warning if this step crossed train.cosine_anneal_end, after
+        # which CosineAnnealingLR starts *raising* the LR again (see
+        # `_check_anneal_end`); gated so the hot path costs a single int compare.
+        if not self._anneal_warned and self.global_step >= self.anneal_end > 0:
+            self._check_anneal_end()
         return loss
 
     def on_validation_epoch_start(self):

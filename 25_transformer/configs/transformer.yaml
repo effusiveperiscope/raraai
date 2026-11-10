@@ -305,6 +305,13 @@ train:
   # re-preprocessing and old checkpoints resume normally.
   grad_clip_val: 1.0
   grad_clip_algorithm: norm
+  # LR schedule.  CosineAnnealingLR is *periodic* (period 2 * cosine_anneal_end):
+  # past `cosine_anneal_end` the LR does not sit at eta_min, it climbs back to
+  # `lr` at step 2 * cosine_anneal_end.  So `max_steps` must not exceed
+  # `cosine_anneal_end` unless re-warming is intended -- with 1 M vs 300 k
+  # (the historical values) the run spends 700 k steps un-annealing and is back
+  # at full LR by step 600 k.  2_training.py now warns once when a run crosses
+  # `cosine_anneal_end` (see TrainModule._check_anneal_end).
   cosine_anneal_end: 300000
   max_steps: 1000000
   max_epochs: -1
