@@ -45,6 +45,12 @@ python make_report.py --ckpt checkpoints/<exp>/best-checkpoint.ckpt \
     --compare checkpoints/test8/last.ckpt \
     --audio-dir eval_sets/eval1 --filelist data/v0.5/val_filelist.txt --n 8 \
     --out report/index.html     # then: python -m http.server -d report 8080
+
+# mine the big unlabeled pool for standout clips (extremes, dynamics, model
+# disagreement, ...) and render them; clips already in data/v0.5 are excluded
+python mine_samples.py --ckpt checkpoints/<exp>/best-checkpoint.ckpt \
+    --compare checkpoints/test8/last.ckpt \
+    --limit 900 --per-category 3 --out report/mined.html
 ```
 
 `in_channels` is read from the checkpoint and the matching whisper model is

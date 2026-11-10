@@ -168,6 +168,9 @@ def build_css():
     .badge.label { border-color: #6b5a1f; background: #241f0f; color: #f0d68a; }
     .badge.good { border-color: #1d5c3a; background: #0f2419; color: #7ee2a8; }
     .badge.bad { border-color: #6b2531; background: #240f13; color: #f39caa; }
+    .badge.tag { border-color: #3a4f7a; background: #131d30; color: #9fc2ff; }
+    img.overview { width: 100%; border-radius: 10px; border: 1px solid #1e2634;
+                   margin-bottom: 22px; display: block; }
     audio { width: 100%; height: 30px; margin: 4px 0 10px; }
     .card img { width: 100%; border-radius: 8px; display: block; border: 1px solid #1a2130; }
     .legend { display: flex; gap: 14px; margin-top: 9px; font-size: 11.5px; color: #8b99ad; }
@@ -187,7 +190,8 @@ def build_html(args, models, cards, summary):
     parts.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
     parts.append('<title>intensity eval samples</title>')
     parts.append(f'<style>{build_css()}</style></head><body>')
-    parts.append('<header><h1>Perceptual intensity &mdash; eval samples</h1>')
+    title = getattr(args, 'title', 'Perceptual intensity &mdash; eval samples')
+    parts.append(f'<header><h1>{title}</h1>')
     parts.append('<div class="sub">')
     parts.append(' &nbsp;|&nbsp; '.join(
         f'<code>{html.escape(m["label"])}</code>&nbsp;{html.escape(m["detail"])}'
@@ -221,6 +225,8 @@ def build_html(args, models, cards, summary):
             for r in card['results']:
                 parts.append(f'<span class="badge">{html.escape(r["label"])} '
                              f'pred {r["clip"]:.2f}</span>')
+        for tag in card.get('tags', []):
+            parts.append(f'<span class="badge tag">{html.escape(tag)}</span>')
         parts.append('</div>')
         parts.append(f'<audio controls preload="metadata" src="{card["audio"]}"></audio>')
         parts.append(f'<img alt="intensity profile" src="{card["image"]}">')
