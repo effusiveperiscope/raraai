@@ -949,6 +949,78 @@ Notes:
   spikes. Clipping changes no checkpoint shape, so it needs neither
   re-preprocessing nor a fresh run — a spike can be fixed by resuming.
 
+### Learning-rate schedule (stage 2): the anneal ends, the run does not
+
+Both optimizers get a `CosineAnnealingLR(T_max=train.cosine_anneal_end,
+eta_min=1e-6 / 1e-6*muon_lr_mult)`. That scheduler is **periodic with period
+`2*T_max`**: it decays `base -> eta_min` over the first `T_max` steps and then
+climbs `eta_min -> base` over the next `T_max`. Nothing stops training at
+`T_max`, so a config with `max_steps > cosine_anneal_end` (the shipped values
+were 1 M vs 300 k) spends most of its life *un*-annealing — at step
+`2*cosine_anneal_end` the LR is back at the full `train.lr`. `TrainModule.
+_check_anneal_end` now prints a one-time warning when a run (or a
+`--resume_from`) is past the end, with the step at which the LR returns to
+base. Treat `max_steps == cosine_anneal_end` as the default; only exceed it if
+a re-warm is deliberate.
+
+`logs_stage2/5090_transformer_v0.7` (300 k anneal, run to 335 k) is the
+cautionary example. It also looks, at first glance, like "the low LR makes it
+converge faster" — it does not, and the curves say why:
+
+| window | LR | train_loss slope /100 k | val_loss slope /100 k |
+|---|---|---|---|
+| 30 k-130 k | 9.7e-5 → 7.0e-5 | −0.066 | **−0.047** |
+| 130 k-217 k | 7.0e-5 → 1.9e-5 | −0.172 | **−0.054** |
+| 217 k-300 k | 1.9e-5 → 1.1e-6 | **−0.245** (fastest in the run) | **+0.122** |
+| 300 k-336 k | 1.1e-6 → 4.4e-6 (rising) | +0.115 | −0.041 |
+
+The train curve really is steepest exactly where the LR is lowest — but that is
+memorisation, not learning: over the same window the **val** curve turns
+around. The generalisation gap goes from 0.17 nats at step 217 k to 0.45 at
+step 308 k; train_acc 0.360 → 0.400 while val_acc 0.3263 → 0.3220. Per codebook
+the coarse book is the casualty (`val_acc/spec0` 0.386 → 0.368 while the
+residual books `spec4`/`spec5` gain ~0.003), i.e. capacity moved from the
+text-conditioned envelope to fitting fine detail that does not transfer.
+Free-running agreement (smoothed `sample/{spec,pitch}_code_match_frac_0`) also
+peaks around step 235 k and is ~30 % lower at the end.
+
+Measured with `scratch/eval_stage2_checkpoints.py` on the same 8 val batches
+(best = step 213 710, last = step 335 830):
+
+| | best | last |
+|---|---|---|
+| teacher-forced `val_loss` | 2.3060 | 2.3783 (+0.072) |
+| `val_acc` | 0.3278 | 0.3241 |
+| `val_acc/spec0` | 0.386 | 0.368 |
+| FIM middle CE / acc | 2.2557 / 0.3596 | 2.2845 / 0.3547 |
+
+So the last 122 k steps (36 % of the run) made both the plain AR loss and the
+FIM span objective worse; `best-checkpoint.ckpt` (epoch 69) is the model to
+keep. Note the val minimum (step 216 763) is *not* the same step as the
+`best-checkpoint` (213 710, epoch boundary) and that the free-running metric is
+noisy per epoch (2 sampled items) — use the teacher-forced numbers for
+decisions and the code-match curve only for trends.
+
+The end-to-end check agrees in direction but is much noisier: WER
+(`scratch/eval_stage2_wer.py`, 24 val utterances, `--ignore_eos`, paired seed)
+is 14.32 % for `best` vs 14.77 % for `last`, against a **6.82 % floor** measured
+by decoding the *ground-truth* codes through the same vocoder + ASR.  So the
+regression is real but ~0.5 pp is inside the sampling error at that sample size
+— the teacher-forced loss decides, WER says how much of the remaining error the
+transformer itself contributes (about half of it, above the floor).
+
+Because the cause is capacity/data rather than the schedule, the fixes are:
+stop at the anneal end (cheap), raise regularisation (`transformer.dropout`
+0.05 → 0.1), or add data — an LR re-warm only masks it temporarily (in the
+`300 k-336 k` row the rising LR *raised* train loss while val kept improving
+slightly, i.e. it perturbed the model out of the sharp minimum without fixing
+the gap). Continuing a run past its val minimum
+also needs a decision about the schedule: `--resume_from best-checkpoint.ckpt`
+restores step 213 710 *and* the cosine position, so with `cosine_anneal_end:
+300000` only ~86 k steps of decay remain before the LR turns around again; a
+longer budget means a fresh `exp_name` + `--transfer_from` (no optimizer state)
+with `cosine_anneal_end` sized to the new total.
+
 ### Stage-2 step cost, Muon, and metric gating (v0.6)
 
 Two things dominated a stage-2 step that had nothing to do with the model, both
@@ -1526,6 +1598,29 @@ python modeling/generator.py      # constructs a Generator, runs infer
 # run next to a training job; --device cuda for speed)
 python test_stage2_conditioning.py \
     --checkpoint checkpoints_stage2/transformer_v0.4.1/last.ckpt --batches 4
+
+# Compare stage-2 checkpoints on the SAME val batches: teacher-forced val_loss /
+# accuracy (per codebook), the FIM probe's middle CE and control-arm deltas, and
+# free-running code match on a few sampled items.  Seconds on GPU; use it to
+# decide between best-checkpoint.ckpt and last.ckpt before spending hours on an
+# inference pass (see §4 "Learning-rate schedule").
+python scratch/eval_stage2_checkpoints.py \
+    --checkpoints checkpoints_stage2/<exp>/best-checkpoint.ckpt \
+                  checkpoints_stage2/<exp>/last.ckpt
+
+# End-to-end intelligibility: sample codes from one or more stage-2 checkpoints,
+# decode them with the frozen stage-1 Generator and score the result with
+# Qwen3-ASR against the source transcripts (WER, with S/D/I counts).  The
+# "reference" arm decodes the ground-truth codes through the same vocoder and is
+# the floor (vocoder + ASR error), so a checkpoint's gap to it is what the
+# transformer actually contributes.  Needs `--generator_checkpoint`
+# (checkpoints_stage1/...); `--ignore_eos` removes the model's duration errors;
+# `--save_dir` keeps the wavs.  Noisy: 24 utterances (~440 words) gives a
+# ~+/-3 pp 95 % interval, so use --num_items 50+ before acting on <1 pp.
+python scratch/eval_stage2_wer.py \
+    --checkpoints checkpoints_stage2/<exp>/best-checkpoint.ckpt \
+                  checkpoints_stage2/<exp>/last.ckpt \
+    --num_items 20 --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt
 
 # FIM / span-regeneration smoke test (CPU; safe next to a GPU training job):
 # apply_fim reorder + length buckets, mixed AR+FIM loss, sentinel masking in
