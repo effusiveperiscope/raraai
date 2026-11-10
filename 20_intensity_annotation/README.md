@@ -73,7 +73,15 @@ checkpoint can't silently be loaded into a whisper-small model.
   mean, the model is regressing to the mean (label noise is large - the label
   std is ~1.0 on a 1-9 scale, and per-speaker means differ).
 
-## Measured results
+## Intensity vs pitch
+
+`pitch_correlation.py` scores clips, extracts Praat F0, and reports pooled,
+within-speaker and across-speaker correlations (plus label/loudness controls).
+`PITCH_RESULTS.md` has the measured numbers: the model is weakly pitch-sensitive
+**within** a speaker (r ~ 0.31; ~0.41 in the expressive corpora, ~0.49 on the
+held-out val clips) but the apparent **across**-speaker correlation (r ~ 0.34)
+is a corpus confound and drops to ~0.02 once corpus is controlled.
+
 
 `python train.py --config config/local.yaml --max_epochs 15` (whisper-small,
 4063 train / 450 val clips, RTX 5060 Ti, ~18 min; best checkpoint at epoch 10),
