@@ -577,15 +577,27 @@ class Generator(nn.Module):
             f"got shape {tuple(idx.shape)}")
 
     @staticmethod
-    def _residual_lookup(quantizer, indices_qbt):
-        """Sum per-layer codebook embeddings for RVQ indices (Q, B, T)."""
+    def _residual_lookup(quantizer, indices_qbt, num_layers=None):
+        """Sum per-layer codebook embeddings for RVQ indices (Q, B, T).
+
+        ``num_layers`` truncates the residual sum to the first ``n`` codebooks
+        (progressive RVQ decoding): with ``n < Q`` the decoder only sees the
+        coarse levels and the residual detail those later books carry is
+        simply absent from the quantised latent. ``None`` -- the default, and
+        what training / ``2_preprocess.py`` -> inference always use -- sums
+        every codebook, i.e. the full-fidelity latent.
+        """
         layers = quantizer.codebook.layers
         if indices_qbt.shape[0] != len(layers):
             raise ValueError(
                 f"Expected {len(layers)} codebooks, got {indices_qbt.shape[0]}")
+        n = len(layers) if num_layers is None else int(num_layers)
+        if not 1 <= n <= len(layers):
+            raise ValueError(
+                f"num_layers must be in [1, {len(layers)}], got {num_layers}")
         out = None
-        for q, layer in enumerate(layers):
-            v = F.embedding(indices_qbt[q], layer.codebook)  # (B, T, D)
+        for q in range(n):
+            v = F.embedding(indices_qbt[q], layers[q].codebook)  # (B, T, D)
             out = v if out is None else out + v
         return out.transpose(1, 2)  # (B, D, T)
 
@@ -629,7 +641,7 @@ class Generator(nn.Module):
 
     def infer_from_codes(self, spec_codes, pitch_codes, sid,
                          out_len=None, voiced=None, uv_threshold=None,
-                         return_pitch=False):
+                         return_pitch=False, spec_codebooks=None):
         """Synthesize audio directly from integer spec + pitch codes.
 
         Args:
@@ -646,6 +658,13 @@ class Generator(nn.Module):
                 threshold applied to ``sigmoid(uv_logits)``.
             return_pitch: also return the f0 contour (Hz) decoded from
                 ``pitch_codes``, e.g. for stage-2 validation plots.
+            spec_codebooks: optional number of spec codebooks to decode with
+                (progressive RVQ): ``None`` sums every spec codebook, which is
+                the full-fidelity reconstruction; ``K`` sums only the first
+                ``K``, so the waveform is what a model that predicted just
+                those levels would produce. Pitch codes are never truncated --
+                the f0 contour (and the voicing decision that rides on it) is
+                identical at every level.
         Returns:
             audio: (B, 1, T_audio) waveform, or ``(audio, f0)`` when
             ``return_pitch`` is True. ``f0`` is ``(B, T_audio // hop_length)``
@@ -671,7 +690,8 @@ class Generator(nn.Module):
                 f"sid batch {sid.shape[0]} != codes batch {spec_idx.shape[1]}")
 
         # Spec path: indices -> quantized latent -> codec decoder -> upsample.
-        zq = self._residual_lookup(self.codec.quantizer, spec_idx)
+        zq = self._residual_lookup(self.codec.quantizer, spec_idx,
+                                   spec_codebooks)
         y = self.codec.decode_latent(zq, g)  # (B, C, T)
         yq = self.upsample(y)  # (B, C, T * down_factor)
         t_full = yq.shape[-1]

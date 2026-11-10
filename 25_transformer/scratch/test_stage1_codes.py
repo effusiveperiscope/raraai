@@ -15,8 +15,21 @@ how many codes survive the code -> audio -> code loop, which is the harshest
 single-number check of codec fidelity. ``--save_tensors`` dumps the codes and
 both f0 contours for offline inspection.
 
+``--codebook_levels`` writes one extra wav per *progressive* RVQ level:
+``<name>_spec_k<K>.wav`` decodes the spec codes with only the first ``K``
+codebooks (spec books ``K..Q-1`` are dropped from the residual sum, so the
+detail they carry is simply gone). The pitch codes are never truncated, so the
+files differ only by spectral detail. Use ``--codebook_levels all`` for every
+level, or a list like ``--codebook_levels 1,2,4``; a mel-L1 against the input
+is reported per level, and ``K == codec.codebook_num`` reproduces
+``<name>_recon.wav`` exactly. Every decode is seeded with ``DECODE_SEED``,
+because the NSF decoder otherwise draws a fresh noise excitation per call --
+unseeded, two decodes of the *same* codes differ more (measured max |delta|
+~0.4) than adding one spec codebook does, so the level comparison would be
+dominated by noise.
+
 Usage:
-    python test_stage1_codes.py test.wav \
+    python scratch/test_stage1_codes.py test.wav \
         --checkpoint checkpoints_stage1/base_v0.4.6/last.ckpt --sid 0
 
 Notes:
@@ -50,16 +63,18 @@ import traceback
 # comment at the top of 2_training.py.  Without this, faiss/numba spam the output.
 logging.basicConfig(level=logging.WARNING)
 
-import librosa
-import numpy as np
-import soundfile as sf
-import torch
-from omegaconf import OmegaConf
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from commons import load_state_dict_mismatch, load_submodule_prefix
-from features import FeatureExtractor
-from modeling.generator import Generator
-from utils import count_parameters, win_longpath
+import librosa  # noqa: E402
+import numpy as np  # noqa: E402
+import soundfile as sf  # noqa: E402
+import torch  # noqa: E402
+from omegaconf import OmegaConf  # noqa: E402
+
+from commons import load_state_dict_mismatch, load_submodule_prefix  # noqa: E402
+from features import FeatureExtractor  # noqa: E402
+from modeling.generator import Generator  # noqa: E402
+from utils import count_parameters, win_longpath  # noqa: E402
 
 
 # ---------------------------------------------------------------------- #
@@ -213,6 +228,45 @@ def code_match_fraction(a: np.ndarray, b: np.ndarray) -> list[float]:
 
 
 # ---------------------------------------------------------------------- #
+# Options
+# ---------------------------------------------------------------------- #
+def parse_codebook_levels(spec: str | None,
+                          codebook_num: int) -> list[int] | None:
+    """Parse ``--codebook_levels`` into a sorted, de-duplicated list of Ks.
+
+    ``None`` means "off". ``all`` expands to ``1..codebook_num`` (the number of
+    spectrogram codebooks in the checkpoint's config), otherwise ``spec`` is a
+    comma-separated list, e.g. ``1,2,4``. Every K must be in
+    ``[1, codebook_num]``: level 0 would mean decoding from no spec codes at
+    all, which is not a truncation of this codec (the decoder was never trained
+    on an all-zero latent) and is rejected rather than silently produced.
+    """
+    if spec is None:
+        return None
+    text = spec.strip().lower()
+    if text == 'all':
+        return list(range(1, codebook_num + 1))
+    levels = set()
+    for part in text.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            k = int(part)
+        except ValueError:
+            raise ValueError(
+                f'--codebook_levels: {part!r} is not an integer') from None
+        if not 1 <= k <= codebook_num:
+            raise ValueError(
+                '--codebook_levels: K must be in '
+                f'[1, {codebook_num}] (codec.codebook_num), got {k}')
+        levels.add(k)
+    if not levels:
+        raise ValueError('--codebook_levels is empty')
+    return sorted(levels)
+
+
+# ---------------------------------------------------------------------- #
 # Per-file pipeline
 # ---------------------------------------------------------------------- #
 def encode_codes(net_g: Generator, feats: dict, sid: int,
@@ -228,6 +282,30 @@ def encode_codes(net_g: Generator, feats: dict, sid: int,
         spec_codes, pitch_codes = net_g.encode_codes(
             spec_b, spec_l, f0_b, sid_b)
     return spec_codes, pitch_codes
+
+
+# The NSF decoder draws a fresh noise excitation (and random starting phases)
+# on every call, so two decodes of the *same* codes are audibly different --
+# measured max |delta| ~0.4 on a real checkpoint, larger than the difference a
+# single spec codebook makes. Seeding before each decode makes this script
+# reproducible and, for ``--codebook_levels``, gives every level the *same*
+# noise realisation: what you hear between two wavs is then purely the spec
+# codebooks, and ``K == Q_spec`` reproduces the full reconstruction exactly.
+DECODE_SEED = 0
+
+
+def decode_from_codes(net_g: Generator, spec_codes: torch.Tensor,
+                      pitch_codes: torch.Tensor, sid: torch.Tensor,
+                      out_len: int, spec_codebooks: int | None = None,
+                      return_pitch: bool = False):
+    """``Generator.infer_from_codes`` with a fixed RNG seed (DECODE_SEED)."""
+    torch.manual_seed(DECODE_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(DECODE_SEED)
+    with torch.no_grad():
+        return net_g.infer_from_codes(
+            spec_codes, pitch_codes, sid, out_len=out_len,
+            spec_codebooks=spec_codebooks, return_pitch=return_pitch)
 
 
 def process_file(path: str, fe: FeatureExtractor, net_g: Generator, hp,
@@ -260,16 +338,25 @@ def process_file(path: str, fe: FeatureExtractor, net_g: Generator, hp,
     sid_b = torch.tensor([int(args.sid)], device=device, dtype=torch.long)
     # out_len trims the right-pad the encoder added to reach a multiple of
     # down_factor, so the waveform is exactly spec_frames * hop_length long.
-    with torch.no_grad():
-        audio, f0_gen = net_g.infer_from_codes(
-            spec_codes, pitch_codes, sid_b,
-            out_len=n_frames, return_pitch=True)
+    audio, f0_gen = decode_from_codes(
+        net_g, spec_codes, pitch_codes, sid_b, n_frames, return_pitch=True)
     audio = audio[0, 0].float().cpu().numpy()
     f0_gen = f0_gen[0].float().cpu().numpy()
 
     spec_codes_np = spec_codes[:, 0].cpu().numpy()
     pitch_codes_np = pitch_codes[:, 0].cpu().numpy()
     n_codes = int(spec_codes_np.shape[1])
+
+    stem = os.path.splitext(os.path.basename(path))[0]
+    mel_kwargs = dict(
+        sampling_rate=sr,
+        n_fft=int(hp.data.filter_length),
+        win_length=int(hp.data.win_length),
+        hop_length=int(hp.data.hop_length),
+        n_mels=int(hp.data.mel_channels),
+        fmin=float(hp.data.mel_fmin),
+        fmax=float(hp.data.mel_fmax),
+    )
 
     result = {
         'file': os.path.abspath(path),
@@ -281,17 +368,31 @@ def process_file(path: str, fe: FeatureExtractor, net_g: Generator, hp,
         'spec_codes': code_stats(spec_codes_np, int(hp.codec.codebook_size)),
         'pitch_codes': code_stats(pitch_codes_np,
                                   int(hp.pitch_codec.codebook_size)),
-        'mel_l1_db': mel_l1_db(
-            wav, audio,
-            sampling_rate=sr,
-            n_fft=int(hp.data.filter_length),
-            win_length=int(hp.data.win_length),
-            hop_length=int(hp.data.hop_length),
-            n_mels=int(hp.data.mel_channels),
-            fmin=float(hp.data.mel_fmin),
-            fmax=float(hp.data.mel_fmax)),
+        'mel_l1_db': mel_l1_db(wav, audio, **mel_kwargs),
     }
     result.update(f0_metrics(f0_ref, f0_gen))
+
+    # Progressive RVQ probe: decode the *spec* codes with only the first K
+    # codebooks and write one wav per level, so the contribution of each
+    # residual book is directly audible. The pitch path is left complete (this
+    # flag is about spec codes only) and every level is decoded with the same
+    # DECODE_SEED, so the wavs differ only by the spec codebooks -- K == Q_spec
+    # therefore reproduces the reconstruction above exactly.
+    if args.codebook_levels:
+        levels = {}
+        for k in args.codebook_levels:
+            audio_k = decode_from_codes(
+                net_g, spec_codes, pitch_codes, sid_b, n_frames,
+                spec_codebooks=k)
+            audio_k = audio_k[0, 0].float().cpu().numpy()
+            level_path = os.path.join(args.output_dir, f'{stem}_spec_k{k}.wav')
+            sf.write(level_path, np.clip(audio_k, -1.0, 1.0), sr)
+            levels[str(k)] = {
+                'codebooks': int(k),
+                'mel_l1_db': mel_l1_db(wav, audio_k, **mel_kwargs),
+                'path': os.path.abspath(level_path),
+            }
+        result['spec_codebook_levels'] = levels
 
     # Optional code -> audio -> code loop: re-encode the synthesis and compare
     # the ids. Fidelity limits (VQ, f0 re-tracking on synthetic audio) mean
@@ -306,7 +407,6 @@ def process_file(path: str, fe: FeatureExtractor, net_g: Generator, hp,
             pitch_codes_np, rt_pitch_codes[:, 0].cpu().numpy())
 
     # --- write artefacts ---
-    stem = os.path.splitext(os.path.basename(path))[0]
     recon_path = os.path.join(args.output_dir, f'{stem}_recon.wav')
     sf.write(recon_path, np.clip(audio, -1.0, 1.0), sr)
     result['recon_path'] = os.path.abspath(recon_path)
@@ -358,6 +458,13 @@ def print_result(index: int, total: int, result: dict) -> None:
           f'precision {_fmt(result["voiced_precision"], ".3f")} '
           f'({result["f0_voiced_frames_ref"]} voiced ref frames, '
           f'{result["f0_voiced_frames_gen"]} voiced decoded frames)')
+    levels = result.get('spec_codebook_levels')
+    if levels:
+        print('  spec codes truncated to the first K codebooks '
+              '(pitch always complete):')
+        for k, entry in levels.items():
+            print(f'    K={k}: mel L1 {_fmt(entry["mel_l1_db"], ".2f")} dB '
+                  f'-> {entry["path"]}')
     if 'roundtrip_spec_code_match' in result:
         spec_match = ' '.join(
             _fmt(m, '.2f') for m in result['roundtrip_spec_code_match'])
@@ -383,6 +490,17 @@ def print_summary(results: list[dict],
               f'mean mel L1 {_fmt(float(np.nanmean(mel)), ".2f")} dB | '
               f'mean f0 MAE {_fmt(float(np.nanmean(cents)), ".1f")} cents | '
               f'mean voicing acc {_fmt(float(np.nanmean(voicing)), ".3f")}')
+        level_keys = list(results[0].get('spec_codebook_levels', {}))
+        if level_keys:
+            parts = []
+            for k in level_keys:
+                vals = [r['spec_codebook_levels'][k]['mel_l1_db']
+                        for r in results
+                        if k in r.get('spec_codebook_levels', {})]
+                parts.append(
+                    f'K={k} {_fmt(float(np.nanmean(vals)), ".2f")} dB')
+            print('  spec codebook truncation, mean mel L1: '
+                  + ' | '.join(parts))
     if failures:
         print(f'  failed: {len(failures)}')
         for path, err in failures:
@@ -421,6 +539,14 @@ def main(argv: list[str] | None = None) -> int:
                              'code -> audio -> code match fractions')
     parser.add_argument('--save_tensors', action='store_true',
                         help='also save codes and both f0 contours as .pt')
+    parser.add_argument('--codebook_levels', type=str, default=None,
+                        metavar='K[,K...]|all',
+                        help='also synthesise the spec codes decoded with only '
+                             'the first K codebooks (progressive RVQ) and '
+                             'write <name>_spec_k<K>.wav per level; pitch '
+                             "codes always stay complete. 'all' = 1.."
+                             'codec.codebook_num, or a comma list, e.g. '
+                             "'1,2,4'")
     args = parser.parse_args(argv)
 
     if args.max_seconds is not None and args.max_seconds <= 0:
@@ -431,12 +557,21 @@ def main(argv: list[str] | None = None) -> int:
     max_spk = int(hp.vits.max_spk_count)
     if not 0 <= args.sid < max_spk:
         parser.error(f'--sid must be in [0, {max_spk}), got {args.sid}')
+    try:
+        args.codebook_levels = parse_codebook_levels(
+            args.codebook_levels, int(hp.codec.codebook_num))
+    except ValueError as e:
+        parser.error(str(e))
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f'Config:     {args.config}')
     print(f'Checkpoint: {args.checkpoint}')
     print(f'Device:     {device} | sid: {args.sid}')
+    if args.codebook_levels:
+        print('Codebook levels: '
+              + ', '.join(f'K={k}' for k in args.codebook_levels)
+              + ' (spec codes only)')
     net_g = load_generator(args.checkpoint, hp, device)
     print(f'Generator:  {count_parameters(net_g)}')
     # Only spec + f0 are needed, so skip the (large) ASR / aligner weights.
@@ -463,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
             'config': os.path.abspath(args.config),
             'sid': args.sid,
             'roundtrip': bool(args.roundtrip),
+            'codebook_levels': args.codebook_levels,
             'files': results,
         }, f, indent=2)
     print(f'Metrics: {os.path.abspath(metrics_path)}')

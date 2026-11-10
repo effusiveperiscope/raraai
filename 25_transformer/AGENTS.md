@@ -401,7 +401,7 @@ Notes:
   `extract_features_ac`, so normalising does not resurrect quiet/noisy clips
   that the level check is meant to drop.
 - `normalize_waveform`/`normalize_audio` are idempotent, which is why
-  `test_stage1_codes.py` can normalise the input for its metrics and then still
+  `scratch/test_stage1_codes.py` can normalise the input for its metrics and then still
   feed it to `extract_features_ac`; it prints the applied gain.
 - Measured reference points: Genshin is already peak-normalised to ~0 dBFS
   (median peak −0.2 dBFS, 62 % of clips within 0.5 dB of full scale), so
@@ -1264,7 +1264,7 @@ a *batch-independent* per-step loop.
       checkpoints_stage1/<exp>` (and the `logs/` equivalent) or an explicit
       `--resume_from checkpoints/<exp>/last.ckpt`.
     - Anything that *consumes* a checkpoint by path (`2_preprocess.py
-      --checkpoint`, `test_stage1_codes.py`, `train.generator_checkpoint` in
+      --checkpoint`, `scratch/test_stage1_codes.py`, `train.generator_checkpoint` in
       `configs/transformer.yaml`) is unaffected: those take a full path, so
       update it when you move a stage-1 run. Consumers *inside* `2_training.py`
       must read the stage-1 tree, never their own.
@@ -1340,7 +1340,7 @@ a *batch-independent* per-step loop.
       once the root logger has a handler, so fairseq's call then changes neither
       the handler nor the level. Measured: root level 10 → 30, DEBUG lines 47 →
       0. It is in `1_training.py`, `2_preprocess.py`, `2_training.py`,
-      `test_stage1_codes.py` and `scratch/stage2_repl.py`; add it to any new
+      `scratch/test_stage1_codes.py` and `scratch/stage2_repl.py`; add it to any new
       script that imports `modeling.generator` and prints to stdout.
     - `test_phonemize.py` deliberately does **not** need it: `features.py` only
       imports `svc_helper.pitch.rmvpe`, which does not reach fairseq.
@@ -1470,10 +1470,13 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --skip_existing --min_speech_frac 0.05
 
 # Stage-1 codec round-trip on your own audio (spec/f0 -> codes -> audio)
-python test_stage1_codes.py test.wav \
+python scratch/test_stage1_codes.py test.wav \
     --checkpoint checkpoints_stage1/base_v0.4.6/last.ckpt --sid 0
 # ...add --roundtrip for code -> audio -> code match fractions and
 # --save_tensors to dump spec/pitch codes + both f0 contours.
+# --codebook_levels writes one wav per progressive spec-codebook level
+# (<name>_spec_k<K>.wav decodes with only the first K of 8 books; 'all' or
+# '1,2,4'; pitch codes always stay complete) plus a per-level mel L1.
 
 # Stage-2 step-time benchmark: parts + totals, no Trainer, real code tensors
 # (see §4 "Stage-2 step cost"). Add --ns_steps 5 --muon_all for the pre-v0.6
@@ -1540,7 +1543,7 @@ python test_phonemize.py --skip_audio --text "Use it." --expect YUW1S  # pin out
 
 There is no test suite in this repo; validation is done by running the ad-hoc
 `__main__` blocks in `modeling/*.py` and by training on a small filelist.
-`test_stage1_codes.py` is the exception worth knowing about: it exercises the
+`scratch/test_stage1_codes.py` is the exception worth knowing about: it exercises the
 exact encode (`2_preprocess.py`) / decode (stage-2 validation) path of a stage-1
 checkpoint on arbitrary audio and prints mel/f0/voicing metrics plus per-codebook
 usage. `test_stage2_conditioning.py` is its stage-2 counterpart: it reports the

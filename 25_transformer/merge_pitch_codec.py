@@ -21,7 +21,8 @@ same architecture, normally the same ``configs/base.yaml``); that is checked
 before anything is written.  The output is a normal Lightning checkpoint: the
 base checkpoint's metadata (``epoch``, ``global_step``, ``loops``,
 ``callbacks``) is kept so ``2_preprocess.py --checkpoint``,
-``test_stage1_codes.py`` and ``train.generator_checkpoint`` consume it as usual.
+``scratch/test_stage1_codes.py`` and ``train.generator_checkpoint`` consume it as
+usual.
 
 Optimizer state is **dropped by default**: the base run's Adam moments do not
 belong to the spliced-in pitch weights and Lightning matches them by position,
