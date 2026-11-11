@@ -419,6 +419,41 @@ def write_cond(path: str, record: dict) -> None:
     os.replace(tmp, path)
 
 
+def validate_device(device):
+    """Normalise and validate ``--device`` *before* anything heavy loads.
+
+    A mistyped id (``cuda0``, ``cuda:1`` on a one-GPU box) otherwise only
+    surfaces when the first model is moved onto it -- i.e. after a few GB of
+    weights are loaded -- and in a multi-hour run that is easy to mistake for
+    "the pass is slow". Fails in a millisecond instead, listing what is valid.
+    """
+    raw = device
+    if device is None or str(device).strip().lower() in ("", "auto"):
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    d = str(device).strip()
+    if d == "cpu":
+        return "cpu"
+    if not (d == "cuda" or d.startswith("cuda:")):
+        raise SystemExit(
+            f"--device {raw!r} is not a device (expected 'cpu' or 'cuda[:N]')")
+    if not torch.cuda.is_available():
+        raise SystemExit(
+            f"--device {raw!r}: CUDA is not available on this host "
+            "(use '--device cpu', or fix the driver)")
+    try:
+        idx = (torch.cuda.current_device() if d == "cuda"
+               else int(d.split(":", 1)[1]))
+    except ValueError:
+        raise SystemExit(
+            f"--device {raw!r}: the index must be an integer, e.g. cuda:0")
+    n = torch.cuda.device_count()
+    if not 0 <= idx < n:
+        raise SystemExit(
+            f"--device {raw!r}: this host has {n} CUDA device(s) "
+            f"(valid: cuda:0..cuda:{n - 1})")
+    return f"cuda:{idx}"
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -568,6 +603,7 @@ def main(argv=None) -> int:
                         "files, fit the level edges and write hints.json "
                         "(what a sharded run needs afterwards)")
     args = p.parse_args(argv)
+    args.device = validate_device(args.device)
 
     hints = [h.strip() for h in str(args.hints).split(",") if h.strip()]
     unknown = [h for h in hints if h not in HINT_KEYS]
@@ -683,58 +719,22 @@ def main(argv=None) -> int:
                 # row shares its storage and `torch.save` would write the whole
                 # matrix into this clip's ``.cond`` (see `write_cond`).
                 semantic[base] = embs[i].clone()
-    # --- per-word pitch/timing (forced alignment, sequential) --------------- #
-    # ``FeatureExtractor.extract`` aligns the clip against the *given*
-    # transcript (no ASR) and returns per-word start/end + voiced f0, i.e. the
-    # same code path that produced the corpus's ``phone_ids`` -- which is why
-    # ``phone_word_idx`` lines up with them.
+    # --- write, incrementally ------------------------------------------------ #
+    # Each clip's `.cond` is written as soon as its data is complete, *not* at
+    # the end of the run: the word pass is hours long, and a crash (or a typo
+    # in `--device`) used to discard everything because nothing had been written
+    # yet. With per-clip writes, an interrupted run resumes cheaply via
+    # `--skip-existing` -- it only re-does clips whose word fields are missing.
     from collections import Counter
     errs: Counter = Counter()
     words = {}
-    n_word_failed = 0
-    n_word_mismatch = 0
-    code_fps = None
-    word_jobs = [r for r in todo if args.words and r["text"] and r["wave"]]
-    if word_jobs:
-        import librosa
-        from tqdm import tqdm
-
-        fe = load_extractor(args)
-        code_fps = fe.code_frame_rate()
-        print(f"Word pass: {len(word_jobs)} clip(s), {code_fps:.1f} code "
-              f"frames/s (sequential)")
-        for r in tqdm(word_jobs, desc="words (aligner)"):
-            try:
-                wave = load_audio_48k(r["wave"])
-                data16 = librosa.resample(wave, orig_sr=WAVE_SR,
-                                          target_sr=16000, res_type="soxr_hq")
-                items, _ = fe.extract(data16, transcription=r["text"])
-                # Map the words onto the *stored* phone sequence.  A corpus built
-                # with `--phones_from transcript` phonemizes in one call, so the
-                # alignment's per-word tokenization does not concatenate to it;
-                # `word_index_for_phones` reconciles them (or returns None when
-                # the phones themselves disagree, i.e. stale phone_ids).
-                stored_ids = torch.load(r["phone_ids"], map_location="cpu",
-                                        weights_only=True, mmap=True).reshape(-1)
-                word_idx = fe.word_index_for_phones(stored_ids, items,
-                                                   text=r["text"])
-            except Exception as exc:
-                n_word_failed += 1
-                errs[f"words: {str(exc).splitlines()[0][:160]}"] += 1
-                continue
-            if word_idx is None:
-                n_word_mismatch += 1
-                continue
-            got = fe.hint_words(
-                items, total_seconds=len(wave) / float(WAVE_SR),
-                code_fps=code_fps, word_index=word_idx)
-            got["n_phone"] = int(len(word_idx))
-            words[r["base"]] = got
-
-    # --- write ---------------------------------------------------------------
     collected = {"intensity": [], "register": []}
     n_written = 0
-    for r in todo:
+    written = set()
+
+    def flush(r) -> bool:
+        """Merge one clip's freshly computed hints into its ``.cond``."""
+        nonlocal n_skipped, n_written
         values, errors = results.get(r["base"], ({}, {}))
         for k, msg in errors.items():
             errs[f"{k}: {str(msg).splitlines()[0][:160]}"] += 1
@@ -769,12 +769,75 @@ def main(argv=None) -> int:
             n_added += 1
         if not any(k in rec for k in ("intensity", "register_st", "semantic",
                                       "phone_word_idx")):
-            continue
+            return False
         if n_added == 0:
             n_skipped += 1          # nothing new; the file is already complete
-            continue
+            return False
         write_cond(r["cond"], rec)
         n_written += 1
+        written.add(r["base"])
+        return True
+
+    # --- per-word pitch/timing (forced alignment, sequential) --------------- #
+    # ``FeatureExtractor.extract`` aligns the clip against the *given*
+    # transcript (no ASR) and returns per-word start/end + voiced f0, i.e. the
+    # same code path that produced the corpus's ``phone_ids`` -- which is why
+    # ``phone_word_idx`` lines up with them.
+    n_word_failed = 0
+    n_word_mismatch = 0
+    code_fps = None
+    word_jobs = [r for r in todo if args.words and r["text"] and r["wave"]]
+    # Clips that need no alignment are finished now -- write them before the
+    # long word pass, so their hints survive any later failure.
+    for r in todo:
+        if not (args.words and r["text"] and r["wave"]):
+            flush(r)
+    if word_jobs:
+        import librosa
+        from tqdm import tqdm
+
+        fe = load_extractor(args)
+        code_fps = fe.code_frame_rate()
+        print(f"Word pass: {len(word_jobs)} clip(s), {code_fps:.1f} code "
+              f"frames/s (sequential)")
+        for r in tqdm(word_jobs, desc="words (aligner)"):
+            try:
+                wave = load_audio_48k(r["wave"])
+                data16 = librosa.resample(wave, orig_sr=WAVE_SR,
+                                          target_sr=16000, res_type="soxr_hq")
+                items, _ = fe.extract(data16, transcription=r["text"])
+                # Map the words onto the *stored* phone sequence.  A corpus built
+                # with `--phones_from transcript` phonemizes in one call, so the
+                # alignment's per-word tokenization does not concatenate to it;
+                # `word_index_for_phones` reconciles them (or returns None when
+                # the phones themselves disagree, i.e. stale phone_ids).
+                stored_ids = torch.load(r["phone_ids"], map_location="cpu",
+                                        weights_only=True, mmap=True).reshape(-1)
+                word_idx = fe.word_index_for_phones(stored_ids, items,
+                                                   text=r["text"])
+            except Exception as exc:
+                n_word_failed += 1
+                errs[f"words: {str(exc).splitlines()[0][:160]}"] += 1
+                flush(r)            # keep this clip's clip-level hints
+                continue
+            if word_idx is None:
+                n_word_mismatch += 1
+                flush(r)
+                continue
+            got = fe.hint_words(
+                items, total_seconds=len(wave) / float(WAVE_SR),
+                code_fps=code_fps, word_index=word_idx)
+            got["n_phone"] = int(len(word_idx))
+            words[r["base"]] = got
+            flush(r)                # written now, not after the whole corpus
+
+    # --- write (sweep) -------------------------------------------------------- #
+    # Normally nothing is left here: every clip is written as soon as it is
+    # complete (see `flush` above). This catches whatever an earlier stage could
+    # not finish, and is idempotent, so re-running is always safe.
+    for r in todo:
+        if r["base"] not in written:
+            flush(r)
 
     # --- provenance + bin edges ---------------------------------------------
     # Merge with any existing hints.json: a `--skip-existing` re-run computes no
@@ -819,6 +882,7 @@ def main(argv=None) -> int:
             "pitch_unit": "semitones re: the utterance's voiced-median f0",
             "slot_unit": "code frames, start-to-start",
         }
+    partial = bool(args.limit) or n_skipped > 0
     if not args.no_edges:
         for name, n_levels, values in (
                 ("intensity", args.n_intensity_levels, collected["intensity"]),
@@ -826,6 +890,17 @@ def main(argv=None) -> int:
             if name not in hints:
                 continue
             edges, stats = quantile_edges(values, n_levels)
+            existing = (doc["levels"].get(name) or {}).get("edges")
+            if edges is not None and partial and existing:
+                # Equal-frequency edges are corpus-wide quantiles: fitting them
+                # on the handful of clips a resumed run still had to do (the
+                # rest were reused via --skip-existing, and --limit caps the
+                # set outright) would renumber every level for every clip.
+                print(f"NOTE: kept the existing {name} edges from {hints_json} "
+                      f"({len(values)} new value(s) in this run, {n_skipped} "
+                      f"clip(s) reused/limited). Re-run with --fit-edges-only "
+                      f"to refit them from every .cond on disk.")
+                continue
             if edges is None:
                 if doc["levels"].get(name, {}).get("edges"):
                     print(f"NOTE: kept the existing {name} edges from "

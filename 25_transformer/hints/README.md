@@ -233,7 +233,9 @@ python hints/build.py \
     --wave-dir data/genshin_full_stage1 \
     --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
     --hints intensity,register,semantic \
-    --words --device cuda:0 --workers 8
+    --words --device cuda:0
+# ...and if it stops for any reason, just add --skip-existing to resume:
+python hints/build.py ... --words --device cuda:0 --skip-existing
 ```
 
 - It runs `FeatureExtractor.extract` per clip: the **forced aligner is given the
@@ -260,6 +262,21 @@ python hints/build.py \
   prefix counts are not even monotonic (43 -> 42 when one word merges into the
   previous token). `phonemize_items` now tokenizes once and slices, so both
   paths produce the same `phone_ids` for the same transcript.
+- **Writes are incremental, so the pass is resumable.** Each `.cond` is written
+  as soon as its clip's words are done (not at the end of the run), so an
+  interruption loses at most the clip in flight; re-running the same command
+  with `--skip-existing` only redoes clips whose `phone_word_idx` is missing.
+  Measured: killing a 200-clip run at 139 left 139 valid `.cond` files, and the
+  resume finished the remaining 61.
+- `--device` is validated before any model loads (`cpu` / `cuda[:N]`), so a
+  typo like `cuda0` or `cuda:1` on a one-GPU box exits in a millisecond with
+  the valid range instead of failing part-way through a multi-hour run.
+- A **partial** run never refits the level edges: with `--limit` or
+  `--skip-existing` (some clips reused), the existing `hints.json` edges are
+  kept and a note says so. Equal-frequency edges are corpus-wide quantiles, so
+  refitting them on the few clips a resumed run still had to do would renumber
+  every level for every clip. Use `--fit-edges-only` to refit them from every
+  `.cond` on disk.
 - `--force` (with `--skip-existing`) redoes the word fields for clips that
   already have them; a `--words`-only re-run merges into the existing `.cond`
   instead of replacing it, so the clip-level hints survive.

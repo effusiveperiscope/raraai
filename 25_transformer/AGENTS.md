@@ -1147,7 +1147,24 @@ forced-alignment word timestamps, so `python hints/build.py ... --words` calls
 items into the fields. It is sequential on one GPU (~5 clips/s once warm
 measured, i.e. ~9-20 h for the 151 k-clip corpus) and it **merges** into the
 existing `.cond` instead of replacing it, so a `--words`-only re-run keeps the
-clip-level hints.
+clip-level hints. Three properties make a multi-hour run safe to interrupt:
+
+- **Writes are incremental.** `build.py` writes each clip's `.cond` as soon as
+  its words are done (via a `flush()` that the word loop calls per clip), not at
+  the end, so a crash costs one clip. Add `--skip-existing` to resume: the
+  filter keeps only clips whose `phone_word_idx` is missing. Measured: killing a
+  200-clip run at 139 left 139 valid files, and the resume finished the rest.
+  (Before this, *nothing* was written until the end, so an hour-8 failure
+  discarded the entire pass — which happened twice.)
+- **`--device` is validated up front** (`cpu` / `cuda[:N]`, checked against
+  `torch.cuda.device_count()`), so a typo exits in a millisecond instead of
+  after the aligner's weights load.
+- **A partial run never refits the level edges.** `--limit` or a
+  `--skip-existing` resume means only a subset of clips contributed values, so
+  the existing `hints.json` edges are kept (printed as a NOTE). Equal-frequency
+  edges are corpus-wide quantiles — refitting them on the last few clips would
+  renumber every level for every clip. `--fit-edges-only` refits from every
+  `.cond` on disk after a sharded run.
 
 The invariant that makes this safe: **both paths tokenize the words as one
 sentence**. `phonemize_items` builds the sentence phone string and tokenizes it
@@ -1740,6 +1757,18 @@ python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
     --wave-dir data/genshin_full_stage1 \
     --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
     --hints intensity,register,semantic --words --device cuda:0
+# Interrupted? Re-run the SAME command with --skip-existing: each .cond is
+# written as its clip finishes, so the resume only redoes what is missing.
+# (--device is validated before the models load; a typo exits immediately.
+#  A partial run also keeps the existing hints.json edges -- see §4.)
+python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+    --wave-dir data/genshin_full_stage1 \
+    --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
+    --hints intensity,register,semantic --words --device cuda:0 --skip-existing
+# Refit the level edges from every .cond on disk once the corpus is complete
+# (a sharded / resumed run must not leave edges fitted on a subset).
+python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+    --fit-edges-only
 # Acceptance test of the ported DSP pipeline against the upstream feature cache
 # (exits non-zero if the intensity hint moves on clips without digital silence).
 python hints/verify_dsp.py \
