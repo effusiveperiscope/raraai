@@ -236,18 +236,20 @@ python hints/build.py \
   several GPUs.
 - Needs `<base>.wave` (or the source audio via `--audio-fallback`) because the
   alignment runs on audio.
-- **Stale clips are dropped, not guessed.** The word boundaries are mapped onto
-  the *stored* `phone_ids` by re-running the transcript's phonemization
-  (`FeatureExtractor.word_index_for_phones`): if the phones do not reproduce the
-  stored ids, the clip's `phone_ids` predate the current phonemizer/dictionary
-  and the pass skips it, printing the count and the remedy
-  (`2_preprocess.py --only phones`, then re-run). Measured on 200 Genshin clips:
-  197 reproduce exactly, 3 differ by 1-2 phones.
-- Why not just concatenate the aligner's per-word `phone_ids`? The g2pen
-  tokenizer merges phones across word boundaries, so a sentence tokenizes to 44
-  tokens where the same words tokenized individually give 71 -- and even
-  incremental prefix counts are not monotonic (43 -> 42 when one word merges
-  into the previous token). Hence the character-offset mapping.
+- **Stale clips are dropped, not guessed.** The word boundaries are the per-item
+  slices of that one tokenization (`phonemize_items` attaches `phone_span`), so
+  `FeatureExtractor.word_index_for_phones` only has to check that the stored
+  `phone_ids` are exactly those slices; if they are not, the clip's ids predate
+  the current phonemizer/dictionary and the pass skips it, printing the count
+  and the remedy (`2_preprocess.py --only phones`, then re-run). Measured on 200
+  Genshin clips: 197 reproduce exactly, 3 differ by 1-2 phones.
+- Why this matters: the aligner path and the transcript path used to tokenize at
+  different granularities (per word vs the whole sentence), and the g2pen
+  tokenizer merges phones across word boundaries -- a sentence tokenizes to 44
+  tokens where the same words tokenized individually give 71, and incremental
+  prefix counts are not even monotonic (43 -> 42 when one word merges into the
+  previous token). `phonemize_items` now tokenizes once and slices, so both
+  paths produce the same `phone_ids` for the same transcript.
 - `--force` (with `--skip-existing`) redoes the word fields for clips that
   already have them; a `--words`-only re-run merges into the existing `.cond`
   instead of replacing it, so the clip-level hints survive.

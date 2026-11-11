@@ -51,6 +51,69 @@ def _hint_helpers():
 
 
 
+def _token_spans(pieces, joined, lengths):
+    """Per-word ``(start, end)`` token spans over one tokenization.
+
+    `pieces` are the tokenizer's tokens for `joined` -- the words' phone strings
+    joined by spaces -- and `lengths` each word's string length.  The spans tile
+    ``range(len(pieces))``: every token belongs to exactly one word (the one its
+    first non-space character falls in), so concatenating the per-word slices
+    reproduces the whole sequence exactly.
+
+    This is the only place word boundaries are derived, and it works on the
+    *sentence* string, which is what makes the aligner and transcript paths
+    produce identical ``phone_ids``: the g2pen tokenizer merges phones across
+    word boundaries (``ĠWAH1TĠ`` is one token in context, five in isolation --
+    44 vs 71 ids for one measured clip), so per-word tokenization cannot be
+    sliced back together.
+
+    Raises:
+        RuntimeError: the tokens do not reconstruct `joined` (a normalising
+            tokenizer would make the character map meaningless, and a silently
+            misaligned boundary is worse than a skipped clip).
+    """
+    if not lengths:
+        return []
+    rebuilt = "".join(pieces).replace("\u0120", " ")
+    lead = len(rebuilt) - len(rebuilt.lstrip(" "))
+    if rebuilt[lead:].rstrip() != joined.strip():
+        raise RuntimeError(
+            "the g2pen tokenizer does not reconstruct its input "
+            f"({joined[:48]!r} -> {rebuilt[:48]!r}); word spans would be "
+            "misaligned")
+
+    tok_starts, pos = [], 0
+    for piece in pieces:
+        tok_starts.append(pos)
+        pos += len(piece)
+
+    word_starts, pos = [], lead
+    for i, n in enumerate(lengths):
+        if i:
+            pos += 1                         # the joining space
+        word_starts.append(pos)
+        pos += n
+
+    word_of = []
+    for j, piece in enumerate(pieces):
+        k = tok_starts[j]
+        stop = min(k + len(piece), len(rebuilt))
+        while k < stop - 1 and rebuilt[k] == " ":
+            k += 1
+        word_of.append(max(bisect.bisect_right(word_starts, k) - 1, 0))
+
+    spans, j = [], 0
+    for w in range(len(lengths)):
+        start = j
+        while j < len(word_of) and word_of[j] == w:
+            j += 1
+        spans.append((start, j))
+    # Anything left (a token whose character start fell past the last word's
+    # range) belongs to the final word.
+    spans[-1] = (spans[-1][0], len(pieces))
+    return spans
+
+
 def _f0_span(f0, start_time, end_time, hop=160, sr=16000):
     """Slice a frame-level f0 contour to the frames centred in a word span.
 
@@ -450,8 +513,8 @@ class FeatureExtractor:
             items.extend(dicts)
         return items
 
-    def phonemize_items(self, items):
-        """Attach ``phones`` / ``phone_ids`` to aligned items. No audio needed.
+    def phonemize_items(self, items, transcript=None):
+        """Attach ``phones`` / ``phone_span`` / ``phone_ids`` to aligned items.
 
         Pure CPU work (g2p_en + the g2pen tokenizer), so re-running it after a
         phonemizer / dictionary change costs seconds per thousand clips.
@@ -470,23 +533,62 @@ class FeatureExtractor:
         Args:
             items: Dicts as returned by `align`; ``text`` and the optional
                 ``punct`` are used.
+            transcript: the text the items were aligned against.  When given and
+                it has one word per item, **its** words are phonemized (and no
+                ``punct`` is re-appended -- the punctuation is in the transcript
+                already), so the ids are exactly what `phonemize_text` returns
+                for that transcript.  Without it the items' own ``text`` fields
+                are used, with the punctuation `align` stripped from them put
+                back per item.
+
+        **The words are tokenized once, as a sentence**, exactly like
+        `phonemize_text`; each item then gets a *slice* of that sequence. So
+        ``itertools.chain(it["phone_ids"])`` is what the transcript path
+        produces for the same words, and the two paths' tensors are compatible.
+        Tokenizing per item instead fragments the phones (the g2pen tokenizer
+        merges across word boundaries: ``ĠWAH1TĠ`` is one token in context and
+        five in isolation -- measured 44 vs 71 ids for one 20-word clip), which
+        made ``--phones_from aligner`` and ``--phones_from transcript`` build
+        different corpora from the same text.
 
         Returns:
             New list of dicts: a copy of each input item plus ``phones`` (str),
-            ``phone_ids`` (list[int]) and ``punct`` (the kept punctuation).
+            ``punct`` (the kept punctuation), ``phone_span`` (``(start, end)``
+            token indices into the clip's sequence) and ``phone_ids`` (that
+            slice).  A clip whose phones tokenize to nothing gets empty spans.
         """
         texts = [str(it.get("text", "")) for it in items]
+        use_transcript = False
+        if transcript is not None and str(transcript).strip():
+            words = str(transcript).split()
+            if len(words) == len(items):
+                texts, use_transcript = words, True
         tags = self.hphzr.tag_words(texts)
         out = []
         for item, text, tag in zip(items, texts, tags):
-            punct = self.keep_punctuation(item.get("punct", ""))
+            punct = ("" if use_transcript
+                     else self.keep_punctuation(item.get("punct", "")))
             phones = self.hphzr.phonemize(text, tag=tag) + punct
             entry = dict(item)
             entry["text"] = text
             entry["punct"] = punct
             entry["phones"] = phones
-            entry["phone_ids"] = self.tokenizer_g2p(phones)['input_ids']
             out.append(entry)
+
+        # One tokenization for the whole utterance, then slice -- see the
+        # docstring: per-word tokenization does not concatenate into this.
+        joined = " ".join(entry["phones"] for entry in out)
+        if not out or not joined.strip():
+            for entry in out:
+                entry["phone_span"] = (0, 0)
+                entry["phone_ids"] = []
+            return out
+        ids = self.tokenizer_g2p(joined)["input_ids"]
+        pieces = self.tokenizer_g2p.convert_ids_to_tokens(ids)
+        spans = _token_spans(pieces, joined, [len(e["phones"]) for e in out])
+        for entry, (start, end) in zip(out, spans):
+            entry["phone_span"] = (int(start), int(end))
+            entry["phone_ids"] = [int(i) for i in ids[start:end]]
         return out
 
     def keep_punctuation(self, punct):
@@ -565,7 +667,7 @@ class FeatureExtractor:
         sr = getattr(mel_extractor, "sampling_rate", 16000)
 
         out = []
-        for item in self.phonemize_items(items):
+        for item in self.phonemize_items(items, transcript=transcription):
             contour = _f0_span(f0, item["start_time"], item["end_time"],
                                hop=hop, sr=sr)
             voiced = contour[contour > 0]
@@ -668,88 +770,43 @@ class FeatureExtractor:
     def word_index_for_phones(self, stored_ids, items, text=None):
         """Map each stored ``phone_ids`` position to its word index.
 
-        The corpus's ``phone_ids`` are not the concatenation of
-        ``phonemize_items(...)["phone_ids"]``: a transcript-path corpus
-        (``2_preprocess.py --only phones --phones_from transcript``) tokenizes
-        the whole sentence in *one* call, and per-word tokenization does not
-        decompose into it (the g2pen tokenizer merges phones across word
-        boundaries -- measured: ``ĠWAH1TĠ`` as one token for the sentence but
-        ``['Ġ','W','AH1','T','Ġ']`` per word, i.e. 44 vs 71 tokens).
-
-        So the boundaries are computed from the **transcript's words** (the same
-        loop `phonemize_sentence` runs, hence the same string the corpus was
-        built from), tokenized incrementally: the length after word ``i`` is that
-        word's end position in the stored sequence.  Tokenization is
-        left-to-right greedy, so those lengths are prefix-consistent, and the
-        last one must equal ``len(stored_ids)`` -- otherwise the stored phones
-        are stale relative to the current phonemizer and no mapping is returned.
+        `phonemize_items` tokenizes the words as a *sentence* and gives each item
+        a slice of that sequence, so this is simply "check the stored ids are
+        exactly those slices, then expand them" -- no tokenizer round trip and no
+        character arithmetic.  It returns ``None`` when they disagree, i.e. when
+        the stored ``phone_ids`` predate the current phonemizer/dictionary, so
+        the stored phones are not the ones this alignment was computed against.
 
         Args:
             stored_ids: 1-D sequence of the corpus's phone ids.
             items: per-word dicts from `align` + `phonemize_items` (or
-                `extract`); only their number and order are used when `text` is
-                given.
-            text: the transcript the clip was aligned against.  Required to
-                match a ``phonemize_text``-built corpus; when omitted the items'
-                own ``phones`` strings are joined instead, which is only correct
-                if the corpus was phonemized per word.
+                `extract`), i.e. each with ``phone_ids``.
+            text: optional transcript; when given, the alignment must also have
+                one item per word of it, because a dropped word would otherwise
+                be redistributed silently over its neighbours.
 
         Returns:
             ``list[int]`` of length ``len(stored_ids)`` with the word index of
-            every position, or ``None`` when the phone strings do not reproduce
-            the stored ids (stale ``phone_ids``, or the aligner split the
-            transcript differently from ``text.split()``).
+            every position, or ``None`` when the stored ids do not match.
         """
-        stored_n = int(np.asarray(stored_ids).reshape(-1).size)
+        stored = [int(i) for i in np.asarray(stored_ids).reshape(-1).tolist()]
         if text is not None and str(text).strip():
-            words = str(text).split()
-            if len(words) != len(items):
+            # A dropped/merged word would otherwise be silently redistributed
+            # over its neighbours.
+            if len(str(text).split()) != len(items):
                 return None
-            tags = self.hphzr.tag_words(words)
-            strings = [self.hphzr.phonemize(w, tag=t) for w, t in zip(words, tags)]
-        else:
-            strings = [str(it.get("phones", "") or "") for it in items]
 
-        joined = " ".join(s for s in strings)
-        ids = self.tokenizer_g2p(joined)["input_ids"]
-        if len(ids) != stored_n:
-            return None
-        pieces = self.tokenizer_g2p.convert_ids_to_tokens(ids)
-        # The g2pen tokenizer is a lossless BPE over the phone string with ``Ġ``
-        # for a space, so the pieces concatenate back to it -- modulo a leading
-        # space (the first token carries ``Ġ`` even when the string starts with
-        # no space).  If the bodies disagree (normalisation, an ``[UNK]``), the
-        # character map would be wrong and the caller has to fall back.
-        rebuilt = "".join(pieces).replace("\u0120", " ")
-        lead = len(rebuilt) - len(rebuilt.lstrip(" "))
-        if rebuilt[lead:].rstrip() != joined.strip():
+        flat, lengths = [], []
+        for item in items:
+            ids = [int(i) for i in item.get("phone_ids", [])]
+            flat.extend(ids)
+            lengths.append(len(ids))
+        if flat != stored:
             return None
 
-        # Character start of every word (relative to ``rebuilt``), and of every
-        # token in it.
-        word_starts, pos = [], lead
-        for i, word in enumerate(strings):
-            if i:
-                pos += 1                     # the joining space
-            word_starts.append(pos)
-            pos += len(word)
-        tok_starts, pos = [], 0
-        for piece in pieces:
-            tok_starts.append(pos)
-            pos += len(piece)
-
-        # A token belongs to the word its first non-space character falls in.
-        # That is what makes this independent of where the tokenizer chose to
-        # merge across a word boundary (measured: joining "down" to the prefix
-        # takes the token count from 43 to 42, so incremental counts - and even
-        # concatenating per-word ids - give the wrong answer).
-        out = []
-        for j, piece in enumerate(pieces):
-            k = tok_starts[j]
-            stop = min(k + len(piece), len(rebuilt))
-            while k < stop - 1 and rebuilt[k] == " ":
-                k += 1
-            out.append(max(bisect.bisect_right(word_starts, k) - 1, 0))
+        out: list = []
+        for word, n in enumerate(lengths):
+            out.extend([word] * n)
         return out
 
     def hint_words(self, items, total_seconds=None, code_fps=None,

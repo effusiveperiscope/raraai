@@ -1149,18 +1149,22 @@ measured, i.e. ~9-20 h for the 151 k-clip corpus) and it **merges** into the
 existing `.cond` instead of replacing it, so a `--words`-only re-run keeps the
 clip-level hints.
 
-The subtlety that makes this safe: the corpus's `phone_ids` may have been built
-by the *transcript* path (`--only phones --phones_from transcript`), which
-phonemizes the whole sentence in one tokenizer call, while the alignment path
-tokenizes per word -- and the g2pen tokenizer merges across word boundaries, so
-44 sentence tokens become 71 per-word tokens and incremental prefix counts are
-not even monotonic (43 → 42 when one word merges into the previous token).
-`FeatureExtractor.word_index_for_phones` therefore maps words onto the stored
-sequence with **character offsets** in the rebuilt phone string, and returns
-`None` (clip skipped, counted, remedy printed) when the phones do not reproduce
-the stored ids -- i.e. when those `phone_ids` predate the current
-phonemizer/dictionary. Measured on 200 Genshin clips: 197 reproduce exactly, 3
-differ by 1-2 phones.
+The invariant that makes this safe: **both paths tokenize the words as one
+sentence**. `phonemize_items` builds the sentence phone string and tokenizes it
+once, then gives each item a *slice* (`phone_span`), so
+`itertools.chain(it["phone_ids"])` is exactly what `phonemize_text` returns for
+the same transcript -- `--phones_from aligner` and `--phones_from transcript`
+produce compatible tensors, which they did not before (per-word tokenization
+fragments the phones: the g2pen tokenizer merges across word boundaries, so
+`ĠWAH1TĠ` is one token in context and five in isolation -- 44 vs 71 ids for one
+20-word clip, and incremental prefix counts are not even monotonic, 43 → 42 when
+one word merges into the previous token). `word_index_for_phones` is then just
+"the stored ids are those slices → expand them", returning `None` (clip skipped,
+counted, remedy printed) when they disagree -- i.e. when those `phone_ids`
+predate the current phonemizer/dictionary. Measured on 200 Genshin clips: 197
+reproduce exactly, 3 differ by 1-2 phones. In ASR mode (no caller transcript)
+the aligner's own token list is used, so a word it cannot place is genuinely
+missing -- that is a data difference, not a tokenization one.
 
 **Two ways in, one implementation.** `hints/build.py` is the offline/bulk path
 (parallel, no source audio needed); `features.py` exposes the same helpers as

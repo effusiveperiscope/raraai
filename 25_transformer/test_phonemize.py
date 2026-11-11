@@ -223,7 +223,7 @@ def run_audio_path(fe: FeatureExtractor, audio_path: str,
     tags = fe.hphzr.tag_words(words)
     # phonemize_items() tags the items together and attaches phones/phone_ids;
     # the tags above are recomputed only for the printed table.
-    tagged = fe.phonemize_items(items)
+    tagged = fe.phonemize_items(items, transcript=transcript)
     per_word_phones = [it['phones'] for it in tagged]
     per_word_ids = [list(it['phone_ids']) for it in tagged]
 
@@ -265,23 +265,35 @@ def run_audio_path(fe: FeatureExtractor, audio_path: str,
 
 def compare_paths(text_phones: str, text_ids: list[int],
                   audio_phones: str, audio_ids: list[int],
-                  transcript: str) -> None:
-    """Report (never fail on) differences between the two paths."""
-    print_header('CROSS-CHECK (informational): text path vs audio path')
-    print(f'  transcript:   {transcript!r}')
+                  transcript: str, checks: 'Checks',
+                  strict: bool = True) -> None:
+    """Compare the two paths' ids.
+
+    With a caller-supplied transcript both paths phonemize the same words and
+    tokenize them as one sentence, so the ids must be **identical** (`strict`).
+    In ASR mode the reference text is the ASR output, while the aligner reports
+    its own token list -- which can drop a token it cannot place -- so a
+    difference there is real data, and only reported.
+    """
+    print_header('CROSS-CHECK: transcript path vs aligner path'
+                 + ('' if strict else ' (informational)'))
+    print(f'  text used:    {transcript!r}')
     print(f'  text phones:  {text_phones!r}')
     print(f'  audio phones: {audio_phones!r}')
-    print(f'  ids identical: {text_ids == audio_ids}')
-    # The audio path tokenizes *per word* (every word starts with a
-    # space-marked token), while the text path tokenizes the whole sentence
-    # once. Raw ids therefore differ by construction even when the phonemes
-    # agree -- compare `phones` instead.
-    first_diff = next((i for i, (a, b) in enumerate(zip(text_ids, audio_ids))
-                       if a != b), None)
-    if first_diff is None and len(text_ids) != len(audio_ids):
-        first_diff = min(len(text_ids), len(audio_ids))
-    print(f'  first raw id difference at index: {first_diff}'
-          '  (raw ids are per-word vs whole-sentence tokenizations)')
+    same = text_ids == audio_ids
+    if strict:
+        checks.check(same, 'ids identical across the two paths',
+                     '' if same else f'{len(text_ids)} vs {len(audio_ids)} ids')
+    else:
+        print(f'  ids identical: {same}  ({len(text_ids)} vs '
+              f'{len(audio_ids)} ids; the ASR text and the aligner token list '
+              f'may differ)')
+    if not same:
+        first_diff = next((i for i, (a, b) in enumerate(zip(text_ids, audio_ids))
+                           if a != b), None)
+        if first_diff is None:
+            first_diff = min(len(text_ids), len(audio_ids))
+        print(f'  first id difference at index: {first_diff}')
 
     norm_text = normalise_phones(text_phones).split()
     norm_audio = normalise_phones(audio_phones).split()
@@ -387,7 +399,8 @@ def main(argv: list[str] | None = None) -> int:
             compare_text = args.transcript or transcript_used
             compare_paths(fe.hphzr.phonemize_sentence(compare_text),
                           fe.phonemize_text(compare_text),
-                          audio_phones, audio_ids, compare_text)
+                          audio_phones, audio_ids, compare_text, checks,
+                          strict=bool(args.transcript))
 
     return checks.summary()
 

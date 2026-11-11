@@ -374,48 +374,66 @@ def test_model(batch, hints_json):
 
 
 def test_word_index(fe):
-    """``word_index_for_phones``: maps a transcript-path corpus's phones."""
-    print("word_index_for_phones")
+    """``phonemize_items`` slices one tokenization; ``word_index`` maps back."""
+    print("phonemize_items + word_index_for_phones")
     rows = []
     with open(STAGE2_FILELIST, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split("|")
             if len(parts) == 4 and parts[0].endswith(".phone_ids"):
                 rows.append(parts)
+            if len(rows) >= 20:
                 break
-    if not rows:
-        print("  [SKIP] no stage-2 clip")
-        return
-    import os
-
-    base = os.path.basename(rows[0][0])[: -len(".phone_ids")]
     transcripts = {}
     for line in open("filelists_2/genshin_full_eng_text_linux.txt",
                      encoding="utf-8"):
         p = line.rstrip("\n").split("|")
         if len(p) >= 3:
             transcripts[os.path.basename(p[0])] = p[2]
-    if base not in transcripts:
-        print("  [SKIP] no transcript for the first clip")
+
+    # Use the first clip whose stored ids are still current (a few percent of an
+    # older corpus predate the dictionary/heteronym fixes).
+    picked = None
+    for parts in rows:
+        base = os.path.basename(parts[0])[: -len(".phone_ids")]
+        if base not in transcripts:
+            continue
+        text = transcripts[base]
+        words = text.split()
+        items = fe.phonemize_items(
+            [{"text": w, "start_time": 0.2 * i, "end_time": 0.2 * (i + 1)}
+             for i, w in enumerate(words)], transcript=text)
+        flat = [i for it in items for i in it["phone_ids"]]
+        stored = torch.load(parts[0], weights_only=True).reshape(-1)
+        if flat == stored.tolist() and flat == fe.phonemize_text(text):
+            picked = (base, text, words, items, flat, stored)
+            break
+    if picked is None:
+        print("  [SKIP] no clip whose stored phone_ids match the phonemizer")
         return
-    text = transcripts[base]
-    stored = torch.load(rows[0][0], weights_only=True).reshape(-1)
-    words = text.split()
-    items = [{"text": w, "start_time": 0.2 * i, "end_time": 0.2 * (i + 1)}
-             for i, w in enumerate(words)]
+    base, text, words, items, flat, stored = picked
+    print(f"  clip: {base} -- {len(words)} words, {len(flat)} phones")
+
+    check("the two paths produce identical ids",
+          flat == fe.phonemize_text(text), f"{len(flat)} ids")
+    spans = [it["phone_span"] for it in items]
+    check("spans tile the sequence",
+          spans[0][0] == 0 and spans[-1][1] == len(flat)
+          and all(a[1] == b[0] for a, b in zip(spans, spans[1:])),
+          f"{spans[:3]} ... {spans[-1]}")
+    check("per-word ids are the spans' slices",
+          all(it["phone_ids"] == flat[a:b] for it, (a, b) in zip(items, spans)))
 
     idx = fe.word_index_for_phones(stored, items, text=text)
-    check("maps every stored phone",
-          idx is not None and len(idx) == int(stored.numel()),
-          f"{None if idx is None else len(idx)} vs {int(stored.numel())}")
-    if idx is None:
-        return
+    check("word index covers every stored phone",
+          idx is not None and len(idx) == int(stored.numel()))
     check("word index is non-decreasing",
-          all(b >= a for a, b in zip(idx, idx[1:])))
-    check("uses every word", set(idx) == set(range(len(words))))
+          idx is not None and all(b >= a for a, b in zip(idx, idx[1:])))
+    check("word index uses every word",
+          idx is not None and set(idx) == set(range(len(words))))
     check("stale phone_ids rejected",
           fe.word_index_for_phones(stored[:-1], items, text=text) is None)
-    check("a word-count mismatch is rejected",
+    check("word-count mismatch rejected",
           fe.word_index_for_phones(stored, items[:-1], text=text) is None)
 
 

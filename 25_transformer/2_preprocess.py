@@ -317,7 +317,11 @@ def process_filelist(filelist_path,
             alignment, exactly as a full run does. ``transcript`` phonemizes
             the filelist transcript directly (`FeatureExtractor.
             phonemize_text`), which needs no audio/ASR at all, but it cannot
-            tell that a clip has no speakable text and loses word boundaries.
+            tell that a clip has no speakable text.  Both paths tokenize the
+            words as one sentence and therefore produce the same `phone_ids`
+            for the same text -- the aligner path only differs in that it knows
+            the word timings and that it drops a clip whose alignment covers no
+            words at all.
             Punctuation is carried into `phone_ids` either way: the aligner
             strips it from its tokens, so `FeatureExtractor.align` restores it
             from the transcript / ASR text (see `features.attach_punctuation`).
@@ -527,7 +531,8 @@ def process_filelist(filelist_path,
                 else:
                     wav_16k, _ = librosa.load(line, sr=16000)
                     items = fe.phonemize_items(
-                        fe.align(wav_16k, transcription=transcr))
+                        fe.align(wav_16k, transcription=transcr),
+                        transcript=transcr)
                     phone_ids = list(itertools.chain.from_iterable(
                         [it['phone_ids'] for it in items]))
                 if not phone_ids:
