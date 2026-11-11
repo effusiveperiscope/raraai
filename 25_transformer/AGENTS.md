@@ -1149,11 +1149,15 @@ measured, i.e. ~9-20 h for the 151 k-clip corpus) and it **merges** into the
 existing `.cond` instead of replacing it, so a `--words`-only re-run keeps the
 clip-level hints. Three properties make a multi-hour run safe to interrupt:
 
-- **Writes are incremental.** `build.py` writes each clip's `.cond` as soon as
-  its words are done (via a `flush()` that the word loop calls per clip), not at
-  the end, so a crash costs one clip. Add `--skip-existing` to resume: the
-  filter keeps only clips whose `phone_word_idx` is missing. Measured: killing a
-  200-clip run at 139 left 139 valid files, and the resume finished the rest.
+- **Writes are incremental, at every stage.** `build.py` flushes the audio stage
+  in waves of `FLUSH_EVERY` (2000) clips, flushes every clip-level record after
+  the embedding stage, and writes each clip's `.cond` immediately after its words
+  are computed — so an interruption costs minutes, never the run. `--skip-existing`
+  resumes from disk and only redoes clips whose `phone_word_idx` is missing.
+  Measured: killing a 200-clip run at 139 left 139 valid files and the resume
+  finished the rest; with a 100-clip wave, files appear while the audio stage is
+  still at 195/400. `coverage.clips_written` counts files and `coverage.writes`
+  counts writes (a clip is written twice when it is flushed per stage).
   (Before this, *nothing* was written until the end, so an hour-8 failure
   discarded the entire pass — which happened twice.)
 - **`--device` is validated up front** (`cpu` / `cuda[:N]`, checked against
@@ -1205,6 +1209,9 @@ an `.f0` (it comes free for the other corpora at the alignment pass, which
 computes f0 anyway).
 
 ### Conditioning hints in the model (stage 2, v0.8)
+
+> Plan, status and measurements: **`HINTS_PLAN.md`**. This section is the spec;
+> that file is the milestone/status view.
 
 `transformer.hints: true` turns those tensors into **five additive side channels**
 (one embedding each, all owned by `CodeTransformer` so the checkpoint has one

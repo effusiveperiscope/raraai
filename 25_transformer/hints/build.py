@@ -391,6 +391,11 @@ def cond_has(path: str, keys: Sequence[str]) -> bool:
 #: tensor is still a view of a large storage -- see `write_cond`.
 MAX_COND_BYTES = 4 << 20
 
+#: Clips to accumulate before writing during the audio stage. Small enough that
+#: an interruption costs minutes, large enough that the per-file `torch.save`
+#: does not dominate (151k clips / 2000 = 76 flush waves).
+FLUSH_EVERY = 2000
+
 
 def write_cond(path: str, record: dict) -> None:
     """Atomic ``torch.save`` (a killed run never leaves a truncated ``.cond``).
@@ -685,62 +690,32 @@ def main(argv=None) -> int:
                 continue
         todo.append(rec)
 
-    # --- audio-derived hints (parallelisable) --------------------------------
-    results = {}
-    audio_jobs = [r for r in todo if r["wave"] or r["f0"]]
-    if audio_jobs:
-        from tqdm import tqdm
-        init_worker(args.model)  # the parent needs it for the sequential path
-        jobs = [(r["base"], r["wave"], r["f0"]) for r in audio_jobs]
-        if args.workers > 1:
-            from concurrent.futures import ProcessPoolExecutor
-            with ProcessPoolExecutor(max_workers=args.workers,
-                                     initializer=init_worker,
-                                     initargs=(args.model,)) as ex:
-                for base, values, errors in tqdm(
-                        ex.map(audio_hints, jobs, chunksize=8),
-                        total=len(jobs), desc="audio hints"):
-                    results[base] = (values, errors)
-        else:
-            for job in tqdm(jobs, desc="audio hints"):
-                base, values, errors = audio_hints(job)
-                results[base] = (values, errors)
-
-    # --- sentence embeddings (batched, one model load) -----------------------
-    semantic = {}
-    if "semantic" in hints:
-        pairs = [(r["base"], r["text"]) for r in todo if r["text"]]
-        if pairs:
-            embs = encode_semantics([t for _, t in pairs],
-                                    args.semantic_model, args.device,
-                                    args.semantic_batch)
-            for i, (base, _) in enumerate(pairs):
-                # ``clone``: ``embs`` is the corpus-wide (n, 384) matrix, so a
-                # row shares its storage and `torch.save` would write the whole
-                # matrix into this clip's ``.cond`` (see `write_cond`).
-                semantic[base] = embs[i].clone()
-    # --- write, incrementally ------------------------------------------------ #
-    # Each clip's `.cond` is written as soon as its data is complete, *not* at
-    # the end of the run: the word pass is hours long, and a crash (or a typo
-    # in `--device`) used to discard everything because nothing had been written
-    # yet. With per-clip writes, an interrupted run resumes cheaply via
-    # `--skip-existing` -- it only re-does clips whose word fields are missing.
+    # --- write machinery ----------------------------------------------------- #
+    # Declared *before* the compute stages so each stage can flush what it has
+    # already produced: a crash (or a typo in `--device`) used to discard hours
+    # of work because nothing was written until the very end. Every stage now
+    # writes as it goes, and `--skip-existing` resumes from whatever is on disk.
     from collections import Counter
-    errs: Counter = Counter()
+    results = {}
+    semantic = {}
     words = {}
+    errs: Counter = Counter()
     collected = {"intensity": [], "register": []}
     n_written = 0
     written = set()
+    by_base = {r["base"]: r for r in todo}
+    pending = []                    # bases whose audio hints have landed
 
     def flush(r) -> bool:
-        """Merge one clip's freshly computed hints into its ``.cond``."""
+        """Merge one clip's currently-available hints into its ``.cond``."""
         nonlocal n_skipped, n_written
         values, errors = results.get(r["base"], ({}, {}))
         for k, msg in errors.items():
             errs[f"{k}: {str(msg).splitlines()[0][:160]}"] += 1
         # Merge with the existing .cond: a `--words`-only re-run computes no
         # clip-level hints at all, and must not drop the ones already there
-        # (same reasoning as the hints.json merge below).
+        # (same reasoning as the hints.json merge below). This is also what lets
+        # a stage write early and a later stage top the file up.
         rec = {}
         if os.path.exists(r["cond"]):
             try:
@@ -759,7 +734,6 @@ def main(argv=None) -> int:
             if v is not None and np.isfinite(v):
                 rec[COND_KEYS[key]] = torch.tensor([float(v)],
                                                    dtype=torch.float32)
-                collected[key].append(float(v))
                 n_added += 1
         if r["base"] in semantic:
             rec["semantic"] = semantic[r["base"]]
@@ -777,6 +751,65 @@ def main(argv=None) -> int:
         n_written += 1
         written.add(r["base"])
         return True
+
+    def flush_pending() -> None:
+        """Flush the clips whose audio hints have landed since the last call."""
+        while pending:
+            r = by_base.get(pending.pop())
+            if r is not None and r["base"] not in written:
+                flush(r)
+
+    # --- audio-derived hints (parallelisable) --------------------------------
+    audio_jobs = [r for r in todo if r["wave"] or r["f0"]]
+    if audio_jobs:
+        from tqdm import tqdm
+        init_worker(args.model)  # the parent needs it for the sequential path
+        jobs = [(r["base"], r["wave"], r["f0"]) for r in audio_jobs]
+        if args.workers > 1:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=args.workers,
+                                     initializer=init_worker,
+                                     initargs=(args.model,)) as ex:
+                for base, values, errors in tqdm(
+                        ex.map(audio_hints, jobs, chunksize=8),
+                        total=len(jobs), desc="audio hints"):
+                    results[base] = (values, errors)
+                    pending.append(base)
+                    if len(pending) >= FLUSH_EVERY:
+                        flush_pending()
+        else:
+            for job in tqdm(jobs, desc="audio hints"):
+                base, values, errors = audio_hints(job)
+                results[base] = (values, errors)
+                pending.append(base)
+                if len(pending) >= FLUSH_EVERY:
+                    flush_pending()
+        flush_pending()
+
+    # --- sentence embeddings (batched, one model load) -----------------------
+    if "semantic" in hints:
+        pairs = [(r["base"], r["text"]) for r in todo if r["text"]]
+        if pairs:
+            embs = encode_semantics([t for _, t in pairs],
+                                    args.semantic_model, args.device,
+                                    args.semantic_batch)
+            for i, (base, _) in enumerate(pairs):
+                # ``clone``: ``embs`` is the corpus-wide (n, 384) matrix, so a
+                # row shares its storage and `torch.save` would write the whole
+                # matrix into this clip's ``.cond`` (see `write_cond`).
+                semantic[base] = embs[i].clone()
+
+    # Every clip's clip-level hints are now known: persist them before the
+    # (hours-long) word pass, and collect the values the edges are fitted from.
+    # The word pass then tops each file up with its word fields.
+    for r in todo:
+        values, _ = results.get(r["base"], ({}, {}))
+        for key in ("intensity", "register"):
+            v = values.get(key)
+            if v is not None and np.isfinite(v):
+                collected[key].append(float(v))
+        if r["base"] not in written:
+            flush(r)
 
     # --- per-word pitch/timing (forced alignment, sequential) --------------- #
     # ``FeatureExtractor.extract`` aligns the clip against the *given*
@@ -917,7 +950,10 @@ def main(argv=None) -> int:
                                    "stats": stats}
     doc["coverage"] = {
         "clips_read": len(items),
-        "clips_written": int(n_written),
+        # Files, not writes: with the per-stage flushes a clip can be written
+        # twice (clip-level hints first, word fields later).
+        "clips_written": int(len(written)),
+        "writes": int(n_written),
         "skipped_existing": int(n_skipped),
         "no_data": int(n_nodata),
         "with_intensity": len(collected["intensity"]),
@@ -934,8 +970,10 @@ def main(argv=None) -> int:
     with open(hints_json, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2)
 
-    print(f"wrote {n_written} .cond file(s) "
-          f"({n_skipped} reused, {n_nodata} without any hint data)")
+    print(f"wrote {len(written)} .cond file(s) "
+          f"({n_skipped} reused, {n_nodata} without any hint data"
+          + (f", {n_written} writes since some clips were flushed per stage"
+             if n_written > len(written) else "") + ")")
     print(f"  intensity: {len(collected['intensity'])}  "
           f"register: {len(collected['register'])}  "
           f"semantic: {len(semantic)}"

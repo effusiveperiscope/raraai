@@ -7,6 +7,9 @@ of coarse, *optional* prosody hints without the *training* path depending on
 parselmouth (Praat) or on loading the DSP / embedding models: `2_training.py`
 and `dataset_codes.py` only read the tensors it produces.
 
+Plan / status / measurements for the model side live in **`../HINTS_PLAN.md`**;
+this file documents the extraction package.
+
 Two ways in:
 
 * `hints/build.py` — offline, bulk, parallel, no source audio needed (see below);
@@ -262,12 +265,15 @@ python hints/build.py ... --words --device cuda:0 --skip-existing
   prefix counts are not even monotonic (43 -> 42 when one word merges into the
   previous token). `phonemize_items` now tokenizes once and slices, so both
   paths produce the same `phone_ids` for the same transcript.
-- **Writes are incremental, so the pass is resumable.** Each `.cond` is written
-  as soon as its clip's words are done (not at the end of the run), so an
-  interruption loses at most the clip in flight; re-running the same command
-  with `--skip-existing` only redoes clips whose `phone_word_idx` is missing.
-  Measured: killing a 200-clip run at 139 left 139 valid `.cond` files, and the
-  resume finished the remaining 61.
+- **Writes are incremental, at every stage.** The audio stage flushes in waves
+  of `FLUSH_EVERY` (2000) clips, the embedding stage flushes the clip-level
+  records before the word pass, and the word loop flushes each clip as soon as
+  its words are done — so an interruption costs minutes, not the run.
+  Re-running the same command with `--skip-existing` only redoes clips whose
+  `phone_word_idx` is missing. Measured: killing a 200-clip run at 139 left 139
+  valid `.cond` files and the resume finished the rest; with a 100-clip wave the
+  files appear while the audio stage is still running. `coverage.clips_written`
+  counts files, `coverage.writes` counts writes (a clip can be written twice).
 - `--device` is validated before any model loads (`cpu` / `cuda[:N]`), so a
   typo like `cuda0` or `cuda:1` on a one-GPU box exits in a millisecond with
   the valid range instead of failing part-way through a multi-hour run.
