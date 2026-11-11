@@ -128,6 +128,25 @@ def read_transcripts(paths: Optional[Sequence[str]]) -> Dict[str, str]:
     return out
 
 
+def read_source_audio(paths: Optional[Sequence[str]]) -> Dict[str, str]:
+    """Map ``basename(audio_path) -> audio_path`` from the source filelists.
+
+    Used as an optional fallback for clips whose stage-1 ``.wave`` is not on
+    this box (e.g. corpora that were only ever code-encoded here).  The
+    intensity hint is defined on the waveform, so the source file is an
+    equivalent input -- ``load_audio_48k`` resamples it.
+    """
+    out: Dict[str, str] = {}
+    for path in paths or ():
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("|")
+                if not parts or not parts[0].strip():
+                    continue
+                out[os.path.basename(parts[0])] = parts[0]
+    return out
+
+
 def clip_base(phone_path: str) -> str:
     """``.../X.wav.phone_ids`` -> ``X.wav`` (the shared tensor stem)."""
     name = os.path.basename(phone_path)
@@ -168,43 +187,73 @@ _MODEL = None  # DSPIntensityModel, one per worker process
 
 def init_worker(model_path: str) -> None:
     """Worker initialiser: make the ported modules importable, load the model."""
-    global _MODEL
     for p in (_HERE, _ROOT):
         if p not in sys.path:
             sys.path.insert(0, p)
-    from hints.model_io import load_dsp_model
-    _MODEL = load_dsp_model(model_path)
+    get_dsp_model(model_path)
 
 
 def _load_tensor(path: str):
     return torch.load(path, map_location="cpu", weights_only=True)
 
 
-def intensity_from_wave(wave_path: str) -> float:
-    """Calibrated, whisper-gated DSP intensity score (1-9) for one clip.
+def load_audio_48k(path: str) -> np.ndarray:
+    """Load a waveform: a stage-1 ``<base>.wave`` tensor or any source audio.
 
-    The stage-1 ``.wave`` is 48 kHz and ``dsp_features`` assumes 16 kHz, so the
-    resample is mandatory.  Measured on a real stage-1 clip: the predicted score
-    moves by <0.05 across ``soxr_hq`` / ``kaiser_best`` / ``polyphase`` relative
-    to the score computed from the upstream 16 kHz features, against a model MAE
-    of 0.59 -- i.e. the resampler choice is immaterial to the hint.
+    Source audio is resampled to 48 kHz by librosa. The DSP features peak-
+    normalise and then analyse at 16 kHz, so the fallback path yields the same
+    hint as the tensor path (verified in ``hints/verify_dsp.py``).
+    """
+    if path.endswith(WAVE_SUFFIX):
+        return np.asarray(_load_tensor(path), dtype=np.float32).reshape(-1)
+    import librosa
+    wave, _ = librosa.load(path, sr=WAVE_SR, mono=True)
+    return np.asarray(wave, dtype=np.float32).reshape(-1)
+
+
+def get_dsp_model(model_path: Optional[str] = None):
+    """The process-wide DSP model, loaded on first use.
+
+    Cached in ``_MODEL`` so the worker pool (initialised once) and an inference
+    caller asking for several hints per clip load it only once.
+    """
+    global _MODEL
+    if _MODEL is None:
+        from hints.model_io import load_dsp_model
+        _MODEL = load_dsp_model(model_path or DEFAULT_MODEL)
+    return _MODEL
+
+
+def intensity_from_wave_array(wave, sr: int = WAVE_SR) -> float:
+    """Calibrated, whisper-gated DSP intensity score (1-9) for a waveform.
+
+    ``dsp_features`` assumes a 16 kHz analysis grid, so the resample is
+    mandatory.  Measured on a real stage-1 clip: the predicted score moves by
+    <0.05 across ``soxr_hq`` / ``kaiser_best`` / ``polyphase`` relative to the
+    score computed from the upstream 16 kHz features, against a model MAE of
+    0.59 -- i.e. the resampler choice is immaterial to the hint.
     """
     import librosa
     import pandas as pd
     from dsp_features import extract
 
-    wave = np.asarray(_load_tensor(wave_path), dtype=np.float32).reshape(-1)
-    if wave.size == 0:
+    model = get_dsp_model()
+    w = np.asarray(wave, dtype=np.float32).reshape(-1)
+    if w.size == 0:
         raise ValueError("empty waveform")
-    if _MODEL is None:
-        raise RuntimeError("DSP model not initialised (call init_worker first)")
-    w16 = librosa.resample(wave, orig_sr=WAVE_SR, target_sr=INTENSITY_SR,
-                           res_type="soxr_hq")
-    feats = extract(w16, tier=_MODEL.tier, all_features=True)
-    return float(_MODEL.predict(pd.DataFrame([feats]))[0])
+    if sr != INTENSITY_SR:
+        w = librosa.resample(w, orig_sr=sr, target_sr=INTENSITY_SR,
+                             res_type="soxr_hq")
+    feats = extract(w, tier=model.tier, all_features=True)
+    return float(model.predict(pd.DataFrame([feats]))[0])
 
 
-def register_from_f0(f0_path: str) -> float:
+def intensity_from_wave(wave_path: str) -> float:
+    """Intensity for a file: ``<base>.wave`` (48 kHz) or source audio."""
+    return intensity_from_wave_array(load_audio_48k(wave_path))
+
+
+def register_from_f0_array(f0) -> float:
     """Utterance register: voiced-median f0 in semitones re: :data:`F0_REF_HZ`.
 
     Median rather than mean, matching ``pitch_correlation.py`` upstream: the
@@ -214,11 +263,16 @@ def register_from_f0(f0_path: str) -> float:
     9.91 st, no clip with mean/median > 1.3), so this is a robustness choice,
     not a change of meaning.
     """
-    f0 = np.asarray(_load_tensor(f0_path), dtype=np.float64).reshape(-1)
-    voiced = f0[f0 > 0]
+    f = np.asarray(f0, dtype=np.float64).reshape(-1)
+    voiced = f[f > 0]
     if voiced.size == 0:
         return float("nan")
     return float(12.0 * math.log2(float(np.median(voiced)) / F0_REF_HZ))
+
+
+def register_from_f0(f0_path: str) -> float:
+    """Register for a file: a stage-1 ``<base>.f0`` (100 Hz, 0 = unvoiced)."""
+    return register_from_f0_array(_load_tensor(f0_path))
 
 
 def audio_hints(job):
@@ -343,7 +397,16 @@ def main(argv=None) -> int:
                    help="directories holding <base>.wave / <base>.f0 (stage-1 "
                         "tensor dirs). Required for intensity/register.")
     p.add_argument("--source-filelist", nargs="*", default=[],
-                   help="path|sid|transcript filelists. Required for semantic.")
+                   help="path|sid|transcript filelists. Required for semantic; "
+                        "also the source of the audio fallback below.")
+    p.add_argument("--audio-fallback", dest="audio_fallback",
+                   action="store_true", default=True,
+                   help="when <base>.wave/.f0 is not in --wave-dir, read the "
+                        "clip's own audio from --source-filelist instead of "
+                        "skipping the intensity hint (default: on)")
+    p.add_argument("--no-audio-fallback", dest="audio_fallback",
+                   action="store_false",
+                   help="never read source audio; only use --wave-dir tensors")
     p.add_argument("--out-dir", default=None,
                    help="write every .cond here instead of next to phone_ids")
     p.add_argument("--hints", default=",".join(HINT_KEYS),
@@ -385,17 +448,28 @@ def main(argv=None) -> int:
         items = items[: args.limit]
     transcripts = (read_transcripts(args.source_filelist)
                    if "semantic" in hints else {})
+    source_audio = (read_source_audio(args.source_filelist)
+                    if (args.audio_fallback and "intensity" in hints) else {})
     print(f"{len(items)} clip(s) from {len(args.filelist)} filelist(s)")
+    if source_audio:
+        print(f"Audio fallback: {len(source_audio)} source file(s) available "
+              f"for clips without a stage-1 .wave")
 
-    todo, n_skipped, n_nodata = [], 0, 0
+    todo, n_skipped, n_nodata, n_fallback = [], 0, 0, 0
     for it in items:
         base = clip_base(it["phone_ids"])
+        wave = (find_sidecar(args.wave_dir, base, WAVE_SUFFIX)
+                if "intensity" in hints else None)
+        if wave is None and source_audio:
+            cand = source_audio.get(base)
+            if cand and os.path.exists(cand):
+                wave = cand
+                n_fallback += 1
         rec = {
             "base": base,
             "phone_ids": it["phone_ids"],
             "cond": cond_path(it["phone_ids"], args.out_dir),
-            "wave": (find_sidecar(args.wave_dir, base, WAVE_SUFFIX)
-                     if "intensity" in hints else None),
+            "wave": wave,
             "f0": (find_sidecar(args.wave_dir, base, F0_SUFFIX)
                    if "register" in hints else None),
             "text": transcripts.get(base) if "semantic" in hints else None,
@@ -531,6 +605,7 @@ def main(argv=None) -> int:
         "with_intensity": len(collected["intensity"]),
         "with_register": len(collected["register"]),
         "with_semantic": len(semantic),
+        "audio_fallback": int(n_fallback),
         "errors": dict(errs),
     }
     if os.path.dirname(hints_json):
@@ -542,7 +617,8 @@ def main(argv=None) -> int:
           f"({n_skipped} reused, {n_nodata} without any hint data)")
     print(f"  intensity: {len(collected['intensity'])}  "
           f"register: {len(collected['register'])}  "
-          f"semantic: {len(semantic)}")
+          f"semantic: {len(semantic)}"
+          + (f"  (from source audio: {n_fallback})" if n_fallback else ""))
     print(f"  wrote {hints_json}")
     if args.limit and not args.no_edges:
         print("NOTE: --limit was used, so the bin edges above are fitted on a "

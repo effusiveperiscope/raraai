@@ -4,10 +4,13 @@ This package is a *port* of ``/mnt/data/Code/raraai/20_intensity_annotation``
 (see ``hints/README.md`` for provenance and for the one deviation: the shipped
 model was re-fitted under scikit-learn 1.9 so it can be loaded here).
 
-Nothing that trains or runs the model imports this package: it only produces
-``<base>.cond`` tensors (``build.py``), which the stage-2 dataset reads.  That
-is deliberate -- it keeps ``torch``-only training/inference free of
-scikit-learn / parselmouth / pandas / transformers-embedding dependencies.
+Nothing that trains or runs the model imports this package at import time: it
+produces ``<base>.cond`` tensors (``build.py``), which the stage-2 dataset reads.
+The one exception is deliberate and lazy -- ``FeatureExtractor`` in
+``features.py`` exposes ``extract_hints`` / ``hint_*`` wrappers that import this
+package only when a hint is actually requested, so an inference UI has a single
+place to ask for every hint without stage 1/2 paying for parselmouth (Praat) or
+the DSP / embedding models up front.
 
 Import note
 -----------

@@ -1,3 +1,19 @@
+"""Feature extraction for both stages, and the one-stop conditioning-hint API.
+
+Two roles:
+
+* stage-1 features / stage-2 `phone_ids` -- Qwen3-ASR + forced alignment, RMVPE
+  pitch, the HorsePhonemizer/G2P front end (`align`, `phonemize_items`,
+  `extract_features_ac`, ...);
+* conditioning hints (`hint_intensity`, `hint_register`, `hint_semantic`,
+  `hint_words`, `extract_hints`) -- thin wrappers over the offline `hints/`
+  package, so an inference UI has a single place to ask for every hint.  Those
+  imports are lazy: `hints/` adds parselmouth (Praat) and loads the DSP /
+  sentence-embedding models, which stage 1/2 must not pay for unless a hint is
+  actually requested.  (scikit-learn and pandas are already pulled in by
+  `g2p_en` via `horsephonemizer`, so they are not the reason.)
+"""
+
 import math
 import unicodedata
 import numpy as np
@@ -7,6 +23,32 @@ from horsephonemizer import HorsePhonemizer
 from transformers import AutoTokenizer 
 from modeling.vits import spectrogram, utils
 import librosa
+
+# ---------------------------------------------------------------------------
+# Conditioning hints (offline package `hints/`; see hints/README.md)
+# ---------------------------------------------------------------------------
+#: Code frames per second for the shipped configs:
+#: ``data.sampling_rate / data.hop_length / down_factor`` = 48000/480/4.
+#: `Generator` hard-codes ``down_factor=4`` (it is not a config key), and
+#: `FeatureExtractor.code_frame_rate` recomputes this from the loaded config.
+DEFAULT_CODE_FPS = 25.0
+
+#: 48 kHz, i.e. the stage-1 waveform rate (`data.sampling_rate`).
+HINT_WAVE_SR = 48000
+
+
+def _hint_helpers():
+    """Lazily import ``hints.build`` (DSP model, sentence encoder, `.cond` I/O).
+
+    Lazy on purpose: `hints/` adds **parselmouth** (Praat) to the dependency set
+    and loads the DSP regressor / bge encoder, none of which stage 1/2 needs.
+    (scikit-learn and pandas come in anyway via ``g2p_en``.)  The module caches
+    the DSP model in a process global, so repeated calls are cheap.
+    """
+    import hints.build
+    return hints.build
+
+
 
 def _f0_span(f0, start_time, end_time, hop=160, sr=16000):
     """Slice a frame-level f0 contour to the frames centred in a word span.
@@ -548,6 +590,218 @@ class FeatureExtractor:
         ret['spec'] = ret['spec'][:d,:]
         ret['f0'] = ret['f0'][:d]
         return ret
+
+
+    # ------------------------------------------------------------------ #
+    # Conditioning hints (one-stop; shared with hints/build.py)
+    # ------------------------------------------------------------------ #
+    def code_frame_rate(self) -> float:
+        """Code frames per second, from the loaded config (25 Hz by default).
+
+        ``data.sampling_rate / data.hop_length / down_factor``; ``down_factor``
+        is a ``Generator`` constructor default (4), not a config key, so it is
+        hard-coded here with :data:`DEFAULT_CODE_FPS` as the fallback.
+        """
+        try:
+            return float(self.hp.data.sampling_rate) / float(
+                self.hp.data.hop_length) / 4.0
+        except Exception:
+            return DEFAULT_CODE_FPS
+
+    def hint_intensity(self, data_48k) -> float:
+        """Perceptual intensity on the 1-9 scale, from a 48 kHz waveform.
+
+        Label-free: a DSP feature set + a HistGradientBoosting regressor ported
+        from ``20_intensity_annotation`` (``hints/models/``). Loudness is
+        removed (the features peak-normalise), so this is timbre/phonation
+        effort, not volume. Unreliable on clips that are mostly digital silence
+        -- see ``hints/README.md``.
+        """
+        wave = np.asarray(data_48k, dtype=np.float32).reshape(-1)
+        return _hint_helpers().intensity_from_wave_array(wave, sr=HINT_WAVE_SR)
+
+    def hint_register(self, f0) -> float:
+        """Utterance register: voiced-median f0 in semitones re: 100 Hz.
+
+        NaN when the clip has no voiced frames.
+        """
+        return _hint_helpers().register_from_f0_array(f0)
+
+    def hint_semantic(self, text, model_name=None, device=None):
+        """Sentence embedding for `text`: 384-d ``float16``, L2-normalised.
+
+        ``bge-small-en-v1.5`` CLS pooling, the same recipe as
+        ``hints/build.py``, so a vector computed here and one stored offline are
+        interchangeable. Returns ``None`` for empty text.
+        """
+        if not text or not str(text).strip():
+            return None
+        hb = _hint_helpers()
+        out = hb.encode_semantics([str(text)], model_name or hb.DEFAULT_SEMANTIC_MODEL,
+                                  device)
+        return None if out is None else out[0]
+
+    @staticmethod
+    def hint_level(value, edges):
+        """Bucket a continuous hint value into a level id (0 = absent).
+
+        `edges` is the fitted quantile list from ``hints.json`` ->
+        ``levels.<name>.edges`` (``hints.levels.load_level_edges``). This is the
+        same mapping the dataset applies at load time.
+        """
+        from hints.levels import bucket_levels
+        return bucket_levels(value, edges)
+
+    @staticmethod
+    def load_hint_levels(hints_json):
+        """Read every hint's ``{n_levels, edges}`` from a ``hints.json``."""
+        from hints.levels import load_levels
+        return load_levels(hints_json)
+
+    @staticmethod
+    def write_hints(path, record):
+        """Atomically save an `extract_hints` record as a ``.cond`` file."""
+        _hint_helpers().write_cond(path, record)
+
+
+    def hint_words(self, items, total_seconds=None, code_fps=None):
+        """Word-level timing + relative-pitch hints from aligned items.
+
+        `items` are the dicts from `extract` (or `align` + `phonemize_items`), so
+        each must carry ``phone_ids`` and ``start_time`` and, for the pitch hint,
+        ``nonzero_pitch_mean`` (which `extract` computes; `align` alone does not).
+
+        Returns the word-level half of a ``.cond`` record:
+
+            phone_word_idx    int16(n_phone)   word index of each phone
+            word_start_f      int32(n_word)    word start, in code frames
+            word_slot_f       int32(n_word)    start-to-start slot, code frames
+            pitch_word_st     float16(n_word)  word voiced mean in semitones
+                                               relative to the utterance; NaN if
+                                               the word has no voiced frames
+            pitch_word_voiced bool(n_word)
+
+        The slots are **start-to-start** (the last one runs to the end of the
+        clip), so they partition ``[0, total_seconds * code_fps)`` and per-word
+        timing is a complete length specification -- changing one word's pacing
+        shifts the clip by that much, with no separate utterance length input.
+
+        Args:
+            items: aligned+phonemized word dicts, in time order.
+            total_seconds: clip duration (default: the last word's ``end_time``).
+            code_fps: code frames per second (default: `code_frame_rate`).
+
+        Raises:
+            ValueError: word start times are not non-decreasing.
+        """
+        items = list(items)
+        if not items:
+            return {}
+        fps = float(code_fps or self.code_frame_rate())
+        n_word = len(items)
+        starts = np.asarray([float(it["start_time"]) for it in items],
+                            dtype=np.float64)
+        if np.any(np.diff(starts) < 0):
+            raise ValueError("word start times must be non-decreasing")
+        if total_seconds is None:
+            total_seconds = float(max(float(it["end_time"]) for it in items))
+
+        word_start_f = np.rint(starts * fps).astype(np.int32)
+        next_start = np.concatenate([starts[1:], [float(total_seconds)]])
+        word_slot_f = np.maximum(np.rint((next_start - starts) * fps), 1.0)
+        word_slot_f = word_slot_f.astype(np.int32)
+
+        means = np.asarray([float(it.get("nonzero_pitch_mean") or 0.0)
+                            for it in items], dtype=np.float64)
+        voiced = means > 0
+        pitch_st = np.full(n_word, np.nan, dtype=np.float64)
+        if voiced.any():
+            ref = float(np.median(means[voiced]))
+            if ref > 0:
+                pitch_st[voiced] = 12.0 * np.log2(means[voiced] / ref)
+
+        n_phone = int(sum(np.asarray(it.get("phone_ids", [])).size
+                          for it in items))
+        phone_word_idx = np.zeros(n_phone, dtype=np.int16)
+        offset = 0
+        for i, it in enumerate(items):
+            k = int(np.asarray(it.get("phone_ids", [])).size)
+            phone_word_idx[offset:offset + k] = i
+            offset += k
+
+        return {
+            "phone_word_idx": torch.from_numpy(phone_word_idx),
+            "word_start_f": torch.from_numpy(word_start_f),
+            "word_slot_f": torch.from_numpy(word_slot_f),
+            "pitch_word_st": torch.from_numpy(pitch_st).to(torch.float16),
+            "pitch_word_voiced": torch.from_numpy(voiced),
+        }
+
+    def extract_hints(self, data_48k, transcription=None, *, intensity=True,
+                      register=True, semantic=True, words=False,
+                      language="English", code_fps=None):
+        """Every conditioning hint for one clip, in the ``.cond`` layout.
+
+        Mirrors ``hints/build.py`` key-for-key (same helpers, same tensor
+        dtypes), so a ``.cond`` built offline and one built from live audio are
+        interchangeable -- which is what makes this the one-stop entry point for
+        an inference UI. `write_hints` saves the result.
+
+        Args:
+            data_48k: 1-D mono float waveform at 48 kHz.
+            transcription: text for the sentence embedding and, with
+                ``words=True``, for the forced alignment.
+            intensity: 1-9 DSP intensity (no text, no aligner, ~20 ms CPU).
+            register: utterance register in semitones re: 100 Hz. Needs f0, so
+                it builds the RMVPE model (the stage-1 pitch extractor).
+            semantic: 384-d sentence embedding; needs `transcription`.
+            words: also align and emit the per-word timing/pitch fields; needs
+                the Qwen / forced-aligner weights (``load_qwen=True``).
+            language: forwarded to `align`.
+            code_fps: code-frame rate for the word slots (default 25 Hz).
+
+        Returns:
+            dict with ``version`` plus whichever of ``intensity``,
+            ``register_st``, ``semantic``, ``n_phone``, ``phone_word_idx``,
+            ``word_start_f``, ``word_slot_f``, ``pitch_word_st``,
+            ``pitch_word_voiced`` were computed. Non-finite values (a fully
+            unvoiced register) are omitted rather than stored as NaN, matching
+            ``hints/build.py``.
+        """
+        wave = np.asarray(data_48k, dtype=np.float32).reshape(-1)
+        out = {"version": 1}
+        if intensity:
+            out["intensity"] = torch.tensor([self.hint_intensity(wave)],
+                                            dtype=torch.float32)
+
+        data_16k = librosa.resample(wave, orig_sr=HINT_WAVE_SR, target_sr=16000)
+        f0 = None
+        items = None
+        if words:
+            if self.qwen_model is None:
+                raise RuntimeError(
+                    "extract_hints(words=True) needs the Qwen3-ASR / "
+                    "forced-aligner weights; construct "
+                    "FeatureExtractor(..., load_qwen=True)")
+            items, f0 = self.extract(data_16k, language=language,
+                                     transcription=transcription)
+        elif register:
+            f0 = np.asarray(self.extract_pitch(data_16k)).reshape(-1)
+
+        if register and f0 is not None:
+            value = self.hint_register(f0)
+            if np.isfinite(value):
+                out["register_st"] = torch.tensor([value], dtype=torch.float32)
+        if semantic:
+            vec = self.hint_semantic(transcription)
+            if vec is not None:
+                out["semantic"] = vec
+        if words and items:
+            out.update(self.hint_words(
+                items, total_seconds=len(wave) / float(HINT_WAVE_SR),
+                code_fps=code_fps))
+            out["n_phone"] = int(sum(len(it["phone_ids"]) for it in items))
+        return out
 
 
 if __name__ == '__main__':

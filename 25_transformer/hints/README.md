@@ -3,10 +3,18 @@
 This directory is a **port** of `/mnt/data/Code/raraai/20_intensity_annotation`
 (commit `a83bcb8`) plus a per-clip builder that writes the stage-2 `.cond`
 tensors. It exists so the stage-2 transformer can be conditioned on a small set
-of coarse, *optional* prosody hints without making the training/inference
-environment depend on scikit-learn, Praat or an embedding model: nothing in
-`2_training.py`, `dataset_codes.py` or the inference path imports this package —
-they read the tensors it produces.
+of coarse, *optional* prosody hints without the *training* path depending on
+parselmouth (Praat) or on loading the DSP / embedding models: `2_training.py`
+and `dataset_codes.py` only read the tensors it produces.
+
+Two ways in:
+
+* `hints/build.py` — offline, bulk, parallel, no source audio needed (see below);
+* `FeatureExtractor.extract_hints` / `hint_intensity` / `hint_register` /
+  `hint_semantic` / `hint_words` in `features.py` — the same helpers, callable
+  on an in-memory waveform, which is the entry point for an inference UI.  Those
+  wrappers import this package lazily and produce the identical `.cond` record
+  (verified in `test_hints.py`).
 
 ```
 hints/dsp_common.py     copied verbatim (numpy/os/re only)
@@ -153,6 +161,8 @@ python hints/build.py \
 
 # add the sentence vector too (downloads the bge weights on first use)
 #   --hints intensity,register,semantic
+# clips with no stage-1 .wave fall back to their own audio file from
+# --source-filelist (on by default; --no-audio-fallback disables)
 
 # provenance only, no level edges
 python hints/build.py ... --no-edges
@@ -160,6 +170,21 @@ python hints/build.py ... --no-edges
 # acceptance test against the upstream feature cache
 python hints/verify_dsp.py --csv <upstream>/dsp_features_augmented.csv \
     --wave-dir data/genshin_full_stage1 --n 60
+```
+
+The same hints from a live waveform + text (the inference-UI entry point; the
+output record is identical to what `build.py` writes, and `test_hints.py`
+asserts that):
+
+```python
+from features import FeatureExtractor
+fe = FeatureExtractor(hp=cfg, device="cuda:0")
+rec = fe.extract_hints(wav_48k, "Hey. you don't sound too excited.",
+                       intensity=True, register=True, semantic=True,
+                       words=False)      # words=True needs the aligner
+fe.write_hints("test.wav.cond", rec)     # atomic, same format as build.py
+level = fe.hint_level(float(rec["intensity"]),
+                      fe.load_hint_levels("hints.json")["intensity"]["edges"])
 ```
 
 `.cond` files are written atomically (`torch.save` to `.tmp`, then

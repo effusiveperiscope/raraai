@@ -1139,10 +1139,33 @@ tensors. Two deviations from upstream, both in `hints/README.md`: the shipped
 model was re-fitted under scikit-learn 1.9 (the upstream pkl was written by
 1.7.2 and no longer unpickles), and the register hint uses the median voiced f0.
 
-Not produced here: word-level `pitch_word` / `phone_word_idx` / `word_start_f` /
-`word_slot_f`. Those need forced-alignment word timestamps (`features.align`;
-the `--phones_from transcript` path has no word boundaries at all) and are a
-separate pass.
+Not produced by `hints/build.py`: word-level `pitch_word` / `phone_word_idx` /
+`word_start_f` / `word_slot_f`. Those need forced-alignment word timestamps
+(`features.align`; the `--phones_from transcript` path has no word boundaries at
+all) and are a separate pass. `FeatureExtractor.extract_hints(words=True)` can
+already compute them from a live alignment, so the format is fixed -- only the
+bulk builder is missing that step.
+
+**Two ways in, one implementation.** `hints/build.py` is the offline/bulk path
+(parallel, no source audio needed); `features.py` exposes the same helpers as
+`hint_intensity` / `hint_register` / `hint_semantic` / `hint_words` /
+`extract_hints` (+ `hint_level` / `load_hint_levels` for bucketing and
+`write_hints` for saving), which is the entry point for an inference UI. Those
+wrappers import `hints/` **lazily**, because it adds parselmouth (Praat) and
+loads the DSP / bge models -- scikit-learn and pandas are already pulled in by
+`g2p_en`, so they are not the reason. `test_hints.py` asserts that
+`extract_hints` and `hints/build.py` produce the *same* numbers for the same
+clip (and the same 384-d semantic vector bit-for-bit).
+
+**Source audio is available** for all four source corpora
+(`filelists_2/*_linux.txt`): Genshin 106 229, MLP 35 543, VCTK 43 885,
+Expresso-read 11 596 lines, ~100 % present on this box. Stage-1 `.wave`/`.f0`
+tensors only exist for Genshin and MLP, so `build.py` has an audio fallback:
+when `<base>.wave` is missing it reads the clip's own file from
+`--source-filelist` (`--no-audio-fallback` disables). The intensity hint is
+defined on the waveform, so that is an equivalent input; `register` still needs
+an `.f0` (it comes free for the other corpora at the alignment pass, which
+computes f0 anyway).
 
 
 ---
@@ -1594,6 +1617,25 @@ python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
 python hints/verify_dsp.py \
     --csv /mnt/data/Code/raraai/20_intensity_annotation/dsp_features_augmented.csv \
     --wave-dir data/genshin_full_stage1 --n 60
+
+# ...or build the same hints from live audio + text through the one-stop API
+# (what an inference UI calls; identical numbers to hints/build.py, lazily
+# imports hints/ so stage 1/2 never pay for parselmouth or the model loads).
+python - <<'PY'
+import librosa
+from omegaconf import OmegaConf
+from features import FeatureExtractor
+fe = FeatureExtractor(hp=OmegaConf.load("configs/base.yaml"), device="cuda:0",
+                      load_qwen=True)          # load_qwen=False: no aligner fields
+wav, _ = librosa.load("test.wav", sr=48000)
+rec = fe.extract_hints(wav, "Hey. you don't sound too excited.",
+                       words=False)            # words=True needs the aligner
+fe.write_hints("/tmp/test.wav.cond", rec)
+print({k: (tuple(v.shape) if hasattr(v, "shape") else v) for k, v in rec.items()})
+PY
+
+# CPU smoke test for the whole hint stack (levels, word math, API == builder)
+python test_hints.py
 
 
 # Stage 2, one tensor stage at a time (see §3): re-phonemize only
