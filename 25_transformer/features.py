@@ -14,6 +14,7 @@ Two roles:
   `g2p_en` via `horsephonemizer`, so they are not the reason.)
 """
 
+import bisect
 import math
 import unicodedata
 import numpy as np
@@ -664,7 +665,95 @@ class FeatureExtractor:
         _hint_helpers().write_cond(path, record)
 
 
-    def hint_words(self, items, total_seconds=None, code_fps=None):
+    def word_index_for_phones(self, stored_ids, items, text=None):
+        """Map each stored ``phone_ids`` position to its word index.
+
+        The corpus's ``phone_ids`` are not the concatenation of
+        ``phonemize_items(...)["phone_ids"]``: a transcript-path corpus
+        (``2_preprocess.py --only phones --phones_from transcript``) tokenizes
+        the whole sentence in *one* call, and per-word tokenization does not
+        decompose into it (the g2pen tokenizer merges phones across word
+        boundaries -- measured: ``ĠWAH1TĠ`` as one token for the sentence but
+        ``['Ġ','W','AH1','T','Ġ']`` per word, i.e. 44 vs 71 tokens).
+
+        So the boundaries are computed from the **transcript's words** (the same
+        loop `phonemize_sentence` runs, hence the same string the corpus was
+        built from), tokenized incrementally: the length after word ``i`` is that
+        word's end position in the stored sequence.  Tokenization is
+        left-to-right greedy, so those lengths are prefix-consistent, and the
+        last one must equal ``len(stored_ids)`` -- otherwise the stored phones
+        are stale relative to the current phonemizer and no mapping is returned.
+
+        Args:
+            stored_ids: 1-D sequence of the corpus's phone ids.
+            items: per-word dicts from `align` + `phonemize_items` (or
+                `extract`); only their number and order are used when `text` is
+                given.
+            text: the transcript the clip was aligned against.  Required to
+                match a ``phonemize_text``-built corpus; when omitted the items'
+                own ``phones`` strings are joined instead, which is only correct
+                if the corpus was phonemized per word.
+
+        Returns:
+            ``list[int]`` of length ``len(stored_ids)`` with the word index of
+            every position, or ``None`` when the phone strings do not reproduce
+            the stored ids (stale ``phone_ids``, or the aligner split the
+            transcript differently from ``text.split()``).
+        """
+        stored_n = int(np.asarray(stored_ids).reshape(-1).size)
+        if text is not None and str(text).strip():
+            words = str(text).split()
+            if len(words) != len(items):
+                return None
+            tags = self.hphzr.tag_words(words)
+            strings = [self.hphzr.phonemize(w, tag=t) for w, t in zip(words, tags)]
+        else:
+            strings = [str(it.get("phones", "") or "") for it in items]
+
+        joined = " ".join(s for s in strings)
+        ids = self.tokenizer_g2p(joined)["input_ids"]
+        if len(ids) != stored_n:
+            return None
+        pieces = self.tokenizer_g2p.convert_ids_to_tokens(ids)
+        # The g2pen tokenizer is a lossless BPE over the phone string with ``Ġ``
+        # for a space, so the pieces concatenate back to it -- modulo a leading
+        # space (the first token carries ``Ġ`` even when the string starts with
+        # no space).  If the bodies disagree (normalisation, an ``[UNK]``), the
+        # character map would be wrong and the caller has to fall back.
+        rebuilt = "".join(pieces).replace("\u0120", " ")
+        lead = len(rebuilt) - len(rebuilt.lstrip(" "))
+        if rebuilt[lead:].rstrip() != joined.strip():
+            return None
+
+        # Character start of every word (relative to ``rebuilt``), and of every
+        # token in it.
+        word_starts, pos = [], lead
+        for i, word in enumerate(strings):
+            if i:
+                pos += 1                     # the joining space
+            word_starts.append(pos)
+            pos += len(word)
+        tok_starts, pos = [], 0
+        for piece in pieces:
+            tok_starts.append(pos)
+            pos += len(piece)
+
+        # A token belongs to the word its first non-space character falls in.
+        # That is what makes this independent of where the tokenizer chose to
+        # merge across a word boundary (measured: joining "down" to the prefix
+        # takes the token count from 43 to 42, so incremental counts - and even
+        # concatenating per-word ids - give the wrong answer).
+        out = []
+        for j, piece in enumerate(pieces):
+            k = tok_starts[j]
+            stop = min(k + len(piece), len(rebuilt))
+            while k < stop - 1 and rebuilt[k] == " ":
+                k += 1
+            out.append(max(bisect.bisect_right(word_starts, k) - 1, 0))
+        return out
+
+    def hint_words(self, items, total_seconds=None, code_fps=None,
+                   word_index=None):
         """Word-level timing + relative-pitch hints from aligned items.
 
         `items` are the dicts from `extract` (or `align` + `phonemize_items`), so
@@ -690,6 +779,12 @@ class FeatureExtractor:
             items: aligned+phonemized word dicts, in time order.
             total_seconds: clip duration (default: the last word's ``end_time``).
             code_fps: code frames per second (default: `code_frame_rate`).
+            word_index: optional ``(n_phone,)`` word index per **stored**
+                ``phone_ids`` position (see `word_index_for_phones`).  Needed
+                when the corpus was phonemized in one call (transcript path)
+                rather than per word; omit it and the index is derived from the
+                items' own ``phone_ids``, which is only correct when the stored
+                sequence is exactly their concatenation.
 
         Raises:
             ValueError: word start times are not non-decreasing.
@@ -722,12 +817,18 @@ class FeatureExtractor:
 
         n_phone = int(sum(np.asarray(it.get("phone_ids", [])).size
                           for it in items))
-        phone_word_idx = np.zeros(n_phone, dtype=np.int16)
-        offset = 0
-        for i, it in enumerate(items):
-            k = int(np.asarray(it.get("phone_ids", [])).size)
-            phone_word_idx[offset:offset + k] = i
-            offset += k
+        if word_index is not None:
+            # Projected onto the *stored* phone sequence (see
+            # `word_index_for_phones`), so special tokens and a sentence-level
+            # tokenization do not shift the boundaries.
+            phone_word_idx = np.asarray(word_index, dtype=np.int16)
+        else:
+            phone_word_idx = np.zeros(n_phone, dtype=np.int16)
+            offset = 0
+            for i, it in enumerate(items):
+                k = int(np.asarray(it.get("phone_ids", [])).size)
+                phone_word_idx[offset:offset + k] = i
+                offset += k
 
         return {
             "phone_word_idx": torch.from_numpy(phone_word_idx),

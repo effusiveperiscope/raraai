@@ -62,6 +62,8 @@ for _p in (_HERE, _ROOT):
 import numpy as np
 import torch
 
+from hints.levels import DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS
+
 COND_SUFFIX = ".cond"
 PHONE_SUFFIX = ".phone_ids"
 WAVE_SUFFIX = ".wave"
@@ -89,6 +91,12 @@ HINT_KEYS = ("intensity", "register", "semantic")
 #: hint name -> key in the ``.cond`` dict
 COND_KEYS = {"intensity": "intensity", "register": "register_st",
              "semantic": "semantic"}
+
+#: ``.cond`` keys written by the word pass (``--words``).  ``n_phone`` (written
+#: alongside) is the staleness anchor: ``dataset_codes.py`` refuses the word
+#: fields when it does not equal ``phone_ids.numel()``.
+WORD_KEYS = ("phone_word_idx", "word_start_f", "word_slot_f",
+             "pitch_word_st", "pitch_word_voiced")
 
 
 
@@ -387,6 +395,96 @@ def write_cond(path: str, record: dict) -> None:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def load_extractor(args):
+    """Build the aligner-backed ``FeatureExtractor`` for ``--words`` (lazy).
+
+    Loads Qwen3-ASR (for the tokenizer/processor) + the forced aligner, i.e.
+    several GB, so it is built only when the first clip actually needs it.
+    ``basicConfig`` runs first because importing ``features`` drags in vendored
+    code that turns the root logger to DEBUG (AGENTS.md footgun #18).
+    """
+    import logging
+
+    logging.basicConfig(level=logging.WARNING)
+    from omegaconf import OmegaConf
+
+    from features import FeatureExtractor
+
+    hp = OmegaConf.load(args.config)
+    device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    return FeatureExtractor(hp=hp, device=device, load_qwen=True)
+
+
+def fit_edges_from_conds(items, args, hints) -> int:
+    """Fit the level edges from the ``.cond`` files already on disk.
+
+    A sharded/multi-GPU run writes the tensors with ``--no-edges`` (a shard only
+    sees its slice, so its quantiles would not be the corpus's), and this pass
+    then fits them from the whole corpus without touching audio or the models.
+    It also doubles as a coverage report: it prints how many clips have each
+    hint.
+    """
+    hints_json = args.hints_json or os.path.join(
+        os.path.dirname(args.filelist[0]) or ".", "hints.json")
+    previous = {}
+    if os.path.exists(hints_json):
+        try:
+            with open(hints_json, "r", encoding="utf-8") as f:
+                previous = json.load(f) or {}
+        except Exception:
+            previous = {}
+    doc = {"version": 1, "created_by": "hints/build.py",
+           "levels": dict(previous.get("levels") or {}),
+           "dsp": previous.get("dsp"), "semantic": previous.get("semantic"),
+           "words": previous.get("words")}
+
+    collected = {"intensity": [], "register": []}
+    have_words = 0
+    for it in items:
+        path = cond_path(it["phone_ids"], args.out_dir)
+        if not os.path.exists(path):
+            continue
+        try:
+            rec = torch.load(path, map_location="cpu", weights_only=True,
+                             mmap=True)
+        except Exception:
+            continue
+        if "phone_word_idx" in rec:
+            have_words += 1
+        for key in ("intensity", "register"):
+            value = rec.get(COND_KEYS[key])
+            if value is None:
+                continue
+            value = float(np.asarray(value).reshape(-1)[0])
+            if np.isfinite(value):
+                collected[key].append(value)
+
+    for name, n_levels in (("intensity", args.n_intensity_levels),
+                           ("register", args.n_register_levels)):
+        if name not in hints:
+            continue
+        edges, stats = quantile_edges(collected[name], n_levels)
+        if edges is None:
+            print(f"WARNING: only {stats.get('n', 0)} {name} value(s); cannot "
+                  f"fit {n_levels} edges")
+            continue
+        doc["levels"][name] = {"n_levels": n_levels, "edges": edges,
+                               "stats": stats}
+    doc["coverage"] = {"clips_read": len(items),
+                       "with_intensity": len(collected["intensity"]),
+                       "with_register": len(collected["register"]),
+                       "with_words": have_words}
+    if os.path.dirname(hints_json):
+        os.makedirs(os.path.dirname(hints_json), exist_ok=True)
+    with open(hints_json, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+    print(f"fit edges from {len(items)} clip(s): intensity "
+          f"{len(collected['intensity'])}, register "
+          f"{len(collected['register'])}, words {have_words}")
+    print(f"  wrote {hints_json}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -428,18 +526,46 @@ def main(argv=None) -> int:
                    help="reuse a .cond that already holds every requested key")
     p.add_argument("--no-edges", action="store_true",
                    help="do not fit level edges (still writes coverage/provenance)")
+    p.add_argument("--words", action="store_true",
+                   help="also write the per-word fields (phone_word_idx, "
+                        "word_start_f/slot_f, pitch_word_st/voiced). Needs "
+                        "--source-filelist transcripts and the Qwen forced "
+                        "aligner; runs sequentially on --device.")
+    p.add_argument("--config", default="configs/base.yaml",
+                   help="stage-1 config, used by --words (frame rate, hp)")
+    p.add_argument("--force", action="store_true",
+                   help="with --skip-existing --words: recompute the word "
+                        "fields even if the .cond already has them")
+    p.add_argument("--fit-edges-only", action="store_true",
+                   help="do not compute anything: read the existing .cond "
+                        "files, fit the level edges and write hints.json "
+                        "(what a sharded run needs afterwards)")
     args = p.parse_args(argv)
 
     hints = [h.strip() for h in str(args.hints).split(",") if h.strip()]
     unknown = [h for h in hints if h not in HINT_KEYS]
     if unknown:
         p.error(f"unknown hint(s) {unknown}; choose from {list(HINT_KEYS)}")
-    if ({"intensity", "register"} & set(hints)) and not args.wave_dir:
-        p.error("--wave-dir is required for intensity/register "
-                "(they read <base>.wave / <base>.f0)")
+    if ({"intensity", "register"} & set(hints)) and not args.wave_dir \
+            and not args.fit_edges_only:
+        if not (args.source_filelist and args.audio_fallback):
+            p.error("--wave-dir is required for intensity/register "
+                    "(they read <base>.wave / <base>.f0), unless the source "
+                    "audio can be read via --source-filelist")
+        print("NOTE: no --wave-dir -- intensity is read from the source audio "
+              "instead; register needs a <base>.f0 and will be absent for "
+              "clips whose stage-1 tensors do not exist")
     if "semantic" in hints and not args.source_filelist:
         p.error("--source-filelist is required for semantic "
                 "(it needs the transcript)")
+    if args.words and not args.source_filelist:
+        p.error("--words needs --source-filelist: the forced aligner is given "
+                "the transcript (no ASR is run), so every clip needs a "
+                "path|sid|text line.")
+    if args.words and args.workers > 1:
+        print(f"NOTE: --words runs sequentially (one aligner model on "
+              f"{args.device or 'cuda'}), so --workers is ignored")
+        args.workers = 1
     if args.out_dir:
         os.makedirs(args.out_dir, exist_ok=True)
 
@@ -447,10 +573,12 @@ def main(argv=None) -> int:
     if args.limit:
         items = items[: args.limit]
     transcripts = (read_transcripts(args.source_filelist)
-                   if "semantic" in hints else {})
+                   if ("semantic" in hints or args.words) else {})
     source_audio = (read_source_audio(args.source_filelist)
                     if (args.audio_fallback and "intensity" in hints) else {})
     print(f"{len(items)} clip(s) from {len(args.filelist)} filelist(s)")
+    if args.fit_edges_only:
+        return fit_edges_from_conds(items, args, hints)
     if source_audio:
         print(f"Audio fallback: {len(source_audio)} source file(s) available "
               f"for clips without a stage-1 .wave")
@@ -472,21 +600,26 @@ def main(argv=None) -> int:
             "wave": wave,
             "f0": (find_sidecar(args.wave_dir, base, F0_SUFFIX)
                    if "register" in hints else None),
-            "text": transcripts.get(base) if "semantic" in hints else None,
+            "text": transcripts.get(base) if ("semantic" in hints or args.words) else None,
         }
         want = []
-        if rec["wave"]:
+        if rec["wave"] and "intensity" in hints:
             want.append(COND_KEYS["intensity"])
-        if rec["f0"]:
+        if rec["f0"] and "register" in hints:
             want.append(COND_KEYS["register"])
-        if rec["text"]:
+        if rec["text"] and "semantic" in hints:
             want.append(COND_KEYS["semantic"])
+        if args.words and rec["text"] and rec["wave"]:
+            want.append("phone_word_idx")
         if not want:
             n_nodata += 1
             continue
         if args.skip_existing and cond_has(rec["cond"], want):
-            n_skipped += 1
-            continue
+            # ``--force`` only forces the *word* pass to be redone; the
+            # audio-derived hints are still reused (they are expensive too).
+            if not (args.force and "phone_word_idx" in want):
+                n_skipped += 1
+                continue
         todo.append(rec)
 
     # --- audio-derived hints (parallelisable) --------------------------------
@@ -520,16 +653,74 @@ def main(argv=None) -> int:
                                     args.semantic_batch)
             for i, (base, _) in enumerate(pairs):
                 semantic[base] = embs[i]
-    # --- write ---------------------------------------------------------------
+    # --- per-word pitch/timing (forced alignment, sequential) --------------- #
+    # ``FeatureExtractor.extract`` aligns the clip against the *given*
+    # transcript (no ASR) and returns per-word start/end + voiced f0, i.e. the
+    # same code path that produced the corpus's ``phone_ids`` -- which is why
+    # ``phone_word_idx`` lines up with them.
     from collections import Counter
     errs: Counter = Counter()
+    words = {}
+    n_word_failed = 0
+    n_word_mismatch = 0
+    code_fps = None
+    word_jobs = [r for r in todo if args.words and r["text"] and r["wave"]]
+    if word_jobs:
+        import librosa
+        from tqdm import tqdm
+
+        fe = load_extractor(args)
+        code_fps = fe.code_frame_rate()
+        print(f"Word pass: {len(word_jobs)} clip(s), {code_fps:.1f} code "
+              f"frames/s (sequential)")
+        for r in tqdm(word_jobs, desc="words (aligner)"):
+            try:
+                wave = load_audio_48k(r["wave"])
+                data16 = librosa.resample(wave, orig_sr=WAVE_SR,
+                                          target_sr=16000, res_type="soxr_hq")
+                items, _ = fe.extract(data16, transcription=r["text"])
+                # Map the words onto the *stored* phone sequence.  A corpus built
+                # with `--phones_from transcript` phonemizes in one call, so the
+                # alignment's per-word tokenization does not concatenate to it;
+                # `word_index_for_phones` reconciles them (or returns None when
+                # the phones themselves disagree, i.e. stale phone_ids).
+                stored_ids = torch.load(r["phone_ids"], map_location="cpu",
+                                        weights_only=True, mmap=True).reshape(-1)
+                word_idx = fe.word_index_for_phones(stored_ids, items,
+                                                   text=r["text"])
+            except Exception as exc:
+                n_word_failed += 1
+                errs[f"words: {str(exc).splitlines()[0][:160]}"] += 1
+                continue
+            if word_idx is None:
+                n_word_mismatch += 1
+                continue
+            got = fe.hint_words(
+                items, total_seconds=len(wave) / float(WAVE_SR),
+                code_fps=code_fps, word_index=word_idx)
+            got["n_phone"] = int(len(word_idx))
+            words[r["base"]] = got
+
+    # --- write ---------------------------------------------------------------
     collected = {"intensity": [], "register": []}
     n_written = 0
     for r in todo:
         values, errors = results.get(r["base"], ({}, {}))
         for k, msg in errors.items():
             errs[f"{k}: {str(msg).splitlines()[0][:160]}"] += 1
-        rec = {"version": 1}
+        # Merge with the existing .cond: a `--words`-only re-run computes no
+        # clip-level hints at all, and must not drop the ones already there
+        # (same reasoning as the hints.json merge below).
+        rec = {}
+        if os.path.exists(r["cond"]):
+            try:
+                loaded = torch.load(r["cond"], map_location="cpu",
+                                    weights_only=True, mmap=True)
+                rec = dict(loaded) if isinstance(loaded, dict) else {}
+            except Exception:
+                rec = {}
+        rec["version"] = 1
+        n_added = 0
         nph = phone_count(r["phone_ids"])
         if nph is not None:
             rec["n_phone"] = nph
@@ -539,9 +730,18 @@ def main(argv=None) -> int:
                 rec[COND_KEYS[key]] = torch.tensor([float(v)],
                                                    dtype=torch.float32)
                 collected[key].append(float(v))
+                n_added += 1
         if r["base"] in semantic:
             rec["semantic"] = semantic[r["base"]]
-        if not any(k in rec for k in ("intensity", "register_st", "semantic")):
+            n_added += 1
+        if r["base"] in words:
+            rec.update(words[r["base"]])
+            n_added += 1
+        if not any(k in rec for k in ("intensity", "register_st", "semantic",
+                                      "phone_word_idx")):
+            continue
+        if n_added == 0:
+            n_skipped += 1          # nothing new; the file is already complete
             continue
         write_cond(r["cond"], rec)
         n_written += 1
@@ -576,6 +776,19 @@ def main(argv=None) -> int:
     if "semantic" in hints:
         doc["semantic"] = {"model": args.semantic_model, "dim": 384,
                            "pooling": "cls", "normalized": True}
+    if args.words:
+        # Provenance for the word fields.  The pitch/timing layout is *fixed*
+        # (see hints/levels.py), but recording it makes a mismatch obvious
+        # instead of silent if the defaults ever move.
+        doc["words"] = {
+            "aligner": "Qwen/Qwen3-ForcedAligner-0.6B",
+            "transcript": "--source-filelist (no ASR)",
+            "code_fps": (None if code_fps is None else float(code_fps)),
+            "pitch_edges": [float(e) for e in DEFAULT_PITCH_EDGES],
+            "n_slot_buckets": int(DEFAULT_SLOT_BUCKETS),
+            "pitch_unit": "semitones re: the utterance's voiced-median f0",
+            "slot_unit": "code frames, start-to-start",
+        }
     if not args.no_edges:
         for name, n_levels, values in (
                 ("intensity", args.n_intensity_levels, collected["intensity"]),
@@ -605,6 +818,9 @@ def main(argv=None) -> int:
         "with_intensity": len(collected["intensity"]),
         "with_register": len(collected["register"]),
         "with_semantic": len(semantic),
+        "with_words": len(words),
+        "word_phone_mismatch": int(n_word_mismatch),
+        "word_failures": int(n_word_failed),
         "audio_fallback": int(n_fallback),
         "errors": dict(errs),
     }
@@ -619,6 +835,15 @@ def main(argv=None) -> int:
           f"register: {len(collected['register'])}  "
           f"semantic: {len(semantic)}"
           + (f"  (from source audio: {n_fallback})" if n_fallback else ""))
+    if args.words:
+        print(f"  words: {len(words)} clip(s) aligned"
+              + (f", {n_word_failed} failed" if n_word_failed else "")
+              + (f", {n_word_mismatch} dropped (phone count != stored "
+                 f"phone_ids)" if n_word_mismatch else ""))
+        if n_word_mismatch:
+            print("  ^ those clips' phone_ids are stale relative to the current "
+                  "phonemizer: re-run `2_preprocess.py --only phones`, then "
+                  "re-run this pass.")
     print(f"  wrote {hints_json}")
     if args.limit and not args.no_edges:
         print("NOTE: --limit was used, so the bin edges above are fitted on a "

@@ -105,6 +105,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:                                    # repo root on sys.path (training/tests)
+    from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
+                              load_levels as load_hint_levels)
+except ImportError:                     # `python modeling/transformer.py`
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))))
+    from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
+                              load_levels as load_hint_levels)
+
 
 def _get_cfg(cfg, key, default):
     """Read ``key`` from an OmegaConf/dict/namespace cfg, falling back."""
@@ -250,7 +261,19 @@ class PhonemeEncoder(nn.Module):
         phone_ids: torch.Tensor,  # (B, N) long
         phone_lengths: Optional[torch.Tensor],  # (B,) long
         sid: torch.Tensor,  # (B,) long
+        hint_vec: Optional[torch.Tensor] = None,  # (B, H) clip-level hints
+        pos_hint: Optional[torch.Tensor] = None,  # (B, N, H) per-phone hints
     ):
+        """Encode phonemes to a memory.
+
+        ``hint_vec`` (intensity + register + semantic, one vector per clip) and
+        ``pos_hint`` (word pitch + word duration, one vector per phone) are
+        **additive side channels** produced by :meth:`CodeTransformer.encode`
+        from ``transformer.hints``.  They are added before the positional
+        encoding, exactly like ``spk_emb``, so their contribution follows the
+        same path through the residual stream; ``None`` (the default) is a plain
+        unconditional encode.
+        """
         B, N = phone_ids.shape
         if phone_lengths is None:
             phone_lengths = torch.full(
@@ -261,6 +284,10 @@ class PhonemeEncoder(nn.Module):
 
         x = self.phone_emb(phone_ids)
         x = x + self.spk_emb(sid.to(phone_ids.device)).unsqueeze(1)
+        if hint_vec is not None:
+            x = x + hint_vec.to(x.dtype).unsqueeze(1)
+        if pos_hint is not None:
+            x = x + pos_hint.to(x.dtype)[:, :N]
         x = self.pos(x)
         x = self.encoder(x, src_key_padding_mask=~valid)
         x = x * valid.unsqueeze(-1).to(x.dtype)
@@ -413,6 +440,7 @@ class DelayCodebookDecoder(nn.Module):
         sid: Optional[torch.Tensor] = None,  # (B,) long
         region: Optional[torch.Tensor] = None,  # (B, L) long, FIM region ids
         length: Optional[torch.Tensor] = None,  # (B, L) long, span-length buckets
+        hint_vec: Optional[torch.Tensor] = None,  # (B, H) clip-level hints
         use_mask_cache: bool = True,
     ) -> List[torch.Tensor]:
         """Body of :meth:`forward`, with the causal-mask source selectable.
@@ -458,6 +486,14 @@ class DelayCodebookDecoder(nn.Module):
                                      device=codes.device)
             x = x + self.len_emb(length.to(codes.device))
 
+        # Clip-level conditioning hints (intensity + semantic), a constant added
+        # to every column like ``spk_emb``: the decoder needs to know the target
+        # loudness/affect directly, not only through the encoded memory.  Built
+        # by ``CodeTransformer._dec_hint``; ``None`` means "this model has no
+        # hint tables, or the caller passed none".
+        if hint_vec is not None:
+            x = x + hint_vec.to(x.dtype).unsqueeze(1)
+
         if use_mask_cache:
             tgt_mask = self._causal_mask(L, x.device, x.dtype)
         else:
@@ -481,9 +517,10 @@ class DelayCodebookDecoder(nn.Module):
         sid: Optional[torch.Tensor] = None,  # (B,) long
         region: Optional[torch.Tensor] = None,  # (B, L) long, FIM region ids
         length: Optional[torch.Tensor] = None,  # (B, L) long, length buckets
+        hint_vec: Optional[torch.Tensor] = None,  # (B, H) clip-level hints
     ) -> List[torch.Tensor]:
         return self._forward_impl(codes, memory, memory_mask, sid, region, length,
-                                  use_mask_cache=True)
+                                  hint_vec, use_mask_cache=True)
 
 
 class CodeTransformer(nn.Module):
@@ -528,6 +565,19 @@ class CodeTransformer(nn.Module):
         # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
         memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
         residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
+
+        # Coarse conditioning hints (v0.8).  The tables are built below; the
+        # level counts come from the *same* ``hints.json`` the dataset used, so
+        # a level id means the same thing on both sides by construction.
+        hints_on = bool(_get_cfg(tcfg, "hints", False))
+        hints_json = _get_cfg(tcfg, "hints_json", None)
+        decoder_hints = bool(_get_cfg(tcfg, "decoder_hints", True))
+        semantic_dim = int(_get_cfg(tcfg, "semantic_dim", 384))
+        pitch_edges = list(_get_cfg(tcfg, "hint_pitch_edges", None)
+                           or DEFAULT_PITCH_EDGES)
+        n_slot_buckets = int(_get_cfg(tcfg, "n_slot_buckets",
+                                      DEFAULT_SLOT_BUCKETS)
+                             or DEFAULT_SLOT_BUCKETS)
 
         codec = _get_cfg(config, "codec", None)
         pitch_codec = _get_cfg(config, "pitch_codec", None)
@@ -604,6 +654,59 @@ class CodeTransformer(nn.Module):
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
+
+        # ---- conditioning-hint tables (v0.8) ------------------------------- #
+        # Every channel is a small ``(n_levels + 1, hidden)`` embedding indexed
+        # by a level id, row 0 being the trained "not provided" state (the
+        # dataset applies per-channel dropout, so that row is always exercised).
+        # They live here rather than on the encoder/decoder so the checkpoint
+        # has one obvious place for every hint parameter, and so the semantic
+        # projection can feed both halves without being registered twice.
+        self.hints = bool(hints_on)
+        self.decoder_hints = bool(decoder_hints) and self.hints
+        self.hints_json = str(hints_json) if hints_json else None
+        self.semantic_dim = int(semantic_dim)
+        self.pitch_edges = [float(e) for e in pitch_edges]
+        self.n_slot_buckets = max(int(n_slot_buckets), 1)
+        self.n_intensity_levels = 0
+        self.n_register_levels = 0
+        # Voiced pitch bins; row ``n_pitch_levels + 1`` is "this word is
+        # unvoiced" (see ``hints.levels.word_pitch_levels``), hence ``+ 2`` rows.
+        self.n_pitch_levels = len(self.pitch_edges) + 1
+        if self.hints:
+            if not self.hints_json:
+                raise ValueError(
+                    "transformer.hints is on but transformer.hints_json is not "
+                    "set. It must point at the hints.json written by "
+                    "hints/build.py -- the dataset reads the same file, so the "
+                    "two sides cannot disagree about a level id.")
+            levels = load_hint_levels(self.hints_json)
+            for name, attr in (("intensity", "n_intensity_levels"),
+                               ("register", "n_register_levels")):
+                spec = levels.get(name) or {}
+                if not spec.get("edges"):
+                    raise ValueError(
+                        f"{self.hints_json} has no fitted edges for hint "
+                        f"{name!r} (found: {sorted(levels)}); re-run "
+                        f"hints/build.py without --no-edges.")
+                setattr(self, attr, int(spec["n_levels"]))
+            self.int_emb = nn.Embedding(self.n_intensity_levels + 1, hidden_size)
+            self.reg_emb = nn.Embedding(self.n_register_levels + 1, hidden_size)
+            self.pitch_emb = nn.Embedding(self.n_pitch_levels + 2, hidden_size)
+            self.slot_emb = nn.Embedding(self.n_slot_buckets + 1, hidden_size)
+            self.sem_proj = nn.Linear(self.semantic_dim, hidden_size)
+            self.sem_null = nn.Parameter(torch.zeros(hidden_size))
+            self.dec_int_emb = (nn.Embedding(self.n_intensity_levels + 1,
+                                             hidden_size)
+                                if self.decoder_hints else None)
+        else:
+            self.int_emb = None
+            self.reg_emb = None
+            self.pitch_emb = None
+            self.slot_emb = None
+            self.sem_proj = None
+            self.sem_null = None
+            self.dec_int_emb = None
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -911,8 +1014,96 @@ class CodeTransformer(nn.Module):
         phone_ids: torch.Tensor,
         phone_lengths: Optional[torch.Tensor],
         sid: torch.Tensor,
+        hints: Optional[dict] = None,
     ):
-        return self.encoder(phone_ids, phone_lengths, sid)
+        """Phonemes + speaker (+ hints) -> ``(memory, memory_mask)``.
+
+        ``hints`` is the collated batch (or any dict with the same keys); the
+        hint channels are added to the phoneme embeddings inside the encoder.
+        Omitting it is identical to a pre-v0.8 model.
+        """
+        hint_vec, pos_hint = self._enc_hints(hints, phone_ids.device)
+        return self.encoder(phone_ids, phone_lengths, sid,
+                            hint_vec=hint_vec, pos_hint=pos_hint)
+
+    # ------------------------------------------------------------------ #
+    # Conditioning hints (v0.8)
+    # ------------------------------------------------------------------ #
+    def _semantic_hint(self, hints) -> Optional[torch.Tensor]:
+        """Project the 384-d sentence vector to ``hidden_size``.
+
+        Absent / dropped semantic hints go through ``sem_null`` rather than
+        through ``sem_proj(0)``: a dropped channel has to be a *distinct,
+        trained* state, otherwise "no hint" would look like an arbitrary real
+        sentence (the projection has a bias).
+        """
+        if not self.hints or hints is None:
+            return None
+        sem = hints.get("hint_sem")
+        if sem is None or sem.numel() == 0:
+            return None
+        if sem.size(-1) != self.semantic_dim:
+            raise ValueError(
+                f"transformer.semantic_dim={self.semantic_dim} but the batch's "
+                f"hint_sem is {tuple(sem.shape)}; the .cond files and the "
+                f"config disagree (re-run hints/build.py --hints semantic, or "
+                f"fix semantic_dim).")
+        x = self.sem_proj(sem.to(self.sem_null.device, torch.float32))
+        valid = hints.get("hint_sem_valid")
+        if valid is not None:
+            keep = valid.to(x.device).bool().unsqueeze(-1)
+            x = torch.where(keep, x, self.sem_null.to(x.dtype).expand_as(x))
+        return x
+
+    def _enc_hints(self, hints, device):
+        """``(clip_vec (B,H) | None, per_phone (B,N,H) | None)`` for the encoder.
+
+        Clip-level: intensity + register + semantic.  Per phone: word pitch
+        (including the explicit unvoiced class) + word duration bucket.  Word
+        hints are attached to *phones*, not words, because that is the sequence
+        the encoder actually sees.
+        """
+        if not self.hints or hints is None:
+            return None, None
+        int_ids = hints.get("hint_int")
+        if int_ids is None:
+            return None, None
+        clip = self.int_emb(int_ids.to(device).long())
+        reg = hints.get("hint_reg")
+        if reg is not None:
+            clip = clip + self.reg_emb(reg.to(device).long())
+        sem = self._semantic_hint(hints)
+        if sem is not None:
+            clip = clip + sem
+
+        pos = None
+        pitch = hints.get("hint_pitch")
+        if pitch is not None and pitch.numel() > 0:
+            pos = self.pitch_emb(pitch.to(device).long())
+            slot = hints.get("hint_slot")
+            if slot is not None:
+                pos = pos + self.slot_emb(slot.to(device).long())
+        return clip, pos
+
+    def _dec_hint(self, hints) -> Optional[torch.Tensor]:
+        """``(B, H)`` constant added to every decoder column (or ``None``).
+
+        Only the *clip-level* hints are repeated here.  Per-phone word hints
+        stay encoder-only on purpose: they are a property of the text's pacing,
+        and the decoder already receives them through cross-attention; adding
+        them per column would have to invent a phone<->frame alignment that does
+        not exist at generation time.
+        """
+        if not self.decoder_hints or hints is None:
+            return None
+        int_ids = hints.get("hint_int")
+        if int_ids is None:
+            return None
+        out = self.dec_int_emb(int_ids.to(self.dec_int_emb.weight.device).long())
+        sem = self._semantic_hint(hints)
+        if sem is not None:
+            out = out + sem
+        return out
 
     def build_delay_pattern(
         self,
@@ -958,6 +1149,7 @@ class CodeTransformer(nn.Module):
         fim_mid_len: Optional[torch.Tensor] = None,     # (B,) long
         ablate_region: bool = False,
         ablate_length: bool = False,
+        hints: Optional[dict] = None,
     ) -> dict:
         """Delayed next-token loss over all codebooks.
 
@@ -987,6 +1179,10 @@ class CodeTransformer(nn.Module):
                 everything else (masks, targets, spans) stays identical, so the
                 resulting ``fim_middle_loss`` difference is directly attributable
                 to that channel.
+            hints: the collated batch (or any dict with ``hint_int`` /
+                ``hint_reg`` / ``hint_sem`` / ``hint_sem_valid``) whose
+                clip-level channels are added to every decoder column
+                (``transformer.hints``).  ``None`` is a no-op.
 
         Returns a dict with the total loss plus per-group (spec/pitch) losses
         and diagnostics that make "is it learning?" answerable from
@@ -1063,7 +1259,8 @@ class CodeTransformer(nn.Module):
 
         # list of (B, L, v + 1) -- or (B, L, v + 2) with the EOS class
         logits = self.decoder(inputs, memory, memory_mask, sid=sid,
-                              region=region_col, length=len_col)
+                              region=region_col, length=len_col,
+                              hint_vec=self._dec_hint(hints))
 
         losses, accs, entropies = [], [], []
         fim_num = None
@@ -1216,6 +1413,7 @@ class CodeTransformer(nn.Module):
         fim_mask: Optional[torch.Tensor] = None,
         fim_prefix_len: Optional[torch.Tensor] = None,
         fim_mid_len: Optional[torch.Tensor] = None,
+        hints: Optional[dict] = None,
     ) -> dict:
         """Training forward pass: phonemes + speaker -> spec/pitch code loss.
 
@@ -1228,13 +1426,14 @@ class CodeTransformer(nn.Module):
         select the prefix-suffix-middle reorder (no-op unless
         ``transformer.fim``).
         """
-        memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
+        memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
+                                          hints=hints)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
         return self.code_loss(
             memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch,
             complete=complete, diagnostics=diagnostics,
             fim_mask=fim_mask, fim_prefix_len=fim_prefix_len,
-            fim_mid_len=fim_mid_len)
+            fim_mid_len=fim_mid_len, hints=hints)
 
     def compute_batch_loss(self, batch: dict,
                            epoch: Optional[int] = None,
@@ -1260,6 +1459,7 @@ class CodeTransformer(nn.Module):
             fim_mask=batch.get("fim"),
             fim_prefix_len=batch.get("fim_prefix_len"),
             fim_mid_len=batch.get("fim_mid_len"),
+            hints=batch if self.hints else None,
         )
 
     # ------------------------------------------------------------------ #
@@ -1276,6 +1476,7 @@ class CodeTransformer(nn.Module):
         top_k: Optional[int] = None,
         stop_on_eos: Optional[bool] = None,
         return_lengths: bool = False,
+        hints: Optional[dict] = None,
     ):
         """Autoregressively sample ``(B, K, n)`` delayed codes.
 
@@ -1313,7 +1514,9 @@ class CodeTransformer(nn.Module):
         use_eos = self.eos_token if stop_on_eos is None else bool(stop_on_eos)
         use_eos = use_eos and self.eos_token
         try:
-            memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
+            memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
+                                              hints=hints)
+            dec_hint = self._dec_hint(hints)
             B = phone_ids.shape[0]
             K = self.codebook_num
             L = max_frames + K - 1
@@ -1325,7 +1528,8 @@ class CodeTransformer(nn.Module):
             # count.  ``L`` is the "still running" sentinel, never a column index.
             stop_col = torch.full((B,), L, dtype=torch.long, device=device)
             for i in range(L):
-                logits = self.decoder(seq, memory, memory_mask, sid=sid)
+                logits = self.decoder(seq, memory, memory_mask, sid=sid,
+                                      hint_vec=dec_hint)
                 col = []
                 for k in range(K):
                     lg = logits[k][:, -1] / max(temperature, 1e-6)
@@ -1412,6 +1616,7 @@ class CodeTransformer(nn.Module):
         middle_frames: int,          # fixed number of middle frames to generate
         temperature: float = 1.0,
         top_k: Optional[int] = None,
+        hints: Optional[dict] = None,
     ) -> torch.Tensor:
         """Fixed-length span regeneration: ``(prefix, suffix) -> middle``.
 
@@ -1456,7 +1661,9 @@ class CodeTransformer(nn.Module):
                 "sentinel classes); this model was built without it.")
         self.eval()
         try:
-            memory, memory_mask = self.encode(phone_ids, phone_lengths, sid)
+            memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
+                                              hints=hints)
+            dec_hint = self._dec_hint(hints)
             B = phone_ids.shape[0]
             K = self.codebook_num
             device = phone_ids.device
@@ -1521,7 +1728,8 @@ class CodeTransformer(nn.Module):
                     logits = self.decoder(
                         seq, memory, memory_mask, sid=sid,
                         region=region_cols[:, :n_cols],
-                        length=None if len_cols is None else len_cols[:, :n_cols])
+                        length=None if len_cols is None else len_cols[:, :n_cols],
+                        hint_vec=dec_hint)
                     col = []
                     for k in range(K):
                         lg = logits[k][:, -1] / max(temperature, 1e-6)
@@ -1565,6 +1773,13 @@ class CodeTransformer(nn.Module):
     def describe(self) -> str:
         n = self.num_parameters()
         spk = ("encoder+decoder" if self.decoder_speaker_cond else "encoder only")
+        if self.hints:
+            hints = (f", hints={self.n_intensity_levels} int/{self.n_pitch_levels}"
+                     f" pitch/{self.n_register_levels} reg/{self.n_slot_buckets}"
+                     f" slot+sem{self.semantic_dim}"
+                     + (" (decoder too)" if self.decoder_hints else " (encoder only)"))
+        else:
+            hints = ", hints=off"
         return (
             f"CodeTransformer(hidden={self.hidden_size}, codebooks="
             f"{self.spec_codebook_num} spec + {self.pitch_codebook_num} pitch, "
@@ -1574,6 +1789,7 @@ class CodeTransformer(nn.Module):
             f"length_cond={self.length_cond}"
             + (f" (n_len_buckets={self.n_len_buckets})"
                if self.length_cond else "")
+            + hints
             + f", params={n / 1e6:.2f}M)"
         )
 

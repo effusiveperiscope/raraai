@@ -1139,12 +1139,28 @@ tensors. Two deviations from upstream, both in `hints/README.md`: the shipped
 model was re-fitted under scikit-learn 1.9 (the upstream pkl was written by
 1.7.2 and no longer unpickles), and the register hint uses the median voiced f0.
 
-Not produced by `hints/build.py`: word-level `pitch_word` / `phone_word_idx` /
-`word_start_f` / `word_slot_f`. Those need forced-alignment word timestamps
-(`features.align`; the `--phones_from transcript` path has no word boundaries at
-all) and are a separate pass. `FeatureExtractor.extract_hints(words=True)` can
-already compute them from a live alignment, so the format is fixed -- only the
-bulk builder is missing that step.
+Word-level `pitch_word` / `phone_word_idx` / `word_start_f` / `word_slot_f` are
+written by the **`--words` pass** (not by the default run): it needs
+forced-alignment word timestamps, so `python hints/build.py ... --words` calls
+`FeatureExtractor.extract` per clip (the aligner is given the transcript from
+`--source-filelist`, so no ASR runs) and `FeatureExtractor.hint_words` turns the
+items into the fields. It is sequential on one GPU (~5 clips/s once warm
+measured, i.e. ~9-20 h for the 151 k-clip corpus) and it **merges** into the
+existing `.cond` instead of replacing it, so a `--words`-only re-run keeps the
+clip-level hints.
+
+The subtlety that makes this safe: the corpus's `phone_ids` may have been built
+by the *transcript* path (`--only phones --phones_from transcript`), which
+phonemizes the whole sentence in one tokenizer call, while the alignment path
+tokenizes per word -- and the g2pen tokenizer merges across word boundaries, so
+44 sentence tokens become 71 per-word tokens and incremental prefix counts are
+not even monotonic (43 → 42 when one word merges into the previous token).
+`FeatureExtractor.word_index_for_phones` therefore maps words onto the stored
+sequence with **character offsets** in the rebuilt phone string, and returns
+`None` (clip skipped, counted, remedy printed) when the phones do not reproduce
+the stored ids -- i.e. when those `phone_ids` predate the current
+phonemizer/dictionary. Measured on 200 Genshin clips: 197 reproduce exactly, 3
+differ by 1-2 phones.
 
 **Two ways in, one implementation.** `hints/build.py` is the offline/bulk path
 (parallel, no source audio needed); `features.py` exposes the same helpers as
@@ -1166,6 +1182,70 @@ when `<base>.wave` is missing it reads the clip's own file from
 defined on the waveform, so that is an equivalent input; `register` still needs
 an `.f0` (it comes free for the other corpora at the alignment pass, which
 computes f0 anyway).
+
+### Conditioning hints in the model (stage 2, v0.8)
+
+`transformer.hints: true` turns those tensors into **five additive side channels**
+(one embedding each, all owned by `CodeTransformer` so the checkpoint has one
+obvious place for them):
+
+| channel | levels | where |
+|---|---|---|
+| intensity | `n_levels` equal-frequency bins from `hints.json` | encoder + decoder |
+| register | `n_levels` equal-frequency bins from `hints.json` | encoder |
+| semantic | 384-d bge vector -> `Linear(384, H)` | encoder + decoder |
+| word pitch | 7 voiced bins + 1 unvoiced (`hint_pitch_edges`, fixed) | encoder, per phone |
+| word timing | 8 log2 duration buckets (`n_slot_buckets`, fixed) | encoder, per phone |
+
+Level id `0` is **"not provided"** in every table -- a trained state, because
+`hint_dropout` (per channel) and `hint_null_all` drop hint channels on training
+items. The unvoiced word-pitch class is the *last* row (`n_pitch_levels + 1`),
+not `0`, so "this word has no f0" and "no hint" stay distinct.
+
+Why intensity/register are corpus quantiles but pitch/timing are fixed: the
+former are absolute scales, so equal-frequency edges make the table usable
+across corpora; the latter are *relative* (semitones re: the utterance's voiced
+median) or physical (code frames), and an inference UI has to be able to say
+"raise this word a major third" / "make it 12 frames" and mean it. Quantile
+edges would renumber the bins per corpus.
+
+Wiring:
+
+- **Dataset** (`dataset_codes.py`, `hints=True`): reads the sibling
+  `<base>.cond`, buckets with the same `hints.json` the model reads, gathers the
+  word-level fields to phones via `phone_word_idx`, crops the per-phone arrays in
+  lockstep with `max_phone_length`, and applies dropout (train items only). A
+  missing `.cond` is "no hints" for that clip; a **stale** one (`n_phone`
+  mismatch) keeps its clip-level fields and drops the word-level ones. Both are
+  counted and printed once after the first epoch (`Hints: N without a .cond,
+  M stale`).
+- **Collator**: pads `hint_pitch`/`hint_slot` exactly like `phone_ids`
+  (0 = absent) and stacks `hint_int`/`hint_reg`/`hint_sem`/`hint_sem_valid`.
+- **Model**: `encode()` adds `int_emb(int) + reg_emb(reg) + sem_proj(sem)` to
+  every phoneme and `pitch_emb(pitch) + slot_emb(slot)` per phone;
+  `delay_decoder` gets one constant per sample (`dec_int_emb(int) + sem`) added
+  to every column, like `spk_emb`. A dropped semantic vector goes through the
+  learned `sem_null` rather than `sem_proj(0)`, which would be a real sentence.
+  `decoder_hints: false` is the encoder-only ablation.
+- **Probe**: `train.hint_probe_batches` re-scores the first N validation batches
+  with *every* channel dropped and logs `val_loss_nohint` plus
+  `val_hint_gap = that - val_loss`. Hints are derived from the target audio, so
+  this is the only number that distinguishes "the model got better" from "the
+  model reads the answer": a flat ~0 gap means the tables are dead (or dropout is
+  too high), a growing gap while `val_loss_nohint` rises is the VC failure mode.
+- **Guards**: `check_special_layout` refuses a checkpoint whose hint tables have
+  different row counts than this `hints_json` (the level ids would be silently
+  reinterpreted), and refuses a hints checkpoint loaded into `hints: false`.
+  Warm-starting a hints model from a hints-less checkpoint is the intended
+  `--transfer_from` case (tables start fresh, printed as a NOTE).
+- **No re-preprocessing**: the codes are unchanged; only `hints`/`hints_json`/
+  dropout knobs change, and those are config edits. But the *parameter set*
+  changes, so it needs a fresh `exp_name` (+ `--transfer_from`), like
+  `eos_token`/`fim`/`length_cond`.
+- Validation lives in `test_hints.py` (CPU: builds a 12-clip fixture with
+  `hints/build.py`, then checks bucketing, dropout, per-word gather, stale
+  rejection, collator shapes, and that the model's loss actually changes when the
+  hints are dropped).
 
 
 ---
@@ -1538,6 +1618,23 @@ computes f0 anyway).
       which `2_preprocess.py` drops by default; `hints/verify_dsp.py` reports
       the clean and silent groups separately instead of averaging them.
 
+21. **`transformer.hints` changes the parameter set, and `hints_json` is part of
+    the checkpoint's contract.** The hint embeddings (`net.int_emb`,
+    `reg_emb`, `pitch_emb`, `slot_emb`, `sem_proj`, `sem_null`, `dec_int_emb`)
+    are new tensors, so a pre-v0.8 checkpoint cannot be `--resume_from`'d:
+    start a fresh `exp_name` and warm-start with `--transfer_from` (the tables
+    load as untrained, which is reported as a NOTE). The reverse direction --
+    a hints checkpoint into `hints: false` -- is fatal in
+    `check_special_layout`, because it would silently throw those trained tables
+    away. That check also compares the *row counts* against this run's
+    `hints_json`: a different `hints.json` means a different level layout, so
+    the same id would mean a different value and nothing would crash. Keep the
+    exact file the run was trained with. Nothing about the *codes* changes, so no
+    re-preprocessing -- and turning the switch on for an existing corpus just
+    needs `hints/build.py` to have written its `.cond` files (the dataset degrades
+    a missing one to "no hints", counting them for the one-time
+    `Hints: N without a .cond` print).
+
 
 ---
 
@@ -1612,6 +1709,16 @@ python 2_training.py --config configs/transformer.yaml
 # list, plus --source-filelist, to also store the bge sentence vector).
 python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
     --wave-dir data/genshin_full_stage1 --hints intensity,register --workers 8
+
+# ...plus the word-level fields (phone_word_idx / word_start_f / word_slot_f /
+# pitch_word_st) via the forced aligner. Sequential on one GPU (~2.3 clips/s),
+# needs the transcripts (the aligner is given them -- no ASR), merges into the
+# existing .cond, and drops clips whose phone_ids are stale w.r.t. the current
+# phonemizer (printing the count + the `--only phones` remedy).
+python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+    --wave-dir data/genshin_full_stage1 \
+    --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
+    --hints intensity,register,semantic --words --device cuda:0
 # Acceptance test of the ported DSP pipeline against the upstream feature cache
 # (exits non-zero if the intensity hint moves on clips without digital silence).
 python hints/verify_dsp.py \
@@ -1634,8 +1741,20 @@ fe.write_hints("/tmp/test.wav.cond", rec)
 print({k: (tuple(v.shape) if hasattr(v, "shape") else v) for k, v in rec.items()})
 PY
 
-# CPU smoke test for the whole hint stack (levels, word math, API == builder)
+# CPU smoke test for the whole hint stack (levels, word math, API == builder,
+# dataset bucketing/dropout, per-word gather, and the model's hint side channels)
 python test_hints.py
+
+# Turn the hints on for stage 2 (needs the .cond files + their hints.json; see
+# §4). Start a fresh exp_name -- the hint tables are new parameters -- and
+# warm-start from the previous run:
+#   transformer.hints: true
+#   transformer.hints_json: <the hints.json hints/build.py wrote>
+#   train.hint_probe_batches: 2      -> logs val_loss_nohint / val_hint_gap
+# then watch `val_hint_gap`: ~0 means the model ignores the hints, a growing gap
+# while `val_loss_nohint` rises means it is leaning on the oracle.
+python 2_training.py --config configs/transformer.yaml \
+    --transfer_from checkpoints_stage2/transformer_v0.7_fim2/last.ckpt
 
 
 # Stage 2, one tensor stage at a time (see §3): re-phonemize only

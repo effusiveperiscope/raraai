@@ -86,3 +86,51 @@ def load_level_edges(path: str, name: str):
             f"(found: {sorted(levels)}). Re-run hints/build.py over the whole "
             f"corpus without --no-edges.")
     return levels[name]["edges"], levels[name]["n_levels"]
+
+
+#: Default cuts for the **word pitch** hint, in semitones relative to the
+#: utterance's voiced median.  Two semitones per bin, symmetric, saturating --
+#: 7 voiced bins (``< -6``, ``-6..-4``, ... , ``>= 6``).
+#:
+#: Fixed rather than corpus quantiles on purpose: the value is *relative to the
+#: utterance*, and an inference UI has to be able to say "raise this word a
+#: major third" and mean it.  Quantile edges would renumber the bins per corpus
+#: and make a stored level meaningless outside it.  (Intensity and register are
+#: absolute scales, so those stay equal-frequency from ``hints.json``.)
+DEFAULT_PITCH_EDGES = (-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0)
+
+#: Number of **word slot** buckets: log2 buckets of the word's duration in code
+#: frames (1, 2-3, 4-7, 8-15, 16-31, 32-63, 64-127, 128+).  Also fixed: it is a
+#: duration, and "8 frames" has to mean 8 frames.
+DEFAULT_SLOT_BUCKETS = 8
+
+
+def word_pitch_levels(pitch_st, voiced, edges=None):
+    """Word pitch levels: ``0`` absent, ``1..N`` voiced bins, ``N+1`` unvoiced.
+
+    ``pitch_st`` is the word's voiced-mean f0 in semitones relative to the
+    utterance (``FeatureExtractor.hint_words`` -> ``pitch_word_st``, NaN where
+    the word has no voiced frames) and ``voiced`` its ``pitch_word_voiced``
+    flag.  The explicitly-unvoiced class is the last row of the table rather
+    than ``0`` so that "not provided" and "this word is unvoiced" stay
+    distinguishable -- the whole point of the dropout design.
+    """
+    edges = list(DEFAULT_PITCH_EDGES if edges is None else edges)
+    lv = np.asarray(bucket_levels(pitch_st, edges), dtype=np.int64)
+    v = np.asarray(voiced, dtype=bool)
+    lv = np.where(v, lv, len(edges) + 1)
+    return int(lv) if np.ndim(voiced) == 0 else lv
+
+
+def slot_bucket(slots, n_buckets: int = DEFAULT_SLOT_BUCKETS):
+    """Log2 duration buckets for word slots (code frames); ``0`` = absent.
+
+    ``slot = 1`` -> 1, ``2..3`` -> 2, ``4..7`` -> 3, ... , ``>= 2**(n-1)`` -> n.
+    Values below 1 or non-finite map to 0 (absent).
+    """
+    s = np.asarray(slots, dtype=np.float64)
+    finite = np.isfinite(s) & (s >= 1.0)
+    b = np.floor(np.log2(np.where(finite, s, 1.0))).astype(np.int64) + 1
+    b = np.clip(b, 1, int(n_buckets))
+    b = np.where(finite, b, 0)
+    return int(b) if np.ndim(slots) == 0 else b

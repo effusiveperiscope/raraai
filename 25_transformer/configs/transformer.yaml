@@ -60,6 +60,52 @@ transformer:
   # this must be large enough to hold every stage-1 id you use
   # (see speaker_map.py and train.speaker_map).
   n_speakers: 4096
+  # ---- coarse conditioning hints (v0.8) -----------------------------------
+  # Optional *side channels* built by hints/build.py (see hints/README.md):
+  # intensity (1-9), register, a 384-d sentence vector, and (after the alignment
+  # pass) per-word pitch/duration.  The dataset turns each continuous value into
+  # a level id with the edges in `hints_json`; the model adds one small
+  # embedding per channel.  `hints: false` reproduces every earlier version
+  # exactly (no new parameters).
+  #
+  # Two properties matter more than the numbers:
+  #  * every hint is derivable from the *target audio*, so at train time this is
+  #    an oracle.  What keeps it from becoming a voice-conversion renderer is
+  #    that the values are coarse levels, `hint_dropout`/`hint_null_all` drop
+  #    them (so level 0 is a trained "no hint" state used at inference), and the
+  #    val probe reports `val_loss_nohint` next to `val_loss` -- if the gap is
+  #    large the model is leaning on the oracle.
+  #  * enabling it changes the parameter set, so it needs a fresh `exp_name` +
+  #    `--transfer_from` (new tables load as untrained), not `--resume_from`.
+  hints: false
+  # Path to the hints.json written by hints/build.py (its `levels` block holds
+  # the equal-frequency edges).  The dataset and the model read the *same* file,
+  # so a level id cannot mean two different things.  Relative to the cwd.
+  hints_json: hints.json
+  # Also feed the clip-level channels (intensity + semantic) to the decoder, as
+  # a constant added to every column like spk_emb.  Off = encoder-only ablation.
+  decoder_hints: true
+  # Width of the stored sentence vector (bge-small-en-v1.5 = 384).
+  semantic_dim: 384
+  # Word-pitch cuts in semitones relative to the utterance's voiced median
+  # (fixed, not corpus quantiles -- see hints/levels.py).  7 voiced bins.
+  hint_pitch_edges: [-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0]
+  # Word-duration buckets: log2 of the slot length in code frames.
+  n_slot_buckets: 8
+  # Per-channel dropout probability (training items only).  Each channel is
+  # dropped independently; a dropped channel is level 0 / the semantic null
+  # vector.  Keep `semantic` highest: it is the most informative channel about
+  # the utterance and the easiest to over-fit (one vector per clip).
+  hint_dropout:
+    intensity: 0.15
+    register: 0.10
+    pitch: 0.15
+    semantic: 0.20
+    timing: 0.15
+  # Drop *every* channel for this fraction of items, so the fully-unconditional
+  # path is trained too (needed for hint-free inference and for the
+  # `val_loss_nohint` probe to mean something).
+  hint_null_all: 0.10
   # Also feed `sid` to the decoder (its own embedding table), not just to the
   # phoneme encoder. Without this the voice can only reach the autoregressive
   # model through cross-attention to the encoder memory, which is a weak,
@@ -373,6 +419,13 @@ train:
   # Reference: ~3.0 nats is the marginal entropy of a spec codebook, so a
   # healthy run should show an O(0.1-1.0) nat gap; < 0.05 is effectively dead.
   text_delta_batches: 4
+  # Hint-oracle probe (v0.8): every epoch, re-score the first N validation
+  # batches with *every* conditioning hint dropped and log `val_loss_nohint`
+  # plus `val_hint_gap` (= that loss - the real `val_loss`).  The hints are
+  # derived from the target audio, so this is the number that says whether the
+  # model is using the oracle or leaning on it; `val_loss` alone cannot.
+  # Costs one extra forward pass per probed batch. 0 disables the probe.
+  hint_probe_batches: 2
   # TensorBoard logging of "what the model actually produces". Every
   # `sample_interval` epochs (and once at the start of training) 2_training.py
   # greedily/sampling-decodes `sample_count` val items and logs:

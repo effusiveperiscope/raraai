@@ -394,6 +394,16 @@ class TrainModule(pl.LightningModule):
             config.train.get("text_delta_batches", 0) or 0)
         self._reset_text_delta()
 
+        # Hint-oracle probe (v0.8): every epoch, re-score the first
+        # `hint_probe_batches` validation batches with every conditioning hint
+        # dropped and log both `val_loss_nohint` and the gap.  The hints come
+        # from the target audio, so this is the metric that says whether the
+        # model is *using* the oracle or leaning on it. 0 disables the probe.
+        self.hint_probe_batches = int(
+            config.train.get("hint_probe_batches", 2) or 0)
+        self._reset_hint_probe()
+        self._hints_reported = False
+
         # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a *synthetic*
         # prefix/suffix split on the first `fim_probe_batches` validation batches
         # and compare the middle-only CE against three control arms (phonemes
@@ -468,6 +478,68 @@ class TrainModule(pl.LightningModule):
         self._text_delta_spec_sum = 0.0
         self._text_delta_pitch_sum = 0.0
         self._text_delta_count = 0
+
+    def _reset_hint_probe(self):
+        """Clear the per-epoch accumulators of the hint-oracle probe."""
+        self._hint_nohint_sum = 0.0
+        self._hint_gap_sum = 0.0
+        self._hint_nohint_count = 0
+
+    def _hints_off(self, batch):
+        """``batch`` with every hint channel dropped to its "absent" state.
+
+        Level 0 / ``hint_sem_valid=False`` is exactly what
+        ``dataset_codes`` emits for a clip whose hints were dropped (or never
+        built), i.e. the state the model has been trained to handle -- not an
+        out-of-distribution input.
+        """
+        if "hint_int" not in batch:
+            return None
+        off = dict(batch)
+        off["hint_int"] = torch.zeros_like(batch["hint_int"])
+        for key in ("hint_reg", "hint_pitch", "hint_slot"):
+            if batch.get(key) is not None:
+                off[key] = torch.zeros_like(batch[key])
+        if batch.get("hint_sem_valid") is not None:
+            off["hint_sem_valid"] = torch.zeros_like(batch["hint_sem_valid"])
+        return off
+
+    def _accumulate_hint_gap(self, batch, out):
+        """``CE(no hints) - CE(with hints)`` for one validation batch.
+
+        The hints are derived from the *target audio*, so at train time they are
+        an oracle; ``val_loss`` therefore cannot tell "the model got better"
+        from "the model reads the answer".  This probe re-runs the exact same
+        batch with every channel dropped and reports both the no-hint loss and
+        the gap.  Read them together with ``val_loss``:
+
+        * gap ~ 0                       -> the hints are ignored (dropout too
+                                           aggressive, or the tables are dead);
+        * gap small and flat            -> the model uses them as a nudge;
+        * gap growing while
+          ``val_loss_nohint`` rises     -> it is trading unconditional quality
+                                           for hint-following (the VC failure
+                                           mode).
+        """
+        off = self._hints_off(batch)
+        if off is None:
+            return
+        nohint = self.net.compute_batch_loss(off, epoch=None, diagnostics=False)
+        self._hint_nohint_sum += float(nohint["loss"])
+        self._hint_gap_sum += float(nohint["loss"] - out["loss"])
+        self._hint_nohint_count += 1
+
+    def _log_hint_probe(self):
+        """Log ``val_loss_nohint`` and ``val_hint_gap`` for the epoch."""
+        if self.hint_probe_batches <= 0 or not self._hint_nohint_count:
+            return
+        n = float(self._hint_nohint_count)
+        nohint = self._hint_nohint_sum / n
+        gap = self._hint_gap_sum / n
+        self._add_scalar("val_loss_nohint", torch.tensor(nohint))
+        self._add_scalar("val_hint_gap", torch.tensor(gap))
+        print(f"val_loss_nohint = {nohint:.4f}, val_hint_gap = {gap:+.4f} nats "
+              f"(CE with every hint dropped - CE with them)")
 
     def _reset_fim_probe(self):
         """Clear the per-epoch accumulators of the FIM diagnostics probe."""
@@ -688,12 +760,14 @@ class TrainModule(pl.LightningModule):
         impl = self.net.decoder._forward_impl
 
         def compiled_forward(codes, memory, memory_mask=None, sid=None,
-                             region=None, length=None):
+                             region=None, length=None, hint_vec=None):
             # Explicit signature (not a ``lambda``) because ``code_loss`` and
             # ``infill`` call the decoder as ``decoder(inputs, memory,
-            # memory_mask, sid=sid, region=region, length=length)`` and
-            # ``torch.compile`` rejects unknown keyword arguments.
-            return impl(codes, memory, memory_mask, sid, region, length, False)
+            # memory_mask, sid=sid, region=region, length=length,
+            # hint_vec=...)`` and ``torch.compile`` rejects unknown keyword
+            # arguments.  Keep the positional order of ``_forward_impl``.
+            return impl(codes, memory, memory_mask, sid, region, length,
+                        hint_vec, False)
 
         try:
             compiled = torch.compile(compiled_forward, dynamic=True)
@@ -754,8 +828,35 @@ class TrainModule(pl.LightningModule):
 
     def on_train_epoch_end(self):
         self._log_grad_epoch_stats()
+        self._log_hint_coverage()
         self._sample_and_log()
         return super().on_train_epoch_end()
+
+    def _log_hint_coverage(self):
+        """Print **once** how many training clips had a usable ``.cond``.
+
+        The dataset degrades a missing/stale ``.cond`` to "no hints" instead of
+        failing, so a corpus that was only partly built would otherwise train
+        quietly with a fraction of the items hinted.  This runs at the end of the
+        first epoch, i.e. after every item has been read once.
+        """
+        if self._hints_reported:
+            return
+        loader = getattr(self.trainer, "train_dataloader", None)
+        ds = getattr(loader, "dataset", None)
+        if ds is None or not getattr(ds, "hints", False):
+            return
+        self._hints_reported = True
+        miss = int(getattr(ds, "n_cond_missing", 0))
+        stale = int(getattr(ds, "n_cond_stale", 0))
+        print(f"Hints: {miss} clip(s) without a .cond, {stale} stale "
+              f"(n_phone mismatch or unreadable .cond)")
+        if miss or stale:
+            print("       -> missing hints only cost conditioning quality (those "
+                  "clips train unconditionally), but build them before the next "
+                  "run: python hints/build.py --filelist <train filelist> "
+                  "--wave-dir <stage1 dir> --source-filelist <transcripts> "
+                  "--hints intensity,register,semantic")
 
     def _log_grad_epoch_stats(self):
         """Log the worst gradient norm seen this epoch and how often clipping hit.
@@ -1427,6 +1528,7 @@ class TrainModule(pl.LightningModule):
     def on_validation_epoch_start(self):
         self._reset_text_delta()
         self._reset_fim_probe()
+        self._reset_hint_probe()
 
     @torch.no_grad()
     def _fim_probe(self, batch):
@@ -1594,6 +1696,7 @@ class TrainModule(pl.LightningModule):
     def on_validation_epoch_end(self):
         """Log ``val_text_delta`` (the "is the text conditioning alive?" metric)."""
         self._log_fim_probe()
+        self._log_hint_probe()
         if self.text_delta_batches <= 0 or not self._text_delta_count:
             return
         n = float(self._text_delta_count)
@@ -1618,6 +1721,8 @@ class TrainModule(pl.LightningModule):
         self._log_step_metrics("val", out, on_step=False)
         if batch_idx < self.text_delta_batches:
             self._accumulate_text_delta(batch, out)
+        if batch_idx < self.hint_probe_batches:
+            self._accumulate_hint_gap(batch, out)
         if batch_idx < self.fim_probe_batches:
             self._fim_probe(batch)
         return out["loss"]
@@ -1697,6 +1802,41 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                 f"or start a fresh exp_name.")
         print(f"NOTE: {message}")
 
+    # ``transformer.hints`` adds its own tables (no class-count change), so it
+    # needs the same treatment -- plus one extra check that length_cond does not
+    # need: the *widths* come from hints_json, so a different hints.json would
+    # silently reinterpret every stored level id.
+    has_hints = "net.int_emb.weight" in state_dict
+    if has_hints and not net.hints:
+        raise SystemExit(
+            f"ERROR: {source} has net.int_emb.weight (trained conditioning-hint "
+            f"embeddings), but this model was built with transformer.hints=false. "
+            f"Set transformer.hints: true and point transformer.hints_json at the "
+            f"hints.json used for that run.")
+    if net.hints and not has_hints:
+        message = (f"{source} has no hint tables, but this model was built with "
+                   f"hints=true: the hint embeddings start from scratch and have "
+                   f"to be learned (everything else transfers).")
+        if strict:
+            raise SystemExit(
+                f"ERROR: {message}  Use --transfer_from {source} instead of "
+                f"--resume_from, or start a fresh exp_name.")
+        print(f"NOTE: {message}")
+    if has_hints and net.hints:
+        for key, rows in (("net.int_emb.weight", net.int_emb.num_embeddings),
+                          ("net.reg_emb.weight", net.reg_emb.num_embeddings),
+                          ("net.pitch_emb.weight", net.pitch_emb.num_embeddings),
+                          ("net.slot_emb.weight", net.slot_emb.num_embeddings)):
+            have = int(state_dict[key].shape[0])
+            if have != rows:
+                raise SystemExit(
+                    f"ERROR: {source} has {key} with {have} rows, but this model "
+                    f"needs {rows}. transformer.hints_json describes a different "
+                    f"level layout than the one the checkpoint was trained with "
+                    f"(the dataset reads the same file, so the level ids would be "
+                    f"silently reinterpreted). Point hints_json at the "
+                    f"training-time hints.json.")
+
 
 def train(config, resume_from=None, transfer_from=None):
     # Stage 2 keeps its own output tree, separate from stage 1's
@@ -1769,6 +1909,15 @@ def train(config, resume_from=None, transfer_from=None):
     print(f"TensorBoard: {logger.log_dir}")
 
     print("Loading data...")
+    hint_cfg = config.transformer
+    hint_kwargs = dict(
+        hints=bool(hint_cfg.get("hints", False)),
+        hints_json=hint_cfg.get("hints_json", None),
+        hint_dropout=dict(hint_cfg.get("hint_dropout", {}) or {}),
+        hint_null_all=float(hint_cfg.get("hint_null_all", 0.0) or 0.0),
+        hint_pitch_edges=hint_cfg.get("hint_pitch_edges", None),
+        n_slot_buckets=int(hint_cfg.get("n_slot_buckets", 8) or 8),
+    )
     train_dataset = CodeDataset(
         config.train.train_filelist,
         is_train=True,
@@ -1781,6 +1930,9 @@ def train(config, resume_from=None, transfer_from=None):
         fim_rate=float(config.train.get("fim_rate", 0.0) or 0.0),
         fim_min_frames=int(config.transformer.get("fim_min_frames", 8) or 8),
         fim_mid_frac=float(config.transformer.get("fim_mid_frac", 0.5) or 0.5),
+        # Conditioning hints: the level edges come from the same hints.json the
+        # model reads, so dataset and model cannot disagree about a level id.
+        **hint_kwargs,
     )
     val_dataset = CodeDataset(
         config.train.val_filelist,
@@ -1788,7 +1940,19 @@ def train(config, resume_from=None, transfer_from=None):
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
+        # Validation never applies hint dropout (`is_train=False`), so the val
+        # loss is measured with the hints fully present -- and `val_loss_nohint`
+        # gives the same batches with every channel dropped.
+        **hint_kwargs,
     )
+    if train_dataset.hints:
+        print(f"Hints: on -- {train_dataset.n_intensity_levels} intensity / "
+              f"{train_dataset.n_register_levels} register level(s), "
+              f"{train_dataset.n_pitch_levels} voiced pitch bins + unvoiced, "
+              f"{train_dataset.n_slot_buckets} slot buckets, "
+              f"decoder-side={'yes' if config.transformer.get('decoder_hints', True) else 'no'}")
+        print(f"       dropout={train_dataset.hint_dropout}, "
+              f"null_all={train_dataset.hint_null_all}")
 
     # Guard against speaker ids that fall outside the transformer's speaker
     # embedding table (and, since ids are canonicalised into the stage-1

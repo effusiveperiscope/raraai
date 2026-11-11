@@ -26,17 +26,62 @@ and ``fim_mid_len`` per item.  ``CodeDataset`` draws them for a fraction
 reorders those items to ``prefix <SUF> suffix <MID> middle`` at loss time.  A
 plain AR item (``fim=False``) is left untouched, so AR and FIM samples share a
 batch.
+
+Conditioning hints (``transformer.hints``)
+------------------------------------------
+``hints/build.py`` writes a sibling ``<base>.cond`` next to each
+``<base>.phone_ids`` holding *continuous* values (intensity 1-9, register in
+semitones, a 384-d sentence vector, and -- once the alignment pass has run --
+per-word pitch/timing).  With ``hints=True`` this dataset reads that file and
+emits level ids, so the *bucket count* stays a config change and never needs the
+corpus rebuilt:
+
+    hint_int      (B,)      long   intensity level,      0 = absent
+    hint_reg      (B,)      long   register level,       0 = absent
+    hint_sem      (B, 384)  float  sentence embedding,   zeros where absent
+    hint_sem_valid(B,)      bool   False -> the model uses its own null vector
+    hint_pitch    (B, N)    long   per-phone word-pitch level
+                                   (0 absent, 1..P voiced bins, P+1 unvoiced)
+    hint_slot     (B, N)    long   per-phone word-duration bucket (0 absent)
+
+The per-phone arrays are gathered from the word-level fields via
+``phone_word_idx``, and cropped in lockstep with ``max_phone_length``.  Edges for
+intensity/register come from ``hints.json`` (equal-frequency quantiles fitted by
+``hints/build.py``); word pitch and word slots use *fixed* cuts
+(``hints.levels.DEFAULT_PITCH_EDGES`` / ``DEFAULT_SLOT_BUCKETS``) so a level id
+means the same thing in every corpus and in an inference UI.
+
+Dropout is what keeps this from becoming an oracle/voice-conversion renderer:
+``hint_dropout`` zeroes each channel independently per item and
+``hint_null_all`` zeroes *all* of them, both only on training items.  Level 0 is
+therefore a genuinely trained "no hint" state, not an untrained row.
 """
 
 from __future__ import annotations
 
+import os
 import random
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 import speaker_map as speaker_map_lib
+from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
+                          bucket_levels, load_levels, slot_bucket,
+                          word_pitch_levels)
+
+#: Hint channels that ``hint_dropout`` can switch off independently.
+HINT_CHANNELS = ("intensity", "register", "pitch", "semantic", "timing")
+
+#: ``.cond`` suffix, matching ``hints.build`` (sibling of ``<base>.phone_ids``).
+COND_SUFFIX = ".cond"
+
+
+def cond_path_for(phone_ids_path: str) -> str:
+    """``.../clip.wav.phone_ids`` -> ``.../clip.wav.cond``."""
+    return phone_ids_path[: -len(".phone_ids")] + COND_SUFFIX
 
 
 class CodeDataset(Dataset):
@@ -52,6 +97,12 @@ class CodeDataset(Dataset):
         fim_rate: float = 0.0,
         fim_min_frames: int = 8,
         fim_mid_frac: float = 0.5,
+        hints: bool = False,
+        hints_json: Optional[str] = None,
+        hint_dropout: Optional[Dict[str, float]] = None,
+        hint_null_all: float = 0.0,
+        hint_pitch_edges=None,
+        n_slot_buckets: int = DEFAULT_SLOT_BUCKETS,
     ):
         self.is_train = is_train
         self.max_frames = max_frames
@@ -66,6 +117,54 @@ class CodeDataset(Dataset):
         self.fim_rate = float(fim_rate)
         self.fim_min_frames = int(fim_min_frames)
         self.fim_mid_frac = float(fim_mid_frac)
+
+        # ---- conditioning hints (see the module docstring) ----------------- #
+        self.hints = bool(hints)
+        self.hint_null_all = float(hint_null_all or 0.0)
+        self.hint_dropout = {c: 0.0 for c in HINT_CHANNELS}
+        for channel, prob in (dict(hint_dropout) if hint_dropout else {}).items():
+            if channel not in HINT_CHANNELS:
+                raise ValueError(
+                    f"unknown hint channel {channel!r}; expected one of "
+                    f"{HINT_CHANNELS}")
+            self.hint_dropout[channel] = float(prob)
+        self.pitch_edges = [float(e) for e in
+                            (hint_pitch_edges or DEFAULT_PITCH_EDGES)]
+        self.n_slot_buckets = int(n_slot_buckets)
+        self.intensity_edges: Optional[List[float]] = None
+        self.register_edges: Optional[List[float]] = None
+        # ``+1`` for the "absent" level 0; pitch additionally has the explicit
+        # unvoiced class, so its table is ``len(edges) + 2`` rows (see
+        # ``hints.levels.word_pitch_levels``).
+        self.n_intensity_levels = 0
+        self.n_register_levels = 0
+        self.n_pitch_levels = len(self.pitch_edges) + 1
+        # Counters for the two "the .cond file is not usable" cases, so a
+        # mismatched corpus prints a diagnosis instead of silently training
+        # without hints.
+        self.n_cond_missing = 0
+        self.n_cond_stale = 0
+        if self.hints:
+            if not hints_json or not os.path.exists(str(hints_json)):
+                raise FileNotFoundError(
+                    "transformer.hints is on but transformer.hints_json "
+                    f"({hints_json!r}) does not exist. Run hints/build.py over "
+                    "this corpus first: it writes the equal-frequency edges that "
+                    "turn a continuous hint into a level id.")
+            levels = load_levels(str(hints_json))
+            for name, attr, count in (("intensity", "intensity_edges",
+                                       "n_intensity_levels"),
+                                      ("register", "register_edges",
+                                       "n_register_levels")):
+                spec = levels.get(name) or {}
+                if not spec.get("edges"):
+                    raise ValueError(
+                        f"{hints_json} has no fitted edges for hint {name!r} "
+                        f"(found: {sorted(levels)}). hints/build.py only fits "
+                        "them once the whole corpus is covered -- re-run it "
+                        "without --no-edges.")
+                setattr(self, attr, [float(e) for e in spec["edges"]])
+                setattr(self, count, len(spec["edges"]) + 1)
 
         # ``speaker_map`` is the same JSON structure used by 2_preprocess
         # (see speaker_map.py).  Preprocessed filelists no longer contain
@@ -107,6 +206,86 @@ class CodeDataset(Dataset):
     def speaker_ids(self) -> List[int]:
         return [it["sid"] for it in self.items]
 
+    def _load_hints(self, phone_ids_path: str, n_phone: int) -> Dict[str, object]:
+        """Bucketed hints for one item, plus per-channel dropout.
+
+        A missing or stale ``<base>.cond`` degrades to "no hints" (every level
+        ``0``) instead of raising -- one un-built clip must not kill a run -- but
+        the ``n_cond_missing`` / ``n_cond_stale`` counters make it visible
+        (``2_training.py`` prints them after the first epoch).
+
+        Dropout is applied here, and only for training items: each channel is
+        zeroed independently with its ``hint_dropout`` probability, and
+        ``hint_null_all`` zeroes all of them.  Level 0 is a real trained state,
+        which is what lets the model run without hints at inference.
+        """
+        out: Dict[str, object] = {
+            "hint_int": 0, "hint_reg": 0,
+            "hint_sem": None, "hint_sem_valid": False,
+            "hint_pitch": None, "hint_slot": None,
+        }
+        path = cond_path_for(phone_ids_path)
+        if not os.path.exists(path):
+            self.n_cond_missing += 1
+            return out
+        try:
+            cond = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            self.n_cond_stale += 1
+            return out
+
+        if "intensity" in cond:
+            out["hint_int"] = bucket_levels(
+                float(cond["intensity"].reshape(-1)[0]), self.intensity_edges)
+        if "register_st" in cond:
+            value = float(cond["register_st"].reshape(-1)[0])
+            if np.isfinite(value):     # a fully unvoiced clip has no register
+                out["hint_reg"] = bucket_levels(value, self.register_edges)
+        if "semantic" in cond:
+            vec = cond["semantic"].float().reshape(-1)
+            if torch.isfinite(vec).all() and float(vec.abs().sum()) > 0:
+                out["hint_sem"] = vec
+                out["hint_sem_valid"] = True
+
+        # Word-level span: only usable if it describes *this* phone sequence.
+        if "phone_word_idx" in cond:
+            if int(cond.get("n_phone", -1)) != int(n_phone):
+                self.n_cond_stale += 1
+            else:
+                word = cond["phone_word_idx"].long().reshape(-1)
+                if word.numel() == n_phone:
+                    pitch_w = word_pitch_levels(
+                        cond["pitch_word_st"].float(),
+                        cond["pitch_word_voiced"].bool(), self.pitch_edges)
+                    slot_w = slot_bucket(cond["word_slot_f"].float(),
+                                         self.n_slot_buckets)
+                    idx = word.numpy()
+                    out["hint_pitch"] = torch.as_tensor(pitch_w[idx].astype(np.int64))
+                    out["hint_slot"] = torch.as_tensor(slot_w[idx].astype(np.int64))
+
+        if self.is_train:
+            self._dropout_hints(out)
+        return out
+
+    def _dropout_hints(self, out: Dict[str, object]) -> None:
+        """Zero hint channels in-place (training only; see ``_load_hints``)."""
+        if self.hint_null_all > 0.0 and self.rng.random() < self.hint_null_all:
+            off = set(HINT_CHANNELS)
+        else:
+            off = {c for c in HINT_CHANNELS
+                   if self.hint_dropout.get(c, 0.0) > 0.0
+                   and self.rng.random() < self.hint_dropout[c]}
+        if "intensity" in off:
+            out["hint_int"] = 0
+        if "register" in off:
+            out["hint_reg"] = 0
+        if "semantic" in off:
+            out["hint_sem_valid"] = False
+        if "pitch" in off and out["hint_pitch"] is not None:
+            out["hint_pitch"] = torch.zeros_like(out["hint_pitch"])
+        if "timing" in off and out["hint_slot"] is not None:
+            out["hint_slot"] = torch.zeros_like(out["hint_slot"])
+
     def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor):
         """Cut the item to ``max_frames`` and report whether its end survived.
 
@@ -139,8 +318,18 @@ class CodeDataset(Dataset):
         pitch = pitch.reshape(pitch.shape[0], -1)
         spec, pitch, complete = self._crop_frames(spec, pitch)
 
-        if self.max_phone_length is not None and phone_ids.numel() > self.max_phone_length:
+        n_phone = int(phone_ids.numel())
+        if self.max_phone_length is not None and n_phone > self.max_phone_length:
             phone_ids = phone_ids[: self.max_phone_length]
+
+        hint: Dict[str, object] = {}
+        if self.hints:
+            hint = self._load_hints(item["phone_ids"], n_phone)
+            # Per-phone hint arrays must be cropped in lockstep with the phones,
+            # otherwise they would describe a different text than the model sees.
+            for key in ("hint_pitch", "hint_slot"):
+                if hint.get(key) is not None:
+                    hint[key] = hint[key][: phone_ids.numel()]
 
         fim_flag, prefix_len, mid_len = self._sample_fim(spec.shape[1])
         return {
@@ -152,6 +341,7 @@ class CodeDataset(Dataset):
             "fim": fim_flag,
             "fim_prefix_len": prefix_len,
             "fim_mid_len": mid_len,
+            **hint,
         }
 
     def _sample_fim(self, n_frames: int):
@@ -212,6 +402,22 @@ class CodeCollator:
         fim = torch.zeros(len(batch), dtype=torch.bool)
         fim_prefix_len = torch.zeros(len(batch), dtype=torch.long)
         fim_mid_len = torch.zeros(len(batch), dtype=torch.long)
+        # Conditioning hints (no-op unless the dataset emits them, i.e. unless
+        # transformer.hints is on).  Level 0 / hint_sem_valid=False is the
+        # trained "not provided" state, so padding with zeros is correct.
+        has_hints = "hint_int" in batch[0]
+        hint_int = hint_reg = hint_sem = hint_sem_valid = None
+        hint_pitch = hint_slot = None
+        if has_hints:
+            hint_int = torch.zeros(len(batch), dtype=torch.long)
+            hint_reg = torch.zeros(len(batch), dtype=torch.long)
+            hint_sem_valid = torch.zeros(len(batch), dtype=torch.bool)
+            dims = [int(x["hint_sem"].numel()) for x in batch
+                    if x.get("hint_sem") is not None]
+            hint_sem = torch.zeros(len(batch), dims[0] if dims else 0,
+                                   dtype=torch.float32)
+            hint_pitch = torch.zeros(len(batch), max_phone, dtype=torch.long)
+            hint_slot = torch.zeros(len(batch), max_phone, dtype=torch.long)
 
         for i, x in enumerate(batch):
             p = x["phone_ids"]
@@ -229,8 +435,20 @@ class CodeCollator:
             fim[i] = bool(x.get("fim", False))
             fim_prefix_len[i] = int(x.get("fim_prefix_len", 0))
             fim_mid_len[i] = int(x.get("fim_mid_len", 0))
+            if has_hints:
+                hint_int[i] = int(x.get("hint_int", 0))
+                hint_reg[i] = int(x.get("hint_reg", 0))
+                hint_sem_valid[i] = bool(x.get("hint_sem_valid", False))
+                sem = x.get("hint_sem")
+                if sem is not None and hint_sem.size(1) > 0:
+                    hint_sem[i, : sem.numel()] = sem.float()
+                pitch_hint = x.get("hint_pitch")
+                if pitch_hint is not None and pitch_hint.numel() > 0:
+                    n_h = min(int(pitch_hint.numel()), max_phone)
+                    hint_pitch[i, :n_h] = pitch_hint[:n_h].long()
+                    hint_slot[i, :n_h] = x["hint_slot"][:n_h].long()
 
-        return {
+        out = {
             "phone_ids": phone_ids,
             "phone_lengths": phone_lengths,
             "sid": sids,
@@ -246,3 +464,13 @@ class CodeCollator:
             "fim_prefix_len": fim_prefix_len,
             "fim_mid_len": fim_mid_len,
         }
+        if has_hints:
+            out.update({
+                "hint_int": hint_int,
+                "hint_reg": hint_reg,
+                "hint_sem": hint_sem,
+                "hint_sem_valid": hint_sem_valid,
+                "hint_pitch": hint_pitch,
+                "hint_slot": hint_slot,
+            })
+        return out

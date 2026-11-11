@@ -75,6 +75,24 @@ it moves the perceptual register. On 40 val clips the two agree closely
 (std 9.79 vs 9.91 st; no clip with mean/median > 1.3), so this is robustness, not
 a change of meaning.
 
+
+## Levels: which hints get fitted edges, and which do not
+
+`hints.json` carries equal-frequency `edges` for the two **absolute-scale** hints
+(`intensity`, `register`). That continuous -> level-id mapping is read by
+`dataset_codes.py`, `CodeTransformer` and an inference UI from the *same* file, so
+a level id cannot mean two different things.
+
+The **word-pitch** and **word-timing** hints deliberately do *not* use fitted
+edges. Word pitch is in semitones relative to the utterance's voiced median
+(`DEFAULT_PITCH_EDGES`: +-2 st cuts, i.e. 7 voiced bins, plus one explicit
+"unvoiced" bin) and word timing is a log2 bucket of the word's duration in code
+frames (`DEFAULT_SLOT_BUCKETS` = 8). Both are defined by their units, and a UI
+has to be able to say "raise this word a major third" or "make it 12 frames" and
+have that mean the same thing in every corpus -- quantile edges would renumber
+the bins per corpus and make a stored level meaningless outside it. See
+`hints/levels.py`.
+
 ## Why the level counts are *not* baked into the tensors
 
 `.cond` stores **continuous** values; `build.py` only writes bin *edges* into
@@ -191,4 +209,54 @@ level = fe.hint_level(float(rec["intensity"]),
 `os.replace`), so a killed run never leaves a truncated tensor, and
 `--skip-existing` reuses a `.cond` only when it already holds every requested
 key.
+
+
+## Word-level hints (`--words`): the aligner pass
+
+The three clip-level hints need no alignment. The **word** fields
+(`phone_word_idx`, `word_start_f`, `word_slot_f`, `pitch_word_st`,
+`pitch_word_voiced`) do, so they are a separate, optional pass:
+
+```bash
+python hints/build.py \
+    --filelist data/genshin_plus_extras/train_stage2.txt \
+    --wave-dir data/genshin_full_stage1 \
+    --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
+    --hints intensity,register,semantic \
+    --words --device cuda:0 --workers 8
+```
+
+- It runs `FeatureExtractor.extract` per clip: the **forced aligner is given the
+  transcript**, so no ASR runs. `--source-filelist` is therefore mandatory (and
+  its audio is also the intensity fallback).
+- **Sequential on one GPU** (`--workers` is ignored, with a printed note); the
+  aligner + RMVPE are single models. Measured on a 5060 Ti: **~5 clips/s once
+  warm** (the first clip pays ~1.2 s for the caches), so the 151 k-clip
+  `data/genshin_plus_extras` corpus is ~9-20 h. Shard by filelist if you want
+  several GPUs.
+- Needs `<base>.wave` (or the source audio via `--audio-fallback`) because the
+  alignment runs on audio.
+- **Stale clips are dropped, not guessed.** The word boundaries are mapped onto
+  the *stored* `phone_ids` by re-running the transcript's phonemization
+  (`FeatureExtractor.word_index_for_phones`): if the phones do not reproduce the
+  stored ids, the clip's `phone_ids` predate the current phonemizer/dictionary
+  and the pass skips it, printing the count and the remedy
+  (`2_preprocess.py --only phones`, then re-run). Measured on 200 Genshin clips:
+  197 reproduce exactly, 3 differ by 1-2 phones.
+- Why not just concatenate the aligner's per-word `phone_ids`? The g2pen
+  tokenizer merges phones across word boundaries, so a sentence tokenizes to 44
+  tokens where the same words tokenized individually give 71 -- and even
+  incremental prefix counts are not monotonic (43 -> 42 when one word merges
+  into the previous token). Hence the character-offset mapping.
+- `--force` (with `--skip-existing`) redoes the word fields for clips that
+  already have them; a `--words`-only re-run merges into the existing `.cond`
+  instead of replacing it, so the clip-level hints survive.
+- `hints.json` gains a `words` block (aligner id, `code_fps`, the pitch edges and
+  slot-bucket count) plus `coverage.with_words` / `word_phone_mismatch` /
+  `word_failures`.
+
+Slots are start-to-start in **code frames** (25 Hz), so they sum to the clip
+length; `pitch_word_st` is each word's voiced-mean f0 in semitones relative to
+the utterance's median, NaN (plus `pitch_word_voiced=False`) when the word has no
+voiced frames.
 
