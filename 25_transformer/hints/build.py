@@ -838,7 +838,7 @@ def main(argv=None) -> int:
                 wave = load_audio_48k(r["wave"])
                 data16 = librosa.resample(wave, orig_sr=WAVE_SR,
                                           target_sr=16000, res_type="soxr_hq")
-                items, _ = fe.extract(data16, transcription=r["text"])
+                word_items, _ = fe.extract(data16, transcription=r["text"])
                 # Map the words onto the *stored* phone sequence.  A corpus built
                 # with `--phones_from transcript` phonemizes in one call, so the
                 # alignment's per-word tokenization does not concatenate to it;
@@ -846,7 +846,7 @@ def main(argv=None) -> int:
                 # the phones themselves disagree, i.e. stale phone_ids).
                 stored_ids = torch.load(r["phone_ids"], map_location="cpu",
                                         weights_only=True, mmap=True).reshape(-1)
-                word_idx = fe.word_index_for_phones(stored_ids, items,
+                word_idx = fe.word_index_for_phones(stored_ids, word_items,
                                                    text=r["text"])
             except Exception as exc:
                 n_word_failed += 1
@@ -858,7 +858,7 @@ def main(argv=None) -> int:
                 flush(r)
                 continue
             got = fe.hint_words(
-                items, total_seconds=len(wave) / float(WAVE_SR),
+                word_items, total_seconds=len(wave) / float(WAVE_SR),
                 code_fps=code_fps, word_index=word_idx)
             got["n_phone"] = int(len(word_idx))
             words[r["base"]] = got

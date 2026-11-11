@@ -42,7 +42,13 @@
 #          (train.fim_probe_batches).  One new parameter table: new exp_name +
 #          --transfer_from, still no re-preprocessing.
 #          - Also using expanded corpus.
-exp_name: transformer_v0.7_fim2
+# v0.8 - conditioning hints: five optional side channels (intensity, register,
+#          sentence semantic, per-word pitch, per-word timing) built by
+#          hints/build.py into <base>.cond files, each bucketed with the edges in
+#          transformer.hints_json.  New parameters (+0.24 %), so a fresh
+#          exp_name + --transfer_from (see HINTS_PLAN.md).  No re-preprocessing:
+#          the codes are unchanged.  Watch `val_hint_gap` / `val_loss_nohint`.
+exp_name: transformer_v0.8
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -77,11 +83,11 @@ transformer:
   #    large the model is leaning on the oracle.
   #  * enabling it changes the parameter set, so it needs a fresh `exp_name` +
   #    `--transfer_from` (new tables load as untrained), not `--resume_from`.
-  hints: false
+  hints: true
   # Path to the hints.json written by hints/build.py (its `levels` block holds
   # the equal-frequency edges).  The dataset and the model read the *same* file,
   # so a level id cannot mean two different things.  Relative to the cwd.
-  hints_json: hints.json
+  hints_json: data/genshin_plus_extras/hints.json
   # Also feed the clip-level channels (intensity + semantic) to the decoder, as
   # a constant added to every column like spk_emb.  Off = encoder-only ablation.
   decoder_hints: true
@@ -268,8 +274,9 @@ gen:
 
 # -------------------------------------------------------------- train ----
 train:
-  batch_size: 48
-  lr: 1e-4
+  # 48 on 5090, 24 on 5060Ti
+  batch_size: 24
+  lr: 5e-5
   betas:
   - 0.9
   - 0.98
@@ -406,7 +413,7 @@ train:
   # audio for TensorBoard. Set to null to disable audio logging.
   # This is a *stage-1* run, so it lives in checkpoints_stage1/ (stage 2 writes
   # to checkpoints_stage2/ -- see AGENTS.md §4/§6).
-  generator_checkpoint: base_v0.7_last.ckpt
+  generator_checkpoint: checkpoints_stage1/base_v0.7/last.ckpt
   # Voicing decision threshold used by Generator.infer_from_codes when no
   # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
   pitch_uv_threshold: 0.5

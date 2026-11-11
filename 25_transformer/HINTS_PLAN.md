@@ -141,7 +141,12 @@ therefore be written twice — `coverage.clips_written` counts **files**,
 | parameters, `hints: true` | 136.28 M (**+0.24 %**) |
 | oracle probe (2-step smoke run) | `val_loss_nohint = 4.5637`, `val_hint_gap = +0.0054` — the tables are alive but barely used at step 2, which is the expected starting point |
 | `.cond` size | **4–10 KB**/clip (tensors are a few hundred bytes; the rest is `torch.save` container overhead) |
-| `.cond` total | 400 clips = 1.94 MB; **≈ 0.74 GB** for the 151 653-clip corpus |
+| `.cond` corpus (final) | **151 653 files, 0.74 GB**, avg 4.8 KB, max 9.7 KB — no file over 1 MB |
+| intensity / semantic | 151 653 / 151 653 (100 %; 39 394 via the source-audio fallback) |
+| register | 112 231 / 151 653 (74 %) — VCTK + Expresso have no stage-1 `.f0` |
+| word fields | 147 991 / 151 653 (**97.6 %**); 3 546 stale `phone_ids` + 116 aligner failures keep their clip-level hints only |
+| level edges | intensity 8 levels from 151 653 values; register 5 levels from 112 231 — corpus-wide, not a subset |
+| codes ↔ checkpoint | re-encoded 2 clips with `checkpoints_stage1/base_v0.7/last.ckpt`: `spec_codes` and `pitch_codes` **bit-identical** to the corpus |
 | word pass throughput | ~5 clips/s documented on the full corpus; 13–22 it/s measured on short warm clips ⇒ ~8–9 h |
 | stale `phone_ids` rate | 3/200 Genshin clips (1.5 %) — dropped, not guessed |
 | tokenization agreement | 200/200 stored tensors; 44 vs 44 and 26 vs 26 on the end-to-end rerun |
@@ -174,16 +179,18 @@ therefore be written twice — `coverage.clips_written` counts **files**,
 
 - **Code:** committed (`d5a69c2`); `test_hints.py` 59 PASS, `test_fim.py` and
   `test_phonemize.py` green, `hints: false` is bit-identical to pre-v0.8.
-- **Corpus:** `data/*_stage2/` holds **no `.cond` files yet**; the word pass is
-  running (~8–9 h). It writes `hints.json` next to the first `--filelist`, i.e.
-  `data/genshin_plus_extras/hints.json`, when it finishes. Progress:
-
-  ```bash
-  ls data/*_stage2/*.cond | wc -l     # grows in waves of 2000, then per clip
-  ```
-- **Config:** `transformer.hints: false` on purpose — a hints model needs the
-  `.cond` corpus *and* a fresh `exp_name` (new parameter tables).
-- **Disk:** `/mnt/data` at 89 % (411 GB free); the pass itself costs ~0.74 GB.
+- **Corpus: done.** 151 653 `.cond` files (0.74 GB) beside the stage-2 tensors,
+  with `hints.json` fitted on the whole corpus. Verified on the real data: 40/40
+  sampled clips have `n_phone` matching their `phone_ids`, unit-norm semantics
+  and self-consistent word fields (slots chain into the clip length, NaN exactly
+  where unvoiced); the val dataset yields non-zero levels for 60/60 sampled
+  items. Rates and the two tolerated failure classes are in §5.
+- **Config: flipped.** `exp_name: transformer_v0.8`, `hints: true`,
+  `hints_json: data/genshin_plus_extras/hints.json`, and
+  `train.generator_checkpoint` now points at
+  `checkpoints_stage1/base_v0.7/last.ckpt` — whose codes were verified
+  bit-identical to the corpus, so sampled audio is in the right voice.
+- **Disk:** `/mnt/data` at 90 % (410 GB free); the hints cost 0.74 GB.
 
 ---
 
