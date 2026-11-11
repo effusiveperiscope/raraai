@@ -221,6 +221,44 @@ The listening queue has **93 low/mid-labeled candidates**:
 default because breathiness can look like effort. Use `--keep-whisper` to
 include them.
 
+### Mining the unlabeled `diverse_full_linux.txt` (Genshin/MLP)
+
+`mine_high_intensity.py` ranks already-labeled clips. To discover **new**
+high-intensity material, `mine_diverse.py` scans the 204k-row unlabeled pool:
+
+* filters to Genshin/MLP (106k Genshin + 40k MLP)
+* removes stems already in `data/v0.5` → **143,460 eligible clips** (60 missing)
+* samples per speaker (cap 100) and per corpus (18k Genshin / 12k MLP; MLP has
+  8,999 after the speaker cap)
+* extracts tier-1 features, cached to `dsp_features_diverse.csv`
+* scores with `clf6`/`clf7` trained on `dsp_features_fixed.csv`
+* ranks by `rank(clf6) + rank(clf7) + rank(rms_dbfs)`
+* selects the top 200 with at most 3 clips per speaker
+
+```bash
+python mine_diverse.py \
+    --labeled-csv dsp_features_fixed.csv \
+    --pool diverse_full_linux.txt \
+    --limit 30000 --max-per-speaker 100 \
+    --corpus-limits genshin:18000,mlp:12000 \
+    --workers 6 --top 200 --max-per-speaker-final 3 \
+    --cache dsp_features_diverse.csv \
+    --classifiers-out checkpoints/dsp_intensity/high_clf_fixed.pkl \
+    --model checkpoints/dsp_intensity/tier1_fixed.pkl \
+    --out-csv report/diverse_high_intensity_candidates.csv \
+    --all-out report/diverse_high_intensity_all.csv
+```
+
+The queue is `report/diverse_high_intensity_candidates.csv` and
+`report/diverse_high_intensity.html`. The current run scored 26,999 clips and
+selected **200 candidates** (152 `A_clf7`, 46 `B_clf6`, 2 `C_top`; **105
+Genshin / 95 MLP**, 135 speakers). Loudness is ranked **within corpus** so
+Genshin's higher recording level does not crowd out MLP. Top examples include
+Countess Coloratura singing, Yona shouting “Help!”, Mean Twilight Sparkle
+“You ruined everything!”, Trixie “Fine!”, Klee, Kiara, and Matilda shouting
+“Flowers!”. Use `--limit 0` to scan the full eligible pool (much longer); the
+feature cache makes re-ranking cheap.
+
 ### Interactive re-labeling
 
 ```bash
@@ -229,20 +267,81 @@ python make_label_report.py \
     --title "High-intensity candidates (fixed v0.5)" \
     --model checkpoints/dsp_intensity/tier1_fixed.pkl \
     --out report/high_intensity_candidates.html
+
+# unlabeled pool
+python make_label_report.py \
+    --csv report/diverse_high_intensity_candidates.csv \
+    --title "Unlabeled high-intensity candidates (Genshin/MLP)" \
+    --model checkpoints/dsp_intensity/tier1_fixed.pkl \
+    --out report/diverse_high_intensity.html
 ```
 
 The generated `report/high_intensity_candidates.html` contains 93 candidates
-(14 A, 40 C, 39 B). Click **1-9** on each card; selections are stored in the
-browser (`localStorage`, keyed by path) and **Export labels CSV** downloads
-`path,new_label,note,current_labels,suggested,corpus,speaker,reason`. Rows you
-skip are included with a blank `new_label`, so you can see what is left. Serve
-it over `python -m http.server -d report 8080` if your browser restricts
-`localStorage` on `file://`.
+(14 A, 40 C, 39 B). For the unlabeled queue the cards show `current ?` and no
+suggested label; pick 1-9 from scratch. Click **1-9** on each card; selections
+are stored in the browser (`localStorage`, keyed by path) and **Export labels
+CSV** downloads `path,new_label,note,current_labels,suggested,corpus,speaker,reason`.
+Rows you skip are included with a blank `new_label`, so you can see what is
+left. Serve the pages over `python -m http.server -d report 8080` if your
+browser restricts `localStorage` on `file://`.
 
-After re-labeling, merge the exported labels, deduplicate again, and retrain
-`dsp_intensity.py --features-csv dsp_features_fixed.csv --dedupe`. The high-end
-MAE should improve as labels 7-9 become less rare; if it does not, the next step
-is an ordinal/quantile model rather than more features.
+### Re-fitting after re-labeling
+
+The report exports `relabeled_diverse_high_intensity_candidates.csv`. Merge it
+into the feature cache and retrain:
+
+```bash
+python merge_relabels.py \
+    --labels relabeled_diverse_high_intensity_candidates.csv \
+    --features dsp_features_diverse.csv \
+    --base dsp_features_fixed.csv \
+    --out dsp_features_augmented.csv \
+    --val-fraction 0.2
+
+python dsp_intensity.py \
+    --features-csv dsp_features_augmented.csv \
+    --dedupe --tier 1 --cv group --cv-splits train --fit-gate \
+    --save checkpoints/dsp_intensity/tier1_augmented.pkl \
+    --report report/dsp_tier1_augmented_metrics.json
+```
+
+`--val-fraction 0.2` assigns whole speakers to val (43 of the 200 clips) so the
+new high labels are represented in validation; use `0` to train on all 200.
+
+The 200 labels were **4:1, 5:20, 6:94, 7:59, 8:20, 9:6**. The merged table has
+**4,715 rows**, with **173 clips at label ≥ 7** (was 88) and **37 at label ≥ 8**
+(was 11). Results:
+
+| model | pooled r | MAE | within-speaker r |
+|---|---|---|---|
+| pre-augmentation, old val (449) | 0.708 | 0.575 | 0.536 |
+| augmented, old val (449) | 0.700 | 0.585 | 0.529 |
+| pre-augmentation, new val (43) | 0.422 | 0.650 | 0.331 |
+| **augmented, new val (43)** | **0.390** | **0.625** | **0.507** |
+
+High-end on the new val: label-≥7 MAE **1.35 → 1.24**, label-≥8 MAE **1.85 →
+1.53**. Absolute 8–9 is still compressed (mean bias about −1.5), so the next
+improvement is more 8–9 labels or an ordinal/quantile model, not more features.
+
+To mine the next batch, point `mine_diverse.py` at the augmented cache:
+
+```bash
+python mine_diverse.py --labeled-csv dsp_features_augmented.csv \
+    --pool diverse_full_linux.txt --limit 30000 --max-per-speaker 100 \
+    --corpus-limits genshin:18000,mlp:12000 --workers 6 \
+    --top 200 --max-per-speaker-final 3 \
+    --cache dsp_features_diverse.csv \
+    --classifiers-out checkpoints/dsp_intensity/high_clf_augmented.pkl \
+    --model checkpoints/dsp_intensity/tier1_augmented.pkl \
+    --out-csv report/diverse_high_intensity_candidates_v2.csv \
+    --all-out report/diverse_high_intensity_all_v2.csv
+```
+
+The 200 newly labeled stems are excluded automatically, and the cached features
+make the re-rank fast. The v2 queue is
+`report/diverse_high_intensity_candidates_v2.csv` /
+`report/diverse_high_intensity_v2.html` (200 candidates: **117 MLP / 83
+Genshin**, 140 speakers).
 
 
 ## Training notes (config/base.yaml)

@@ -6,3 +6,5 @@ eval_sets
 annotations
 dsp_features.csv
 dsp_features_fixed.csv
+dsp_features_diverse.csv
+dsp_features_augmented.csv

@@ -35,6 +35,9 @@ REASON = {
     'A_low_clf7': '7+ model / low label',
     'C_borderline5': 'borderline 5',
     'B_low_clf6': '6+ model / low label',
+    'A_clf7': '7+ model',
+    'B_clf6': '6+ model',
+    'C_top': 'top score',
 }
 
 

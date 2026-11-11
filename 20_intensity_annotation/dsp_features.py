@@ -74,7 +74,7 @@ def load_wave(path, sr=SR):
         wave = torch.load(path, map_location='cpu', weights_only=False)
         wave = np.asarray(wave, dtype=np.float32).squeeze()
     else:
-        wave, _ = librosa.load(path, sr=sr, mono=True)
+        wave, _ = librosa.load(path, sr=sr, mono=True, res_type='fft')
         wave = np.asarray(wave, dtype=np.float32)
     if wave.ndim > 1:
         wave = wave.mean(axis=0)
