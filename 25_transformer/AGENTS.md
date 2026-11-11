@@ -1103,6 +1103,48 @@ a *batch-independent* per-step loop.
   *from the checkpoint*, so `_apply_muon_settings` re-applies the configured
   value in `on_train_start` and prints when it overrides the checkpoint's.
 
+### Conditioning-hint tensors (stage 2, `.cond`)
+
+`hints/build.py` writes a sibling `<base>.cond` next to each `<base>.phone_ids`,
+from artefacts that already exist on disk -- no source audio, no ASR and no
+aligner:
+
+```
+<wave_dir>/<base>.wave    48 kHz waveform (1_preprocess.py)
+<wave_dir>/<base>.f0      100 Hz f0 in Hz, 0 = unvoiced (1_preprocess.py)
+filelists_2/*.txt         path|sid|transcript   (sentence vector only)
+```
+
+Contents, all **continuous** (the dataset buckets at load time, so the number of
+levels is a config change and never a re-run):
+
+| key | type | meaning |
+|---|---|---|
+| `version` | int | 1 |
+| `n_phone` | int | `phone_ids.numel()`, the staleness anchor |
+| `intensity` | float32(1) | calibrated + whisper-gated DSP score, 1..9 |
+| `register_st` | float32(1) | voiced-median f0, semitones re: 100 Hz |
+| `semantic` | float16(384) | bge-small-en-v1.5 CLS embedding, L2-normalised |
+
+`hints.json` (next to the first `--filelist`, or `--hints-json`) carries the
+provenance (DSP tier/calibration/gate, semantic model id), coverage, and the
+**level edges** per hint. They are equal-frequency quantiles of the corpus on
+purpose: the DSP intensity regression is compressed (measured on the upstream
+val slice, `dsp = 2.07 + 0.512 * label`, pred std 0.71 vs label std 0.93), so
+fixed-width bins on the 1-9 scale would leave most of the level table unused.
+
+`hints/` is a port of `/mnt/data/Code/raraai/20_intensity_annotation` and is
+**offline only** -- nothing that trains or runs stage 2 imports it; they read the
+tensors. Two deviations from upstream, both in `hints/README.md`: the shipped
+model was re-fitted under scikit-learn 1.9 (the upstream pkl was written by
+1.7.2 and no longer unpickles), and the register hint uses the median voiced f0.
+
+Not produced here: word-level `pitch_word` / `phone_word_idx` / `word_start_f` /
+`word_slot_f`. Those need forced-alignment word timestamps (`features.align`;
+the `--phones_from transcript` path has no word boundaries at all) and are a
+separate pass.
+
+
 ---
 
 ## 5. Conventions
@@ -1454,6 +1496,26 @@ a *batch-independent* per-step loop.
     - A missing `train.generator_checkpoint` is now merely "audio decode off"
       (printed on the first `setup()`), never a resume failure.
 
+20. **`.cond` hint tensors are offline artefacts with two portability traps.**
+    - `hints/models/dsp_intensity/*.pkl` is a joblib pickle of a scikit-learn
+      estimator, so it is **bound to the sklearn version that wrote it**: the
+      upstream file (1.7.2) fails to load under 1.9.x with `No module named
+      '_loss'`. The shipped copy was re-fitted under 1.9.1 and reproduces the
+      published metrics; re-fit after any sklearn bump (`hints/README.md` has
+      the command, `hints/model_io.py` turns the failure into that message).
+    - Keep `hints/` importable under its **original top-level module names**
+      (`dsp_features`, `dsp_intensity`, `whisper_gate`): the pickle stores those
+      module paths. `hints/__init__.ensure_importable()` puts the directory on
+      `sys.path` for exactly that reason — do not "tidy" it into
+      `hints.dsp_intensity` without re-pickling the model.
+    - The DSP feature set puts `alpha = -120 dB` on a digitally silent frame and
+      clip features are *frame means*, so a clip that is mostly digital silence
+      gets an unstable intensity (up to ~0.5 away from the upstream cache, whose
+      `.pt` files carry a noise floor). It only affects mostly-silent clips,
+      which `2_preprocess.py` drops by default; `hints/verify_dsp.py` reports
+      the clean and silent groups separately instead of averaging them.
+
+
 ---
 
 ## 7. Useful commands
@@ -1521,6 +1583,18 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 --checkpoint checkpoints_stage1/base_v0.4/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json
 python 2_training.py --config configs/transformer.yaml
+
+# Conditioning hints for stage 2: one <base>.cond next to each phone_ids
+# (intensity + register from the stage-1 tensors; add `semantic` to the --hints
+# list, plus --source-filelist, to also store the bge sentence vector).
+python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+    --wave-dir data/genshin_full_stage1 --hints intensity,register --workers 8
+# Acceptance test of the ported DSP pipeline against the upstream feature cache
+# (exits non-zero if the intensity hint moves on clips without digital silence).
+python hints/verify_dsp.py \
+    --csv /mnt/data/Code/raraai/20_intensity_annotation/dsp_features_augmented.csv \
+    --wave-dir data/genshin_full_stage1 --n 60
+
 
 # Stage 2, one tensor stage at a time (see §3): re-phonemize only
 python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \

@@ -52,3 +52,15 @@ tensorboardX==2.6.5
 # --- misc -------------------------------------------------------------------
 datatia==0.5.0            # dataset_ac
 PyQt5==5.15.11            # ultimate_xc (imported for its excepthook side effect)
+
+# --- optional: offline conditioning-hint extraction (`hints/`, stage 2) ------
+# Only needed to (re)BUILD <base>.cond tensors for a corpus -- training and
+# inference read the tensors and never import this package. scikit-learn is
+# version-sensitive: hints/models/dsp_intensity/tier1_augmented.pkl is a joblib
+# pickle, and one written by 1.7.x fails on 1.9.x with `No module named
+# '_loss'`. That is exactly why the shipped model was re-fitted under the
+# versions below (see hints/README.md); re-fit again if you bump sklearn.
+scikit-learn==1.9.1       # hints/dsp_intensity.py (HistGradientBoostingRegressor)
+joblib==1.6.0             # model (de)serialisation
+pandas==3.0.6             # DSPIntensityModel.predict takes a DataFrame
+parselmouth==0.4.7        # Praat f0/voicing for the tier-1 DSP features
