@@ -125,6 +125,32 @@ def test_one_stop(fe) -> None:
           and torch.equal(back["intensity"], rec["intensity"]))
 
 
+def test_cond_size_guard() -> None:
+    print("write_cond: storage cloning + size ceiling")
+    tmp = tempfile.mkdtemp()
+    # A row of a batched array must not drag its storage into the file:
+    # torch.save writes the whole storage, which is what made every .cond
+    # 116 MB on the 151k-clip corpus (AGENTS.md footgun #20).
+    big = torch.zeros(20000, 384, dtype=torch.float16)      # 15 MB storage
+    path = os.path.join(tmp, "row.cond")
+    hb.write_cond(path, {"version": 1, "semantic": big[5]})
+    size = os.path.getsize(path)
+    check("a row view is cloned, not serialised with its storage",
+          size < 64 * 1024, f"{size} B")
+    back = torch.load(path, map_location="cpu", weights_only=True)
+    check("the cloned row's values survive", torch.equal(back["semantic"], big[5]))
+    # And a genuinely oversized record is refused instead of filling the disk.
+    path = os.path.join(tmp, "too_big.cond")
+    try:
+        hb.write_cond(path, {"version": 1, "semantic": big})
+
+        check("oversized .cond is refused", False, "no exception")
+    except RuntimeError as exc:
+        check("oversized .cond is refused", "refusing to write" in str(exc))
+    check("the refused write leaves no file behind",
+          not os.path.exists(path) and not os.path.exists(path + ".tmp"))
+
+
 def test_hints_json() -> None:
     print("hints.json edges")
     tmp = tempfile.mkdtemp()
@@ -451,6 +477,7 @@ def main() -> int:
     test_word_index(fe)
     test_one_stop(fe)
     test_hints_json()
+    test_cond_size_guard()
     made = test_hints_dataset()
     if made is not None:
         ds, filelist, hints_json, batch = made

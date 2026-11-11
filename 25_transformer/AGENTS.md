@@ -1603,7 +1603,7 @@ Wiring:
     - A missing `train.generator_checkpoint` is now merely "audio decode off"
       (printed on the first `setup()`), never a resume failure.
 
-20. **`.cond` hint tensors are offline artefacts with two portability traps.**
+20. **`.cond` hint tensors are offline artefacts with three portability traps.**
     - `hints/models/dsp_intensity/*.pkl` is a joblib pickle of a scikit-learn
       estimator, so it is **bound to the sklearn version that wrote it**: the
       upstream file (1.7.2) fails to load under 1.9.x with `No module named
@@ -1621,6 +1621,23 @@ Wiring:
       `.pt` files carry a noise floor). It only affects mostly-silent clips,
       which `2_preprocess.py` drops by default; `hints/verify_dsp.py` reports
       the clean and silent groups separately instead of averaging them.
+    - **`torch.save` serialises a tensor's whole *storage*, not its view.** The
+      clip-level hints are computed in batch: `encode_semantics` returns one
+      `(n_clips, 384)` float16 matrix, and the builder used to store
+      `embs[i]` — a row view. Every `.cond` then carried the *entire corpus*
+      matrix: **116.5 MB per file** on the 151 653-clip corpus (≈0.3 MB at 400
+      clips, 6 KB at 8 clips, which is why small fixtures looked fine), so
+      3 784 clips filled a 440 GB volume in minutes and the run died with the
+      disk at 100 %. `hints/build.py:write_cond` now (a) `.detach().clone()`s
+      every tensor, which gives it a minimal storage, and (b) refuses to write
+      anything over `MAX_COND_BYTES` (4 MB) with a message naming the file, so
+      a recurrence is a loud failure instead of a full disk. Measured after the
+      fix: 400 clips = 1.94 MB total, max 7.84 KB; the whole corpus ≈ 0.74 GB,
+      and a healthy per-clip file is 4-10 KB (tensors are a few hundred bytes,
+      the rest is container overhead — ~1 KB per tensor). Any builder that
+      stores a slice of a batched array (`semantic`, and anything added later)
+      must clone it, and the same trap applies to `features.write_hints` —
+      both go through `write_cond`, so they are covered.
 
 21. **`transformer.hints` changes the parameter set, and `hints_json` is part of
     the checkpoint's contract.** The hint embeddings (`net.int_emb`,

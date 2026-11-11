@@ -385,10 +385,37 @@ def cond_has(path: str, keys: Sequence[str]) -> bool:
     return all(k in rec for k in keys)
 
 
+#: Sanity ceiling for one ``.cond``.  A real file is a few hundred bytes of
+#: tensors plus ``torch.save``'s container overhead (~10 KB measured); the
+#: largest legitimate clip (455 phones) is ~8 KB.  Anything bigger means a
+#: tensor is still a view of a large storage -- see `write_cond`.
+MAX_COND_BYTES = 4 << 20
+
+
 def write_cond(path: str, record: dict) -> None:
-    """Atomic ``torch.save`` (a killed run never leaves a truncated ``.cond``)."""
+    """Atomic ``torch.save`` (a killed run never leaves a truncated ``.cond``).
+
+    Every tensor is cloned first, because ``torch.save`` serialises a tensor's
+    **whole underlying storage**, not just the view: storing one clip's
+    384-d ``semantic`` embedding as a row of the batched ``(n_clips, 384)``
+    matrix wrote the *entire corpus* matrix into every file -- 116.5 MB per
+    ``.cond`` on the 151 653-clip corpus (``440 GB`` for the first 3.8 k clips,
+    which filled the disk) instead of 8 KB.  ``clone`` gives each tensor its
+    own minimal storage; the check below turns any recurrence into a loud
+    failure instead of a full volume.
+    """
+    record = {k: (v.detach().clone() if isinstance(v, torch.Tensor) else v)
+              for k, v in record.items()}
     tmp = path + ".tmp"
     torch.save(record, tmp)
+    size = os.path.getsize(tmp)
+    if size > MAX_COND_BYTES:
+        os.remove(tmp)
+        raise RuntimeError(
+            f"{os.path.basename(path)}: refusing to write a "
+            f"{size / 1e6:.1f} MB .cond (limit {MAX_COND_BYTES / 1e6:.0f} MB); "
+            "a hint tensor is sharing a large storage, not owning its own "
+            f"({path}).")
     os.replace(tmp, path)
 
 
@@ -652,7 +679,10 @@ def main(argv=None) -> int:
                                     args.semantic_model, args.device,
                                     args.semantic_batch)
             for i, (base, _) in enumerate(pairs):
-                semantic[base] = embs[i]
+                # ``clone``: ``embs`` is the corpus-wide (n, 384) matrix, so a
+                # row shares its storage and `torch.save` would write the whole
+                # matrix into this clip's ``.cond`` (see `write_cond`).
+                semantic[base] = embs[i].clone()
     # --- per-word pitch/timing (forced alignment, sequential) --------------- #
     # ``FeatureExtractor.extract`` aligns the clip against the *given*
     # transcript (no ASR) and returns per-word start/end + voiced f0, i.e. the

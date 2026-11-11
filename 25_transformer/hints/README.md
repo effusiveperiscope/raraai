@@ -159,11 +159,11 @@ the problem away.
 provenance (`dsp.tier`, `dsp.cal`, gate on/off, semantic model id), coverage, and
 the level edges per hint.
 
-**Not produced here:** `pitch_word`, `phone_word_idx`, `word_start_f`,
-`word_slot_f`. Word-level timing and word pitch need forced-alignment word
-timestamps (`features.align`); the `--phones_from transcript` path has no word
-boundaries at all. That is a separate pass and is intentionally not run by the
-tooling here.
+**Not produced by the default run:** `pitch_word`, `phone_word_idx`,
+`word_start_f`, `word_slot_f`. Word-level timing and word pitch need
+forced-alignment word timestamps, so they come from the separate `--words`
+pass (see below), which merges into the existing `.cond` and leaves the
+clip-level fields alone.
 
 ## Commands
 
@@ -209,6 +209,16 @@ level = fe.hint_level(float(rec["intensity"]),
 `os.replace`), so a killed run never leaves a truncated tensor, and
 `--skip-existing` reuses a `.cond` only when it already holds every requested
 key.
+
+A healthy `.cond` is **4-10 KB** (a few hundred bytes of tensors; the rest is
+`torch.save`'s container overhead). `write_cond` enforces that twice: it clones
+every tensor and it refuses to write anything over 4 MB. The clone matters
+because `torch.save` serialises a tensor's **whole underlying storage**, so
+storing a *row* of a batched array writes the entire array -- one clip's
+`semantic` taken as a row of the corpus-wide `(n_clips, 384)` matrix made every
+`.cond` 116 MB on the 151 k-clip corpus (440 GB for 3 784 clips, which filled the
+volume) instead of 8 KB. Measured after the fix: 400 clips = 1.94 MB total, max
+7.84 KB, i.e. ~0.74 GB for the full corpus.
 
 
 ## Word-level hints (`--words`): the aligner pass
