@@ -1,10 +1,18 @@
 # Stage-2 conditioning hints — plan and status
 
-**Status (2026-11-11):** M0, M1, M2, M3 (the oracle probe) and M4 are done and
-validated; M3b (per-channel probes) and M5 (inference ergonomics) are not
-started. The code is committed `d5a69c2`. **No corpus has `.cond` files yet** —
-the word-level pass (`hints/build.py --words`, ~8–9 h) is running, and until it
-finishes `transformer.hints` cannot be switched on for a real run.
+**Status (2026-11-12):** M0–M4 are done and validated, the corpus is built
+(151 653 `.cond`, §7) and the v0.8 run has been evaluated. **v0.8 regressed**
+(free-running WER 42 % vs 15 % for the checkpoint it was warm-started from;
+§8.6), so v0.9 replaces it: relative register, zero-initialised hint tables and
+`fim_rate: 0.2`. M3b (per-channel probes) and M5 (inference ergonomics) are not
+started.
+
+**Register objection — resolved in v0.9.** The absolute register channel was
+~79 % between-speaker variance (ICC(1) = 0.794), i.e. redundant with `spk_emb`
+and confounded with it. It is now bucketed on the **deviation from the
+speaker's own median** (§8.5), which is orthogonal to `sid` by construction.
+The ablations that would *confirm* the benefit are still deferred — they need a
+coherent model.
 
 Deep reference material lives in `AGENTS.md` (§4 "Conditioning hints",
 §6.20/§6.21) and `hints/README.md`; this file is the plan, the status, and the
@@ -46,7 +54,7 @@ Five additive side channels, all owned by `CodeTransformer`:
 | channel | levels | source | applied to |
 |---|---|---|---|
 | intensity | `n_levels` corpus quantiles | DSP regressor on the 48 kHz wave (calibrated + whisper-gated, 1–9) | encoder + decoder (constant per clip) |
-| register | `n_levels` corpus quantiles | voiced-median f0, semitones re: 100 Hz | encoder (constant per clip) |
+| register | `n_levels` corpus quantiles | voiced-median f0, semitones re: 100 Hz — **absolute; under review, see §8.5** | encoder (constant per clip) |
 | semantic | 384-d continuous | `bge-small-en-v1.5` CLS, L2-normalised | encoder + decoder (`Linear(384, H)`) |
 | word pitch | 7 voiced bins + 1 unvoiced | word's voiced-mean f0, semitones re: the utterance's voiced median | encoder, per phone |
 | word timing | 8 log2 buckets | word's start-to-start duration in code frames | encoder, per phone |
@@ -66,6 +74,12 @@ Decisions worth remembering:
   The former are absolute scales (equal-frequency edges make the table usable
   across corpora); the latter are relative or physical, and an inference UI has
   to be able to say "a major third" and mean it.
+- **Register is the one channel whose *scale* is under review.** It is absolute
+  (semitones re 100 Hz) and therefore largely a speaker property — measured
+  ICC(1) = 0.79 against `sid` — which makes it redundant with `spk_emb` and, at
+  inference, a voice-swap dial rather than a pitch dial. The plan is to condition
+  on the *deviation from the speaker's mean* instead; see §8.5. Word pitch is
+  already relative for exactly this reason.
 - **Dropout per channel** plus `hint_null_all` on training items, because every
   hint is derivable from the target audio — at train time they are an oracle.
 - The pitch/timing fields need forced-alignment word timestamps, hence a
@@ -82,6 +96,7 @@ Decisions worth remembering:
 | **M2** | `modeling/transformer.py`: hint tables, encoder clip + per-phone channels, decoder clip channels, threaded through `encode`/`code_loss`/`generate`/`infill`/`compute_batch_loss`; `check_special_layout` guards | **done** |
 | **M3** | Training-time observability: `val_loss_nohint` / `val_hint_gap` oracle probe | **done** |
 | **M3b** | Per-channel counterfactual probes (drop *one* channel, re-score) | **todo** |
+| **M3c** | Register re-parameterisation: condition on `register_st − speaker mean` instead of the absolute level (§8.5) | **done (v0.9)** |
 | **M4** | `hints/build.py --words` (aligner pass), `--fit-edges-only`, `features.py` one-stop API, resumability | **done** |
 | **M5** | Inference ergonomics: CFG/guidance knob, `stage2_repl.py` controls, docs for a UI | **todo** |
 | **M6** | Train a real v0.8 run on the hinted corpus; evaluate | **blocked on the aligner pass** |
@@ -144,6 +159,8 @@ therefore be written twice — `coverage.clips_written` counts **files**,
 | `.cond` corpus (final) | **151 653 files, 0.74 GB**, avg 4.8 KB, max 9.7 KB — no file over 1 MB |
 | intensity / semantic | 151 653 / 151 653 (100 %; 39 394 via the source-audio fallback) |
 | register | 112 231 / 151 653 (74 %) — VCTK + Expresso have no stage-1 `.f0` |
+| **register vs `sid`** | **ICC(1) = 0.794** (Genshin train split, 2 705 speakers, 22 821 clips with a finite register): between-speaker std **6.94 st**, pooled within-speaker **3.52 st**; a speaker's mean bin predicts the clip's bin **66.7 %** of the time (mean error 0.36 bins); 55 % of speakers with ≥5 clips span ≥2 bins — see §8.5 |
+| speaker skew | top 10 % of speakers = **85 %** of clips; 257 speakers (≥100 clips) = 84 %; 1 474 speakers (≤4 clips) = **2 %** |
 | word fields | 147 991 / 151 653 (**97.6 %**); 3 546 stale `phone_ids` + 116 aligner failures keep their clip-level hints only |
 | level edges | intensity 8 levels from 151 653 values; register 5 levels from 112 231 — corpus-wide, not a subset |
 | codes ↔ checkpoint | re-encoded 2 clips with `checkpoints_stage1/base_v0.7/last.ckpt`: `spec_codes` and `pitch_codes` **bit-identical** to the corpus |
@@ -208,6 +225,12 @@ Cost: 5 extra forwards per epoch on the 2 probe batches (12 forward passes, no
 backward) — negligible, and diagnostics-only. It answers "which knob is doing
 work", which is exactly what M5's UI needs to know before exposing sliders.
 
+For `reg` specifically the probe needs a **second control arm**: replace the
+channel with the *speaker's mean bin* instead of dropping it. Dropping it removes
+speaker information the model may have learned to read from there, so a channel
+that is pure speaker redundancy still shows a healthy gap — the plain drop probe
+cannot tell "useful prosody" from "speaker shortcut" (§8.5).
+
 ### 8.2 M5 — inference ergonomics
 
 - **CFG / guidance.** Today `generate`/`infill` accept `hints=`, i.e. plain
@@ -237,11 +260,234 @@ Watch, in order: `val_hint_gap` (should grow from ~0), `val_loss_nohint` (must
 | channel | measurable prediction |
 |---|---|
 | intensity | decoded RMS / loudest-frame dBFS should move monotonically with the level |
-| register | voiced-median f0 of the decoded audio vs level (RMVPE) |
+| register | voiced-median f0 of the decoded audio vs level (RMVPE) — **necessary but not sufficient**: a voice swap also moves f0, so pair it with the identity check in §8.5 |
 | word pitch | per-word f0 delta ≈ the bin's semitones |
 | word timing | word durations follow the slot bucket |
 | semantic | hardest; check that swapping two sentences' vectors in the *same* text changes prosody, and that the gap probe is non-zero |
 | regression | hint-free WER (`scratch/eval_stage2_wer.py`) ≥ v0.7's, against the ground-truth-code floor |
+
+### 8.5 Register is confounded with the speaker embedding (open objection)
+
+**The objection (raised 2026-11-11).** `spk_emb` is a learned per-speaker vector,
+so it can already represent a speaker's mean f0. A *global* register channel is
+therefore redundant with it — and worse, confounded: the model can read register
+as a second, coarser speaker id.
+
+**Measured, and the objection is right for the bulk of the signal.** Genshin
+train split, 2 705 speakers, 26 361 clips sampled (22 821 with a finite
+register), bucketed with the shipped edges:
+
+| quantity | value |
+|---|---|
+| overall register std | 7.45 st |
+| between-speaker std of per-speaker means | **6.94 st** |
+| pooled within-speaker std | **3.52 st** |
+| **ICC(1) = between / total** | **0.794** |
+| bin accuracy from the speaker's mean bin | **66.7 %** |
+| mean \|bin error\| of that predictor | 0.36 bins |
+| speakers with ≥5 clips spanning ≥2 bins | **55 %** (median range 2 bins) |
+
+So ~79 % of the register variance is a speaker property, and one number per
+speaker reproduces two thirds of the bins exactly. But the residual 21 %
+(3.3 st within-speaker) is real per-utterance prosody — excited vs calm delivery,
+shouting, whispering — and a single per-speaker vector provably cannot express
+it. **The concept survives; the absolute parameterisation does not.**
+
+**Why redundancy is the lesser problem and confounding is the real one.**
+Register is an oracle derived from the target audio (`hints/build.py:264-283`,
+from the same `.f0` the pitch codec is trained on), so it is a cheap 5-way
+summary of "who is this" that is *easier to fit* than a 4 096-row speaker table.
+The model can learn "bin 5 ⇒ this timbre/formant set", and then the knob is a
+**voice-swap dial**: set register 5 on a low-voiced speaker and you do not get
+that speaker an octave up, you get dragged toward the high-register speakers in
+the training set. That is the failure mode that looks fine on the training
+distribution and breaks exactly when a user turns the knob.
+
+`val_hint_gap` **cannot see this.** Dropping register removes speaker information
+the model had learned to read from there, so a channel that is pure speaker
+redundancy still produces a healthy gap. The existing probe answers "is the model
+using hints", not "is this hint redundant with `sid`".
+
+**The corpus skew makes it worse, not better.** Top 10 % of speakers = 85 % of
+clips; 257 speakers (≥100 clips) = 84 % of clips; 1 474 speakers (≤4 clips) =
+2 % of clips. For the 84–85 % of the training signal where `spk_emb` is well
+estimated, register is ~79 % redundant. The only place it carries information
+`sid` lacks is the 2 % long tail — so the channel is paid for by everyone and
+earns its keep on 2 % of the data.
+
+**And structurally it is a weak knob anyway.** Register is **encoder-only**:
+`_clip_hints` adds `reg_emb` to the phoneme memory
+(`modeling/transformer.py:1072-1074`), while `_dec_hint` (`:1097-1106`) feeds
+only intensity + semantic to the decoder. The actual f0 comes from the
+pitch-codebook heads in the decoder, so register can only move f0 *indirectly*
+through cross-attention — the same weak channel the codebase already documents as
+easily averaged away. If the goal is a real global register control, the current
+wiring is the wrong place for it; if the goal is "tell the encoder about the
+voice's pitch range", `sid` already does that.
+
+#### Implemented (v0.9): condition on the deviation, not the level
+
+The value that gets bucketed is `register_st − speaker_mean_register_st`. This
+resolves the objection by construction:
+
+- the between-speaker 79 % is delegated to `spk_emb`, where it belongs;
+- the channel carries only the within-speaker residual (3.3 st, ~0.6 bin);
+- the inference knob becomes "**+2 st for this line**", which is both more useful
+  and not a voice swap;
+- level 0 becomes "**typical for this speaker**", a far better default than
+  "unknown";
+- it makes the design **internally consistent**: word pitch is already relative
+  to the utterance's voiced median (`hints/levels.py:91-100`, whose docstring
+  argues for relative-over-quantile), and register is the one channel that broke
+  that rule.
+
+**As built — the corpus was *not* rewritten.** The plan said to write
+`register_rel_st` into each `.cond`; that would have been a 151 k-file / 0.74 GB
+rewrite for a value that is an exact function of two things the loader already
+has. Instead the float stays absolute in `.cond` (so one corpus serves both
+parameterisations) and the subtraction happens at **load time**:
+
+1. `hints/build.py --relative-register` collects `(sid, register_st)` pairs,
+   freezes `{str(sid): mean_st}` into `hints.json` →
+   `levels.register.speaker_means`, and fits the edges on the residual. The
+   means come from the filelist you pass, so pass the **training** split:
+
+   ```bash
+   python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+       --hints intensity,register \
+       --hints-json data/genshin_plus_extras/hints_rel.json \
+       --fit-edges-only --relative-register
+   ```
+
+   Measured: **2 591 offsets**, residual std **3.58 st**, mean 0.00, edges
+   `[-2.48, -0.98, 0.34, 2.38]` st (vs `6.43…23.06` absolute), 107 093 residuals
+   from 146 513 clips. `unit` is recorded as "semitones re the speaker's median
+   f0", so the file is self-describing.
+2. `hints/levels.py:register_rel_st(value, sid, speaker_means)` does the
+   subtraction; an unseen `sid` maps to 0.0 = "typical for this speaker" (the
+   same meaning as level 0 elsewhere).
+3. `dataset_codes.py` looks the offset up with the item's **raw, pre-`sid_map`**
+   id (`item["sid_raw"]`), which is the id `build.py` keyed on, so a speaker map
+   cannot make the two disagree. Presence of `speaker_means` *is* the switch.
+   Verified: the level histogram over 300 val clips is 52/63/57/68/60 across
+   bins 1–5, i.e. the equal-frequency fit survives, with no clip in "absent".
+4. `modeling/transformer.py` — **no shape change** (same `n_levels + 1` rows), so
+   `--transfer_from` still works. Because the ids change meaning without
+   changing any shape, `transformer.relative_register` is asserted against the
+   file in `CodeTransformer.__init__` (both directions raise). This is the one
+   guard `check_special_layout` structurally cannot provide.
+5. `features.extract_hints` is **unchanged**: it writes the absolute
+   `register_st`, which is what the loader subtracts from. An inference UI that
+   wants a relative value calls `register_rel_st` with the speaker's offset.
+
+Cost: no `.cond` rewrite, no re-preprocessing of the codes, and the refit is a
+read-only pass over the existing files (~1 min for 146 k clips).
+
+#### Deferred: the ablations that would decide it
+
+Three cheap tests, all of which need a **trained** model, so they are blocked
+until the current run produces coherent speech (a loss delta on an incoherent
+model measures nothing) — and the run cannot be restarted right now:
+
+1. **Redundancy** — val_loss with register dropped vs. with register *replaced by
+   the speaker's mean bin*. If the second ≈ the first, register carries no
+   within-speaker information and should go; if it ≈ the full model, it does.
+2. **Confound** — hold `sid` fixed, sweep register 1→5, and measure the f0 shift
+   **and** speaker similarity (ECAPA cosine, or formant drift). If identity moves
+   more than f0, it is a voice-swap dial.
+3. **Leak** — evaluate with register shuffled *across speakers*. A model that
+   learned "register = speaker" degrades sharply; one that learned prosody barely
+   moves.
+
+(1) is a per-channel extension of M3b with a speaker-mean control arm (§8.1);
+that is the probe to add, and it is worth having regardless of which way this
+goes.
+
+#### Interim decision (no code change now)
+
+Leave the shipped **absolute** register in place for the current run, because
+(a) the run is already going and cannot be restarted, (b) the channel is dropped
+on 10 % of items (`hint_dropout.register`) plus `hint_null_all: 0.10`, so the
+model is forced to work without it, and (c) the relative form needs a `.cond`
+rewrite plus an edge refit, which is a fresh-run change anyway. Treat the current
+run's register channel as an experiment whose result the ablations above will
+interpret — not as a validated knob.
+
+**Doc nit found while measuring:** `hints/build.py:18` still says "utterance
+voiced **mean** f0", while the code (`:264-278`), `hints/README.md:158` and
+`AGENTS.md` all say **median**. The header comment is stale; fix it with the
+M3c change.
+
+### 8.6 The v0.8 regression, and what v0.9 changes
+
+The v0.8 model stutters/repeats words. Measured with
+`scratch/eval_stage2_wer.py` on the **same 24 val utterances**, paired seed, same
+vocoder (Qwen3-ASR; the "floor" arm decodes the ground-truth codes):
+
+| checkpoint | step | WER | S / D / I |
+|---|---|---|---|
+| `5090_v0.7_fim2/best-checkpoint` | 213 710 | **15.00 %** | 18 / 44 / 4 |
+| `5090_v0.7_fim2/last` ← v0.8's warm start | 335 830 | **15.23 %** | 26 / 36 / 5 |
+| `transformer_v0.8/model-step=200000` | 200 000 | **43.18 %** | 61 / 118 / 11 |
+| `transformer_v0.8/last` | 231 990 | **42.05 %** | 72 / 109 / 4 |
+| floor (ground-truth codes, same vocoder) | — | 5.5–6.8 % | — |
+
+So v0.8 degraded **15 % → 42 % during its own training**, and was already 43 % at
+step 200 k. Its teacher-forced `val_loss` meanwhile *improved* (2.295 vs v0.7's
+2.306) — the two metrics decoupled, which is the fact to remember.
+
+**Ruled out, with measurements:**
+
+- **The hints.** Regenerating with each item's real `.cond` hints supplied gives
+  *identical* WER (42.05 % both arms, identical transcripts); `val_hint_gap` is
+  0.021 nats. The channels were **inert**, not harmful. (New
+  `scratch/eval_stage2_wer.py --hints` measures both arms; before this nothing
+  in the repo passed hints at inference at all, so the mismatch could not be
+  seen.)
+- **EOS / duration.** `--ignore_eos` (force the reference length) and normal EOS
+  give the same WER.
+- **Undertraining.** Step 200 k = step 232 k, and val_loss is below v0.7's best.
+- **Broken weights.** All 327 common tensors load, no missing keys, only the 8
+  expected new hint tables.
+- **Dead text conditioning.** `val_text_delta` = 0.41 nats (v0.4, the documented
+  failure, was +0.003); encoder memory spread 1.27 (v0.7: 1.33); the best
+  monotonic cross-attention head reaches corr **+0.97** (v0.7: +0.59). The text
+  channel is *sharper* than v0.7's.
+- **Decoding knobs.** Greedy collapses to a constant frame (97 % periodic, 3 %
+  unique); temperature 1.0 / no top-k is worse (58.6 %). The shipped 0.9 / 20 is
+  the best of the three.
+
+**Mechanism.** Deletion-dominated (D 109 vs S 72 vs I 4): the model says a
+phrase, re-says it, never advances past that point, so the rest of the sentence
+is never spoken. Adjacent-frame repetition in the generated codebook-0 stream is
+**0.18–0.20 for v0.8 vs 0.11 for v0.7**. Transcripts show it directly —
+*"Why? Why would Walter steal? Steal something that can't sell off?"*,
+*"Don't give up! Don't give up."* (dropping "You'll get the hang of it"). It is a
+**repetition attractor**, not an alignment collapse: v0.8 is sharper and more
+confident, and a sharp attention makes a repetition self-reinforcing.
+
+**v0.9 changes**, cheapest-first by evidence:
+
+1. **Zero-initialised hint tables** (`modeling/transformer.py`). `encode` adds
+   `int_emb + reg_emb + sem_proj(sem)` to *every* phoneme, so a randomly
+   initialised table is a large random perturbation of a converged text memory,
+   applied to 90 % of training items — at exactly the moment a `--transfer_from`
+   model's alignment is most fragile. With zeros, a warm start reproduces the
+   source model exactly and the tables must earn their effect.
+   `test_hints.py` now checks both halves (zeros at init, real effect once
+   perturbed).
+2. **`fim_rate: 0.5 → 0.2`** (`configs/transformer.yaml`). Half of v0.8's
+   gradient went to `prefix <SUF> suffix <MID> middle`, which teaches "continue
+   from a given context", not "advance monotonically through the text". Plain AR
+   is what free-running generation does.
+3. **Warm start from `.../best-checkpoint.ckpt`**, not `.../last.ckpt` — the
+   latter is the post-anneal checkpoint v0.8 started from, which §4 already flags
+   as the worse one.
+4. **Relative register** (§8.5).
+
+`exp_name: transformer_v0.9`. Not yet trained, so none of this is a measured
+improvement yet — the entry criterion is WER back to ≤ v0.7's ~15 % on the same
+24 utterances.
 
 ---
 
@@ -295,6 +541,13 @@ python 2_training.py --config configs/transformer.yaml \
    clip-level values from disk would remove that; it is a deliberate omission
    rather than an oversight (it would add an untested path right before an
    unattended 8 h run).
+8. **Register is confounded with `spk_emb` (§8.5).** Measured ICC(1) = 0.79
+   against `sid`, so the absolute register channel is mostly a second, coarser
+   speaker id — and because it is an oracle, the model can use it as a speaker
+   shortcut, which turns the inference knob into a voice-swap dial. `val_hint_gap`
+   cannot detect this (dropping the channel removes speaker information too). The
+   plan is a relative register (`register_st − speaker mean`); until that lands,
+   treat the channel as unvalidated and do not expose it as a UI slider.
 
 ---
 

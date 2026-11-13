@@ -69,8 +69,8 @@ from torch.utils.data import Dataset
 
 import speaker_map as speaker_map_lib
 from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
-                          bucket_levels, load_levels, slot_bucket,
-                          word_pitch_levels)
+                          bucket_levels, load_levels, register_rel_st,
+                          slot_bucket, word_pitch_levels)
 
 #: Hint channels that ``hint_dropout`` can switch off independently.
 HINT_CHANNELS = ("intensity", "register", "pitch", "semantic", "timing")
@@ -133,6 +133,13 @@ class CodeDataset(Dataset):
         self.n_slot_buckets = int(n_slot_buckets)
         self.intensity_edges: Optional[List[float]] = None
         self.register_edges: Optional[List[float]] = None
+        # ``{str(sid): semitones}`` when this corpus was built with
+        # ``hints/build.py --relative-register`` (HINTS_PLAN.md §8.5): the
+        # register value is then bucketed as its deviation from the speaker's
+        # own median, which is orthogonal to ``sid`` by construction.  ``None``
+        # means the historical absolute level.  The switch lives in
+        # ``hints.json``, so the dataset and the model read it from one place.
+        self.register_speaker_means: Optional[Dict[str, float]] = None
         # ``+1`` for the "absent" level 0; pitch additionally has the explicit
         # unvoiced class, so its table is ``len(edges) + 2`` rows (see
         # ``hints.levels.word_pitch_levels``).
@@ -165,6 +172,8 @@ class CodeDataset(Dataset):
                         "without --no-edges.")
                 setattr(self, attr, [float(e) for e in spec["edges"]])
                 setattr(self, count, len(spec["edges"]) + 1)
+            self.register_speaker_means = (levels.get("register") or {}).get(
+                "speaker_means")
 
         # ``speaker_map`` is the same JSON structure used by 2_preprocess
         # (see speaker_map.py).  Preprocessed filelists no longer contain
@@ -197,6 +206,10 @@ class CodeDataset(Dataset):
                         "spec_codes": parts[1],
                         "pitch_codes": parts[2],
                         "sid": sid,
+                        # Pre-``sid_map`` id: the one ``hints/build.py`` keyed
+                        # its per-speaker register means on, so the lookup is
+                        # unambiguous even when a speaker map remaps ``sid``.
+                        "sid_raw": int(parts[3]),
                     }
                 )
 
@@ -206,13 +219,20 @@ class CodeDataset(Dataset):
     def speaker_ids(self) -> List[int]:
         return [it["sid"] for it in self.items]
 
-    def _load_hints(self, phone_ids_path: str, n_phone: int) -> Dict[str, object]:
+    def _load_hints(self, phone_ids_path: str, n_phone: int,
+                    sid: Optional[int] = None) -> Dict[str, object]:
         """Bucketed hints for one item, plus per-channel dropout.
 
         A missing or stale ``<base>.cond`` degrades to "no hints" (every level
         ``0``) instead of raising -- one un-built clip must not kill a run -- but
         the ``n_cond_missing`` / ``n_cond_stale`` counters make it visible
         (``2_training.py`` prints them after the first epoch).
+
+        ``sid`` is the item's *raw* (pre-``sid_map``) speaker id, used only by
+        the relative-register path: the speaker's mean offset is looked up from
+        ``hints.json`` and subtracted before bucketing, so the level means "this
+        utterance is N semitones above/below this speaker's usual level" rather
+        than "this speaker is a high voice" (HINTS_PLAN.md §8.5).
 
         Dropout is applied here, and only for training items: each channel is
         zeroed independently with its ``hint_dropout`` probability, and
@@ -240,7 +260,9 @@ class CodeDataset(Dataset):
         if "register_st" in cond:
             value = float(cond["register_st"].reshape(-1)[0])
             if np.isfinite(value):     # a fully unvoiced clip has no register
-                out["hint_reg"] = bucket_levels(value, self.register_edges)
+                out["hint_reg"] = bucket_levels(
+                    register_rel_st(value, sid, self.register_speaker_means),
+                    self.register_edges)
         if "semantic" in cond:
             vec = cond["semantic"].float().reshape(-1)
             if torch.isfinite(vec).all() and float(vec.abs().sum()) > 0:
@@ -301,6 +323,13 @@ class CodeDataset(Dataset):
         complete = True
         if self.max_frames is not None and n > self.max_frames:
             if self.is_train:
+                # ``random.Random.randint`` is inclusive on both ends, so this
+                # can start at ``n - max_frames`` -- the one window that still
+                # contains the clip's last frame, and therefore the only one that
+                # yields ``complete=True``.  (It is 1/(n-max_frames+1) likely, so
+                # a clip much longer than ``max_frames`` contributes an EOS
+                # target rarely; 92 % of the corpus is <= 256 frames, so that is
+                # a long-tail effect, not a hole.)
                 start = self.rng.randint(0, n - self.max_frames)
             else:
                 start = 0
@@ -324,7 +353,8 @@ class CodeDataset(Dataset):
 
         hint: Dict[str, object] = {}
         if self.hints:
-            hint = self._load_hints(item["phone_ids"], n_phone)
+            hint = self._load_hints(item["phone_ids"], n_phone,
+                                    sid=item.get("sid_raw", item["sid"]))
             # Per-phone hint arrays must be cropped in lockstep with the phones,
             # otherwise they would describe a different text than the model sees.
             for key in ("hint_pitch", "hint_slot"):

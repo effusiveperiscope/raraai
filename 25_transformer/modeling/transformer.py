@@ -578,6 +578,15 @@ class CodeTransformer(nn.Module):
         n_slot_buckets = int(_get_cfg(tcfg, "n_slot_buckets",
                                       DEFAULT_SLOT_BUCKETS)
                              or DEFAULT_SLOT_BUCKETS)
+        # Register parameterisation.  ``hints/build.py --relative-register``
+        # stores one semitone offset per speaker in ``hints.json`` and fits the
+        # edges on the residual, which makes the channel orthogonal to ``sid``
+        # (HINTS_PLAN.md §8.5).  The *switch* is the ``speaker_means`` block in
+        # that file -- the dataset reads it from there -- and this flag exists
+        # only to assert that the config agrees, because a level id changing
+        # meaning is invisible to the row-count check in
+        # ``check_special_layout`` (same table width either way).
+        relative_register = bool(_get_cfg(tcfg, "relative_register", False))
 
         codec = _get_cfg(config, "codec", None)
         pitch_codec = _get_cfg(config, "pitch_codec", None)
@@ -668,6 +677,7 @@ class CodeTransformer(nn.Module):
         self.semantic_dim = int(semantic_dim)
         self.pitch_edges = [float(e) for e in pitch_edges]
         self.n_slot_buckets = max(int(n_slot_buckets), 1)
+        self.relative_register = relative_register
         self.n_intensity_levels = 0
         self.n_register_levels = 0
         # Voiced pitch bins; row ``n_pitch_levels + 1`` is "this word is
@@ -690,6 +700,25 @@ class CodeTransformer(nn.Module):
                         f"{name!r} (found: {sorted(levels)}); re-run "
                         f"hints/build.py without --no-edges.")
                 setattr(self, attr, int(spec["n_levels"]))
+            # The relative-register switch and this flag must agree: the level
+            # ids are identical either way, so nothing else can catch it.
+            reg_means = (levels.get("register") or {}).get("speaker_means")
+            if self.relative_register and not reg_means:
+                raise ValueError(
+                    f"transformer.relative_register is true, but "
+                    f"{self.hints_json} has no levels.register.speaker_means. "
+                    f"Re-run `hints/build.py --relative-register "
+                    f"--fit-edges-only` on this corpus to fit the speaker "
+                    f"means and the residual edges, or set relative_register: "
+                    f"false to use the absolute level.")
+            if not self.relative_register and reg_means:
+                raise ValueError(
+                    f"{self.hints_json} is a *relative* register corpus "
+                    f"({len(reg_means)} speaker offset(s)) but "
+                    f"transformer.relative_register is false: identical level "
+                    f"ids would mean different things.  Set "
+                    f"transformer.relative_register: true, or point "
+                    f"hints_json at an absolute corpus.")
             self.int_emb = nn.Embedding(self.n_intensity_levels + 1, hidden_size)
             self.reg_emb = nn.Embedding(self.n_register_levels + 1, hidden_size)
             self.pitch_emb = nn.Embedding(self.n_pitch_levels + 2, hidden_size)
@@ -699,6 +728,21 @@ class CodeTransformer(nn.Module):
             self.dec_int_emb = (nn.Embedding(self.n_intensity_levels + 1,
                                              hidden_size)
                                 if self.decoder_hints else None)
+            # Zero-initialise every hint table.  ``encode`` adds
+            # ``int_emb(int) + reg_emb(reg) + sem_proj(sem)`` to *every*
+            # phoneme, so a randomly-initialised table is a large random
+            # perturbation of the encoder memory -- applied to 90 % of training
+            # items, at exactly the moment a ``--transfer_from`` model's text
+            # alignment is most fragile.  With zeros a warm-started model
+            # reproduces the source model *exactly* and the tables have to earn
+            # their effect; measured on the v0.8 run, whose teacher-forced loss
+            # improved while its free-running WER tripled (HINTS_PLAN.md §9).
+            for emb in (self.int_emb, self.reg_emb, self.pitch_emb,
+                        self.slot_emb, self.dec_int_emb):
+                if emb is not None:
+                    nn.init.zeros_(emb.weight)
+            nn.init.zeros_(self.sem_proj.weight)
+            nn.init.zeros_(self.sem_proj.bias)
         else:
             self.int_emb = None
             self.reg_emb = None

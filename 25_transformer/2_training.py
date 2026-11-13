@@ -1836,6 +1836,15 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                     f"(the dataset reads the same file, so the level ids would be "
                     f"silently reinterpreted). Point hints_json at the "
                     f"training-time hints.json.")
+        # The register table is the one hint channel whose *meaning* can change
+        # without changing its width (absolute -> relative, v0.9): row counts
+        # cannot catch it.  Every checkpoint that has hint tables today predates
+        # the relative parameterisation, so warn on any warm start into it.
+        if net.relative_register:
+            print(f"NOTE: {source} carries hint tables trained with *absolute* "
+                  f"register levels, but this model buckets register on the "
+                  f"deviation from the speaker median. reg_emb transfers as a "
+                  f"warm start and has to be relearned.")
 
 
 def train(config, resume_from=None, transfer_from=None):
@@ -1946,8 +1955,11 @@ def train(config, resume_from=None, transfer_from=None):
         **hint_kwargs,
     )
     if train_dataset.hints:
+        reg_mode = ("relative to the speaker median "
+                    f"({len(train_dataset.register_speaker_means)} offsets)"
+                    if train_dataset.register_speaker_means else "absolute")
         print(f"Hints: on -- {train_dataset.n_intensity_levels} intensity / "
-              f"{train_dataset.n_register_levels} register level(s), "
+              f"{train_dataset.n_register_levels} register level(s) [{reg_mode}], "
               f"{train_dataset.n_pitch_levels} voiced pitch bins + unvoiced, "
               f"{train_dataset.n_slot_buckets} slot buckets, "
               f"decoder-side={'yes' if config.transformer.get('decoder_hints', True) else 'no'}")

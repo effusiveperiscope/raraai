@@ -48,7 +48,30 @@
 #          transformer.hints_json.  New parameters (+0.24 %), so a fresh
 #          exp_name + --transfer_from (see HINTS_PLAN.md).  No re-preprocessing:
 #          the codes are unchanged.  Watch `val_hint_gap` / `val_loss_nohint`.
-exp_name: transformer_v0.8
+# v0.9 - fixes the three problems v0.8 exposed (HINTS_PLAN.md §8.5, §9):
+#          * **relative register**: the register channel is bucketed on its
+#            deviation from the speaker's own median (`--relative-register`
+#            fits the per-speaker offsets and the residual edges into
+#            hints.json), instead of the absolute level.  Measured on the
+#            Genshin train split the absolute value is 79 % between-speaker
+#            variance (ICC(1) = 0.794), i.e. mostly a second, coarser speaker
+#            id -- redundant with spk_emb and, as an oracle, confounded with
+#            it.  Same table width, so --transfer_from still works, but the
+#            level *ids* change meaning: hence the new exp_name.
+#          * **zero-initialised hint tables**: a randomly-initialised
+#            int_emb/reg_emb/sem_proj is added to every phoneme, which perturbs
+#            a warm-started encoder exactly when its text alignment is most
+#            fragile.  Zeros make the warm start reproduce the source model.
+#          * **fim_rate 0.5 -> 0.2**: half the v0.8 gradient went to
+#            prefix<SUF>suffix<MID>middle, which teaches "continue from a given
+#            context" rather than "advance through the text".  v0.8's failure
+#            mode was a repetition attractor (WER 42 % vs 15 % for the run it
+#            was warm-started from, same 24 utterances) -- v0.9 gives plain AR
+#            most of the gradient.
+#          Warm-start from checkpoints_stage2/5090_v0.7_fim2/best-checkpoint.ckpt
+#          (15.0 % WER), NOT .../last.ckpt (the post-anneal checkpoint v0.8
+#          started from).
+exp_name: transformer_v0.9
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -87,7 +110,18 @@ transformer:
   # Path to the hints.json written by hints/build.py (its `levels` block holds
   # the equal-frequency edges).  The dataset and the model read the *same* file,
   # so a level id cannot mean two different things.  Relative to the cwd.
-  hints_json: data/genshin_plus_extras/hints.json
+  #
+  # v0.9 points at a *relative-register* file: `hints/build.py
+  # --relative-register --fit-edges-only` writes `levels.register.speaker_means`
+  # (one semitone offset per speaker, fitted over the training split) and fits
+  # the register edges on the residual, so a register level means "this
+  # utterance is N semitones above/below this speaker's usual level".  The
+  # absolute file is kept next to it so the old run stays reproducible.
+  hints_json: data/genshin_plus_extras/hints_rel.json
+  # Assert that this config and `hints_json` agree about the register scale.
+  # The level *ids* are identical either way, so nothing else can catch a
+  # mismatch; CodeTransformer raises if the flag and the file disagree.
+  relative_register: true
   # Also feed the clip-level channels (intensity + semantic) to the decoder, as
   # a constant added to every column like spk_emb.  Off = encoder-only ablation.
   decoder_hints: true
@@ -371,11 +405,16 @@ train:
   max_frames: 256          # code frames per training segment (25 Hz)
   max_phone_length: 512
   # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
-  # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  ~0.5 is
-  # the usual recipe and preserves left-to-right quality while teaching infill;
-  # 0.0 disables it (leaving only transformer.fim's extra classes, unused).
-  # Validation is always plain AR, so val_loss/val_text_delta stay comparable.
-  fim_rate: 0.5
+  # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
+  # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run
+  # that spent half its gradient on FIM degenerated into a repetition attractor
+  # (WER 42 % vs 15 % for the checkpoint it was warm-started from, 24 paired
+  # utterances): "continue from a given context" is not the same skill as
+  # "advance monotonically through the text", and plain AR is what free-running
+  # generation does.  0.0 disables it (leaving only transformer.fim's extra
+  # classes, unused).  Validation is always plain AR, so val_loss/val_text_delta
+  # stay comparable.
+  fim_rate: 0.2
   # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a synthetic
   # prefix/middle/suffix split on the first N validation batches and log the
   # middle-only CE / teacher-forced accuracy (split into span thirds) plus three

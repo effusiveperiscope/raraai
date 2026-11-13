@@ -62,19 +62,52 @@ def bucket_levels(values, edges: Optional[Sequence[float]]):
 
 
 def load_levels(path: str) -> dict:
-    """Read ``hints.json``'s ``levels`` block -> ``{name: {n_levels, edges}}``."""
+    """Read ``hints.json``'s ``levels`` block.
+
+    Returns ``{name: {n_levels, edges, speaker_means, unit}}``.  The last two
+    are only meaningful for ``register`` and are ``None``/``""`` when absent,
+    so a file written before the relative-register change still loads.
+    """
     with open(path, "r", encoding="utf-8") as f:
         doc = json.load(f) or {}
     out = {}
     for name, spec in (doc.get("levels") or {}).items():
         spec = spec if isinstance(spec, dict) else {}
         edges = spec.get("edges")
+        means = spec.get("speaker_means")
         out[name] = {
             "n_levels": int(spec.get("n_levels")
                             or ((len(edges) + 1) if edges else 0)),
             "edges": list(edges) if edges else None,
+            # ``{str(sid): semitones}`` -- present only for a *relative*
+            # register corpus (see ``register_rel_st`` below).
+            "speaker_means": ({str(k): float(v) for k, v in means.items()}
+                              if isinstance(means, dict) and means else None),
+            "unit": str(spec.get("unit") or ""),
         }
     return out
+
+
+def register_rel_st(value, sid, speaker_means):
+    """Per-utterance register deviation from the speaker's frozen mean.
+
+    ``hints.json`` -> ``levels.register.speaker_means`` holds one semitone
+    offset per speaker id, fitted over the *training* split by
+    ``hints/build.py --relative-register``.  Subtracting it makes the register
+    channel orthogonal to ``sid`` by construction: the speaker's absolute
+    level is already carried by ``spk_emb``, and what is left is the part a
+    single per-speaker vector cannot express (this utterance is higher or
+    lower than this speaker normally speaks).
+
+    An unseen ``sid`` (or an old, absolute corpus) maps to an offset of 0.0,
+    i.e. "typical for this speaker" -- the same meaning as level 0 elsewhere.
+    """
+    if speaker_means is None:
+        return float(value)
+    offset = speaker_means.get(str(int(sid)))
+    if offset is None:
+        offset = speaker_means.get(int(sid), 0.0)
+    return float(value) - float(offset)
 
 
 def load_level_edges(path: str, name: str):

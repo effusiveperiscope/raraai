@@ -377,6 +377,26 @@ def test_model(batch, hints_json):
     out = net.compute_batch_loss(b, epoch=0, diagnostics=True)
     check("loss with hints is finite", bool(torch.isfinite(out["loss"])))
 
+    # v0.9 zero-initialises every hint table (HINTS_PLAN.md §9): a
+    # ``--transfer_from`` model must reproduce its source *exactly* until the
+    # tables learn, because the encoder adds them to every phoneme and a random
+    # table is a large perturbation of a converged text memory.  So an untouched
+    # table legitimately contributes nothing -- check both halves.
+    zero = all(e.weight.abs().max().item() == 0.0 for e in
+               (net.int_emb, net.reg_emb, net.pitch_emb, net.slot_emb,
+                net.dec_int_emb) if e is not None)
+    check("hint tables are zero-initialised",
+          zero and net.sem_proj.weight.abs().max().item() == 0.0
+          and net.sem_proj.bias.abs().max().item() == 0.0)
+
+    with torch.no_grad():
+        for e in (net.int_emb, net.reg_emb, net.pitch_emb, net.slot_emb,
+                  net.dec_int_emb):
+            if e is not None:
+                e.weight.normal_()
+        net.sem_proj.weight.normal_()
+    out = net.compute_batch_loss(b, epoch=0, diagnostics=False)
+
     off = dict(b)
     for key in ("hint_int", "hint_reg", "hint_pitch", "hint_slot",
                 "hint_sem_valid"):

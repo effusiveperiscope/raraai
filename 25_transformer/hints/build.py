@@ -364,6 +364,66 @@ def quantile_edges(values: Sequence[float], n_levels: int):
     return edges, stats
 
 
+def speaker_mean_register(pairs) -> dict:
+    """``{str(sid): mean register_st}`` from ``(sid, value)`` pairs.
+
+    Only finite values contribute; a speaker with no voiced clip at all is
+    simply absent (and then maps to a 0.0 offset everywhere).
+    """
+    acc = {}
+    for sid, value in pairs:
+        if value is None or not np.isfinite(value):
+            continue
+        acc.setdefault(str(int(sid)), []).append(float(value))
+    return {k: float(np.mean(v)) for k, v in acc.items() if v}
+
+
+def relative_register_values(pairs, speaker_means) -> list:
+    """Residual ``value - mean[sid]`` for every finite ``(sid, value)`` pair."""
+    out = []
+    for sid, value in pairs:
+        if value is None or not np.isfinite(value):
+            continue
+        out.append(float(value) - float(speaker_means.get(str(int(sid)), 0.0)))
+    return out
+
+
+def fit_level_spec(name, collected, n_levels, relative_register):
+    """``(levels.<name> dict or None, stats)`` for one hint.
+
+    ``collected`` is a list of floats for ``intensity`` and a list of
+    ``(sid, value)`` pairs for ``register``.  With ``relative_register`` the
+    register edges are fitted on ``value - mean[sid]`` and the per-speaker
+    means are stored next to them, which is what makes a level id
+    speaker-relative at load time (``hints.levels.register_rel_st``).
+
+    Why relative at all: measured on the Genshin train split the absolute
+    register is **79 % between-speaker variance** (ICC(1) = 0.794), i.e.
+    mostly a second, coarser speaker id -- redundant with ``spk_emb`` and, as
+    an oracle, confounded with it.  The residual is the per-utterance part a
+    single per-speaker vector cannot express.  See ``HINTS_PLAN.md`` §8.5.
+    """
+    means = None
+    if name == "register":
+        if relative_register:
+            means = speaker_mean_register(collected)
+            values = relative_register_values(collected, means)
+            unit = "semitones re the speaker's median f0"
+        else:
+            values = [v for _, v in collected]
+            unit = "semitones re 100 Hz"
+    else:
+        values = list(collected)
+        unit = "calibrated 1-9 score"
+    edges, stats = quantile_edges(values, n_levels)
+    if edges is None:
+        return None, stats
+    spec = {"n_levels": n_levels, "edges": edges, "stats": stats, "unit": unit}
+    if means:
+        spec["speaker_means"] = means
+    return spec, stats
+
+
 def phone_count(phone_path: str) -> Optional[int]:
     """``phone_ids`` length by header read -- used as the staleness anchor."""
     try:
@@ -524,19 +584,26 @@ def fit_edges_from_conds(items, args, hints) -> int:
                 continue
             value = float(np.asarray(value).reshape(-1)[0])
             if np.isfinite(value):
-                collected[key].append(value)
+                # register keeps the speaker id: ``--relative-register`` needs
+                # it to subtract the speaker's own mean before fitting edges.
+                collected[key].append((it["sid"], value) if key == "register"
+                                      else value)
 
     for name, n_levels in (("intensity", args.n_intensity_levels),
                            ("register", args.n_register_levels)):
         if name not in hints:
             continue
-        edges, stats = quantile_edges(collected[name], n_levels)
-        if edges is None:
+        spec, stats = fit_level_spec(name, collected[name], n_levels,
+                                     args.relative_register)
+        if spec is None:
             print(f"WARNING: only {stats.get('n', 0)} {name} value(s); cannot "
                   f"fit {n_levels} edges")
             continue
-        doc["levels"][name] = {"n_levels": n_levels, "edges": edges,
-                               "stats": stats}
+        doc["levels"][name] = spec
+    if args.relative_register:
+        means = (doc["levels"].get("register") or {}).get("speaker_means") or {}
+        print(f"register is relative to the speaker median: {len(means)} "
+              f"speaker offset(s) recorded in {hints_json}")
     doc["coverage"] = {"clips_read": len(items),
                        "with_intensity": len(collected["intensity"]),
                        "with_register": len(collected["register"]),
@@ -586,6 +653,14 @@ def main(argv=None) -> int:
                    help="default: <dirname(filelist[0])>/hints.json")
     p.add_argument("--n-intensity-levels", type=int, default=8)
     p.add_argument("--n-register-levels", type=int, default=5)
+    p.add_argument("--relative-register", action="store_true",
+                   help="fit the register edges on the *deviation from the "
+                        "speaker's mean* instead of the absolute level, and "
+                        "record the per-speaker means in hints.json.  This is "
+                        "what makes the register channel orthogonal to the "
+                        "speaker id (see HINTS_PLAN.md 8.5); the dataset reads "
+                        "the means back and subtracts them at load time, so the "
+                        ".cond files are unchanged.")
     p.add_argument("--workers", type=int, default=1,
                    help="parallel processes for the audio-derived hints")
     p.add_argument("--limit", type=int, default=0, help="max clips (0 = all)")
@@ -664,6 +739,11 @@ def main(argv=None) -> int:
         rec = {
             "base": base,
             "phone_ids": it["phone_ids"],
+            # Raw filelist speaker id.  ``--relative-register`` keys its
+            # per-speaker means on it, and ``dataset_codes`` looks the offset
+            # up with the *same* (pre-``sid_map``) id, so the two sides cannot
+            # disagree when a speaker map is in play.
+            "sid": it["sid"],
             "cond": cond_path(it["phone_ids"], args.out_dir),
             "wave": wave,
             "f0": (find_sidecar(args.wave_dir, base, F0_SUFFIX)
@@ -807,7 +887,8 @@ def main(argv=None) -> int:
         for key in ("intensity", "register"):
             v = values.get(key)
             if v is not None and np.isfinite(v):
-                collected[key].append(float(v))
+                collected[key].append((r["sid"], float(v)) if key == "register"
+                                      else float(v))
         if r["base"] not in written:
             flush(r)
 
@@ -922,9 +1003,10 @@ def main(argv=None) -> int:
                 ("register", args.n_register_levels, collected["register"])):
             if name not in hints:
                 continue
-            edges, stats = quantile_edges(values, n_levels)
+            spec, stats = fit_level_spec(name, values, n_levels,
+                                         args.relative_register)
             existing = (doc["levels"].get(name) or {}).get("edges")
-            if edges is not None and partial and existing:
+            if spec is not None and partial and existing:
                 # Equal-frequency edges are corpus-wide quantiles: fitting them
                 # on the handful of clips a resumed run still had to do (the
                 # rest were reused via --skip-existing, and --limit caps the
@@ -934,7 +1016,7 @@ def main(argv=None) -> int:
                       f"clip(s) reused/limited). Re-run with --fit-edges-only "
                       f"to refit them from every .cond on disk.")
                 continue
-            if edges is None:
+            if spec is None:
                 if doc["levels"].get(name, {}).get("edges"):
                     print(f"NOTE: kept the existing {name} edges from "
                           f"{hints_json} (no new values in this run)")
@@ -946,8 +1028,7 @@ def main(argv=None) -> int:
                 print(f"WARNING: only {stats.get('n', 0)} {name} value(s); "
                       f"cannot fit {n_levels} level edges yet")
                 continue
-            doc["levels"][name] = {"n_levels": n_levels, "edges": edges,
-                                   "stats": stats}
+            doc["levels"][name] = spec
     doc["coverage"] = {
         "clips_read": len(items),
         # Files, not writes: with the per-stage flushes a clip can be written

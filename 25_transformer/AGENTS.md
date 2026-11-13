@@ -1220,7 +1220,7 @@ obvious place for them):
 | channel | levels | where |
 |---|---|---|
 | intensity | `n_levels` equal-frequency bins from `hints.json` | encoder + decoder |
-| register | `n_levels` equal-frequency bins from `hints.json` | encoder |
+| register | `n_levels` equal-frequency bins from `hints.json`, fitted on the **deviation from the speaker's median** (v0.9; see below) | encoder |
 | semantic | 384-d bge vector -> `Linear(384, H)` | encoder + decoder |
 | word pitch | 7 voiced bins + 1 unvoiced (`hint_pitch_edges`, fixed) | encoder, per phone |
 | word timing | 8 log2 duration buckets (`n_slot_buckets`, fixed) | encoder, per phone |
@@ -1236,6 +1236,24 @@ across corpora; the latter are *relative* (semitones re: the utterance's voiced
 median) or physical (code frames), and an inference UI has to be able to say
 "raise this word a major third" / "make it 12 frames" and mean it. Quantile
 edges would renumber the bins per corpus.
+
+> **`register` is relative to the speaker (v0.9).** The channel used to be
+> *absolute*, and measured on the Genshin train split it is **79 % between-speaker
+> variance** (ICC(1) = 0.794; a speaker's mean bin predicts the clip's bin 66.7 %
+> of the time) — i.e. largely a second, coarser `sid`, redundant with `spk_emb`
+> and (being an oracle) confounded with it, so the inference knob was a
+> voice-swap dial rather than a pitch dial. `val_hint_gap` cannot detect that.
+> `hints/build.py --relative-register` therefore freezes one semitone offset per
+> speaker into `hints.json` (`levels.register.speaker_means`) and fits the edges
+> on the **residual** (`register_st − speaker median`; measured std 3.58 st,
+> edges `[-2.48, -0.98, 0.34, 2.38]` st), and `dataset_codes` subtracts the offset
+> at load time using the item's raw pre-`sid_map` id. A register level now means
+> "this utterance is N semitones above/below this speaker's usual level", which is
+> orthogonal to `sid` by construction and matches what word pitch already does.
+> **The `.cond` files are unchanged** (they store the absolute value). The switch
+> is presence of `speaker_means` in `hints.json`, and `transformer.relative_register`
+> only *asserts* that the config agrees with the file — the level ids are identical
+> either way, so nothing else can catch a mismatch. See `HINTS_PLAN.md` §8.5.
 
 Wiring:
 
@@ -1255,6 +1273,14 @@ Wiring:
   to every column, like `spk_emb`. A dropped semantic vector goes through the
   learned `sem_null` rather than `sem_proj(0)`, which would be a real sentence.
   `decoder_hints: false` is the encoder-only ablation.
+- **Every hint table is zero-initialised (v0.9).** Since the tables are added to
+  *every* phoneme, a randomly initialised one is a large random perturbation of
+  the encoder memory — applied to the 90 % of items that carry hints, right when
+  a `--transfer_from` model's text alignment is most fragile. With zeros a
+  warm start reproduces its source exactly and the tables must earn their
+  effect; `test_hints.py` checks both halves (zeros at init, a real loss change
+  once the tables are perturbed). This is why `test_hints.py` no longer expects
+  an *untouched* table to move the loss.
 - **Probe**: `train.hint_probe_batches` re-scores the first N validation batches
   with *every* channel dropped and logs `val_loss_nohint` plus
   `val_hint_gap = that - val_loss`. Hints are derived from the target audio, so
@@ -1776,6 +1802,16 @@ python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
 # (a sharded / resumed run must not leave edges fitted on a subset).
 python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
     --fit-edges-only
+# ...and fit the *relative* register (v0.9): one semitone offset per speaker
+# goes into hints.json -> levels.register.speaker_means, and the register edges
+# are fitted on `register_st - speaker median` instead of the absolute level.
+# Read-only over the .cond files (no rewrite, no audio, no models, ~1 min for
+# 146k clips).  Pass the *training* split: the means are what `dataset_codes`
+# subtracts at load time, and an unseen speaker falls back to a 0.0 offset.
+python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+    --hints intensity,register \
+    --hints-json data/genshin_plus_extras/hints_rel.json \
+    --fit-edges-only --relative-register
 # Acceptance test of the ported DSP pipeline against the upstream feature cache
 # (exits non-zero if the intensity hint moves on clips without digital silence).
 python hints/verify_dsp.py \
@@ -1913,6 +1949,15 @@ python scratch/eval_stage2_wer.py \
     --checkpoints checkpoints_stage2/<exp>/best-checkpoint.ckpt \
                   checkpoints_stage2/<exp>/last.ckpt \
     --num_items 20 --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt
+# ...with the hint channels supplied from each item's .cond instead of running
+# in the "no hints" state.  Run both ways: identical WER means the channels are
+# inert (v0.8 measured exactly that, 42.05% both arms), which is the only way to
+# see a hint train/inference mismatch.  Needs transformer.hints: true + a
+# checkpoint that has the hint tables.
+python scratch/eval_stage2_wer.py --hints \
+    --checkpoints checkpoints_stage2/<exp>/last.ckpt \
+    --num_items 24 --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt \
+    --ignore_eos
 
 # FIM / span-regeneration smoke test (CPU; safe next to a GPU training job):
 # apply_fim reorder + length buckets, mixed AR+FIM loss, sentinel masking in

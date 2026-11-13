@@ -232,8 +232,18 @@ def chunked(seq: Sequence, size: int):
 
 
 @torch.no_grad()
-def synthesize_from_generated(net, net_g, items, args, device, pad_id):
-    """Sample codes per item (oracle length cap) and decode them to audio."""
+def synthesize_from_generated(net, net_g, items, args, device, pad_id,
+                              collator=None):
+    """Sample codes per item (oracle length cap) and decode them to audio.
+
+    ``collator`` (a ``CodeCollator``) is only passed with ``--hints``: it turns
+    the chunk into the batch dict the model expects, so the hint channels are
+    supplied from each item's ``.cond`` exactly as they are at training time.
+    Without it the generation runs in the "no hints" state (level 0 everywhere),
+    which is what every pre-v0.9 inference path did -- and measuring both arms
+    is how a hint train/inference mismatch becomes visible instead of being
+    guessed at.
+    """
     wavs = []
     hop = code_frame_samples(net_g)
     for chunk in chunked(items, args.batch_size):
@@ -251,10 +261,16 @@ def synthesize_from_generated(net, net_g, items, args, device, pad_id):
             plen[i] = p.numel()
             sid[i] = int(it["sid"])
             lens.append(min(int(it["spec_codes"].shape[1]), args.max_frames))
+        hint_arg = None
+        if collator is not None:
+            batch = collator(chunk)
+            hint_arg = {k: (v.to(device) if torch.is_tensor(v) else v)
+                        for k, v in batch.items()}
         gen, glen = net.generate(phone, plen, sid, max_frames=max(lens),
                                  temperature=args.temperature,
                                  top_k=args.top_k,
                                  stop_on_eos=(False if args.ignore_eos else None),
+                                 hints=hint_arg,
                                  return_lengths=True)
         # infer_from_codes wants (Q, B, T) or (B, T, Q); generate returns (B, K, n).
         spec = gen[:, :Qs].transpose(0, 1).contiguous()
@@ -379,6 +395,13 @@ def main():
                     help="decode exactly the item's own length instead of "
                          "letting the model emit EOS early; isolates content "
                          "errors from duration errors")
+    ap.add_argument("--hints", action="store_true",
+                    help="supply each item's <.cond> hint channels at "
+                         "generation time (default: none, i.e. every channel at "
+                         "its 'absent' level 0).  Run both ways to see whether a "
+                         "model depends on the hints at inference -- v0.8 was "
+                         "identical either way, i.e. the channels were inert "
+                         "(HINTS_PLAN.md 9).")
     ap.add_argument("--arms", default="generated,reference",
                     help="comma separated subset of generated,reference")
     ap.add_argument("--asr_model", default="Qwen/Qwen3-ASR-0.6B")
@@ -484,6 +507,14 @@ def main():
 
     net = build_transformer(config, device)
     phone_pad = int(config.transformer.get("phone_pad_id", 0) or 0)
+    collator = None
+    if args.hints:
+        from dataset_codes import CodeCollator
+        if not bool(config.transformer.get("hints", False)):
+            raise SystemExit(
+                "--hints needs transformer.hints: true (and the hint tables in "
+                "the checkpoint); this config has hints disabled.")
+        collator = CodeCollator(config=config)
     rows = []
     for path in (args.checkpoints if "generated" in arms else []):
         epoch, step = load_transformer_weights(net, path)
@@ -491,7 +522,7 @@ def main():
         # WER difference is the weights and not the sampling noise.
         torch.manual_seed(args.seed)
         wavs = synthesize_from_generated(net, net_g, items, args, device,
-                                         phone_pad)
+                                         phone_pad, collator=collator)
         tag = f"{os.path.basename(os.path.dirname(path))}@{step}"
         save(tag, wavs)
         hyps = asr.transcribe(to_16k(wavs, sample_rate))
