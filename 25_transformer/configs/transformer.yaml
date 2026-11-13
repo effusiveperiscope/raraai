@@ -398,7 +398,7 @@ train:
   # the same value, so keeping this key set correctly only matters if you point
   # it somewhere else (e.g. a bigger disk).
   log_dir: logs_stage2
-  num_workers: 12
+  num_workers: 6
   train_filelist: data/genshin_plus_extras/train_stage2.txt
   val_filelist: data/genshin_plus_extras/val_stage2.txt
   # Optional speaker map (see speaker_map.py). Stage-1 and stage-2 speaker
