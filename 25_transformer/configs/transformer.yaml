@@ -399,8 +399,8 @@ train:
   # (the historical values) the run spends 700 k steps un-annealing and is back
   # at full LR by step 600 k.  2_training.py now warns once when a run crosses
   # `cosine_anneal_end` (see TrainModule._check_anneal_end).
-  cosine_anneal_end: 300000
-  max_steps: 1000000
+  cosine_anneal_end: 500000
+  max_steps: 500000
   max_epochs: -1
   max_frames: 256          # code frames per training segment (25 Hz)
   max_phone_length: 512
