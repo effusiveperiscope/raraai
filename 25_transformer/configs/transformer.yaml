@@ -97,13 +97,26 @@ transformer:
   # embedding per channel.  `hints: false` reproduces every earlier version
   # exactly (no new parameters).
   #
+  # `intensity` is **perceptual intensity** -- emotional / phonation effort
+  # (tension, breathiness, projection) on a 1-9 scale, regressed by the DSP
+  # model from `20_intensity_annotation`.  It is **not loudness**: its feature
+  # set peak-normalises every clip, precisely so that "someone shouting" and
+  # "someone close to the mic" are not the same thing.  It is a deliberately
+  # *coarse, clip-level* channel -- an end-user control ("say it more
+  # intensely"), not a reconstruction aid -- so the thing to measure is a
+  # counterfactual sweep (same text/speaker/seed, level 0..8, score the decoded
+  # audio with the same DSP model), *not* the teacher-forced CE delta.
+  #
   # Two properties matter more than the numbers:
-  #  * every hint is derivable from the *target audio*, so at train time this is
-  #    an oracle.  What keeps it from becoming a voice-conversion renderer is
+  #  * intensity / register / word pitch / word timing are derived from the
+  #    *target audio*, so at train time they are oracles (the semantic vector is
+  #    derived from the *text*, so it carries no leakage at inference).  What
+  #    keeps the audio-derived ones from becoming a voice-conversion renderer is
   #    that the values are coarse levels, `hint_dropout`/`hint_null_all` drop
-  #    them (so level 0 is a trained "no hint" state used at inference), and the
-  #    val probe reports `val_loss_nohint` next to `val_loss` -- if the gap is
-  #    large the model is leaning on the oracle.
+  #    them (so level 0 is a trained "no hint" state), every generation path
+  #    sends that state (`train.sample_hints`), and the val probe reports
+  #    `val_loss_nohint` next to `val_loss` -- if the gap is large the model is
+  #    leaning on the oracle.
   #  * enabling it changes the parameter set, so it needs a fresh `exp_name` +
   #    `--transfer_from` (new tables load as untrained), not `--resume_from`.
   hints: true
@@ -128,7 +141,9 @@ transformer:
   # Width of the stored sentence vector (bge-small-en-v1.5 = 384).
   semantic_dim: 384
   # Word-pitch cuts in semitones relative to the utterance's voiced median
-  # (fixed, not corpus quantiles -- see hints/levels.py).  7 voiced bins.
+  # (fixed, not corpus quantiles -- see hints/levels.py).  8 voiced bins, then
+  # one explicit "unvoiced" class (level 9) and 0 = "absent".
+
   hint_pitch_edges: [-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0]
   # Word-duration buckets: log2 of the slot length in code frames.
   n_slot_buckets: 8
@@ -472,6 +487,26 @@ train:
   # model is using the oracle or leaning on it; `val_loss` alone cannot.
   # Costs one extra forward pass per probed batch. 0 disables the probe.
   hint_probe_batches: 2
+  # Which hint state *generation* runs in -- the TensorBoard samples (codes /
+  # audio / mel / pitch), the FIM infill probe, the speaker probe, the OOD
+  # probe and the REPL's default (it reads this key too).  This is not
+  # cosmetic: `None` is not "no hints".  `hint_dropout` / `hint_null_all` train
+  # **level 0** (`sem_null` for the semantic vector) as the "not provided"
+  # state, and pre-Phase-0 every sampling path instead dropped the vectors
+  # entirely -- a different function, worth +0.051 nats and a 52 % encoder
+  # memory shift on transformer_v0.9.  So:
+  #   "cond" -> the item's real `.cond` hints (val batches carry them; the
+  #             OOD probe has no target audio and falls back to null)
+  #   "null" -> the trained null state (level 0 everywhere).  Default.
+  #   "omit" -> no hint vectors at all.  Pre-Phase-0 behaviour, kept only for
+  #             ablations; it is out of distribution for a hint model.
+  # Every log tag carries the state: `codes_hint/`, `codes_nohint/`,
+  # `codes_omit/` (and `codes/` when the model has no hint tables), plus the
+  # scalar `sample/hints_mode` (0 = omit, 1 = null, 2 = real `.cond`).
+  # Quoted on purpose: an unquoted `null` is YAML's missing value, which is
+  # read as "null" too, but writing it explicitly avoids the ambiguity.
+  sample_hints: "cond"
+
   # TensorBoard logging of "what the model actually produces". Every
   # `sample_interval` epochs (and once at the start of training) 2_training.py
   # greedily/sampling-decodes `sample_count` val items and logs:

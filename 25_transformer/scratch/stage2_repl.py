@@ -485,7 +485,8 @@ class Stage2REPL:
                  audio: bool = True,
                  out_dir: str = "scratch/repl_out",
                  auto_play: bool = False,
-                 reader: Optional[KeyReader] = None):
+                 reader: Optional[KeyReader] = None,
+                 hint_mode: Optional[str] = None):
         self.config = config
         self.checkpoint = checkpoint
         self.device = device
@@ -497,6 +498,23 @@ class Stage2REPL:
         # Live playback (`b`) + the `--play` auto-play toggle.
         self.auto_play = bool(auto_play)
         self.player = AudioPlayer()
+        # Hint state for generation.  There is no `.cond` for arbitrary text
+        # here, so `cond` is not available in the REPL: `null` (the trained
+        # "not provided" state) or `omit` (no vectors at all, the pre-Phase-0
+        # behaviour, out of distribution for a hint model).
+        mode = str(hint_mode or config.train.get("sample_hints", "null")
+                   or "null").lower()
+        if mode == "zero":
+            mode = "null"
+        if mode not in ("null", "omit"):
+            if mode == "cond":
+                print("NOTE: the REPL has no .cond for arbitrary text; "
+                      "using the trained null hint state instead.")
+                mode = "null"
+            else:
+                raise SystemExit(f"--hints must be null | omit (got {mode!r})")
+        self.hint_mode = mode
+
 
         self.frame_rate = (int(config.data.sampling_rate)
                            // int(config.data.hop_length))
@@ -562,7 +580,15 @@ class Stage2REPL:
         print(f"Loaded {n_loaded}/{n_ckpt} checkpoint tensor(s)"
               + (f"; {n_bad} skipped, {n_missing} missing"
                  if n_bad or n_missing else ""))
+        if getattr(self.net, "hints", False):
+            desc = ("trained null state (level 0 / sem_null)"
+                    if self.hint_mode == "null"
+                    else "OMITTED -- out of distribution for this model")
+            print(f"Hints: {desc}")
+        else:
+            print("Hints: n/a (this checkpoint has no hint tables)")
         self.net.eval()
+
         self.frames = self._clamp_frames(self.frames)
         if self.audio:
             # Eager: a bad stage-1 checkpoint should fail now, not on the first
@@ -786,6 +812,12 @@ class Stage2REPL:
             return limit
         return frames
 
+    def _hint_arg(self):
+        """Hints argument for ``generate``/``infill`` (see ``self.hint_mode``)."""
+        if not getattr(self.net, "hints", False):
+            return None
+        return self.hint_mode
+
     def generate(self, frames: Optional[int] = None) -> bool:
         """Sample codes for the current text and decode them to audio."""
         if not self.phone_ids:
@@ -802,7 +834,8 @@ class Stage2REPL:
         codes, lens = self.net.generate(
             phone, plen, sid, max_frames=frames,
             temperature=self.temperature, top_k=self.top_k,
-            return_lengths=True)
+            return_lengths=True, hints=self._hint_arg())
+
         dt = time.perf_counter() - t0
         codes = codes[0]
         n = int(codes.shape[-1])
@@ -965,7 +998,9 @@ class Stage2REPL:
         try:
             middle = self.net.infill(
                 phone, plen, sid_t, prefix, suffix, span,
-                temperature=self.temperature, top_k=self.top_k)
+                temperature=self.temperature, top_k=self.top_k,
+                hints=self._hint_arg())
+
         except Exception as exc:
             print(f"  infill failed: {exc}")
             return False
@@ -1038,7 +1073,9 @@ class Stage2REPL:
         codes, lens = self.net.generate(
             batch["phone_ids"], batch["phone_lengths"], batch["sid"],
             max_frames=frames, temperature=self.temperature,
-            top_k=self.top_k, return_lengths=True)
+            top_k=self.top_k, return_lengths=True,
+            hints=self._hint_arg())
+
         pred = codes[0]
         n = int(pred.shape[-1])
         gt = torch.cat([batch["spec_codes"][0], batch["pitch_codes"][0]],
@@ -1466,7 +1503,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="one-shot mode: write the decoded audio here")
     parser.add_argument("--dump_codes", default=None,
                         help="one-shot mode: torch.save the sampled codes here")
+    parser.add_argument("--hints", default=None, choices=("null", "omit"),
+                        help="hint state for generation: 'null' = the trained "
+                             "'not provided' state (level 0 / sem_null, what "
+                             "training used for dropped hints), 'omit' = send "
+                             "no hint vectors at all (pre-Phase-0 behaviour, "
+                             "out of distribution). Default: "
+                             "train.sample_hints from the config.")
     return parser.parse_args(argv)
+
 
 
 def main(argv=None) -> int:
@@ -1493,7 +1538,9 @@ def main(argv=None) -> int:
         audio=not args.no_audio,
         out_dir=args.out_dir,
         auto_play=args.play,
-        reader=KeyReader(force_line_mode=args.line_mode))
+        reader=KeyReader(force_line_mode=args.line_mode),
+        hint_mode=args.hints)
+
 
     # Initial state, before the (slow) model build, so --list_speakers stays
     # cheap and a bad --sid is obvious from the banner.

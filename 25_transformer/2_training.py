@@ -404,6 +404,27 @@ class TrainModule(pl.LightningModule):
         self._reset_hint_probe()
         self._hints_reported = False
 
+        # Which hint state *generation* runs in (TensorBoard samples, the FIM
+        # infill probe, the speaker probe, the OOD probe and the printed
+        # lengths).  This is not cosmetic: `None` used to be passed to
+        # `generate`, which drops the hint vectors entirely -- a *different*
+        # function from the level-0 "not provided" state the model is trained
+        # on (+0.051 nats, 52 % memory shift on transformer_v0.9).  Modes:
+        #   cond -> the item's real `.cond` hints (val batches carry them)
+        #   null -> the trained null state (every channel at level 0)
+        #   omit -> no hint vectors at all (pre-Phase-0 behaviour; ablation)
+        # OOD text has no `.cond` (there is no target audio), so it always
+        # falls back to `null`/`omit`.
+        self.sample_hints = str(config.train.get("sample_hints", "null")
+                                or "null").lower()
+        if self.sample_hints not in ("cond", "null", "zero", "omit"):
+            raise ValueError(
+                f"train.sample_hints must be cond | null | omit, got "
+                f"{self.sample_hints!r}")
+        if self.sample_hints == "zero":       # alias
+            self.sample_hints = "null"
+
+
         # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a *synthetic*
         # prefix/suffix split on the first `fim_probe_batches` validation batches
         # and compare the middle-only CE against three control arms (phonemes
@@ -504,7 +525,36 @@ class TrainModule(pl.LightningModule):
             off["hint_sem_valid"] = torch.zeros_like(batch["hint_sem_valid"])
         return off
 
+    def _sample_hint_arg(self, batch=None, mode=None):
+        """``(hints argument, log tag)`` for one **generation** call.
+
+        ``None`` is not a neutral value here: ``generate`` resolves it to the
+        trained *null state* (level 0 / ``sem_null``), whereas ``"omit"`` drops
+        the vectors entirely.  Both are reachable, but they are different
+        functions and the difference is visible in the output (+0.051 nats and
+        a 52 % encoder-memory shift on transformer_v0.9), so every sample log
+        carries the state as a tag and as ``sample/hints_mode``.
+
+        Tag values: ``"_hint"`` (real ``.cond``), ``"_nohint"`` (trained null
+        state), ``"_omit"`` (no vectors), ``""`` (model has no hint tables, so
+        the question does not arise -- tag names stay as they were pre-v0.8).
+        """
+        mode = self.sample_hints if mode is None else mode
+        if not getattr(self.net, "hints", False):
+            return None, ""
+        if mode == "cond" and batch is not None:
+            return batch, "_hint"
+        if mode == "omit":
+            return "omit", "_omit"
+        return "null", "_nohint"
+
+    def _hint_mode_id(self, mode=None) -> int:
+        """0 = omit, 1 = null state, 2 = real ``.cond`` (for the TB scalar)."""
+        mode = self.sample_hints if mode is None else mode
+        return {"omit": 0, "null": 1, "cond": 2}.get(mode, 1)
+
     def _accumulate_hint_gap(self, batch, out):
+
         """``CE(no hints) - CE(with hints)`` for one validation batch.
 
         The hints are derived from the *target audio*, so at train time they are
@@ -884,7 +934,14 @@ class TrainModule(pl.LightningModule):
             return
         if self.logger is None or len(self.test_dataset) == 0:
             return
-        print("=== Sampling ===")
+        hint_desc = {"cond": "real .cond", "null": "trained null state",
+                     "omit": "OMITTED (out of distribution)"}[self.sample_hints]
+        if not getattr(self.net, "hints", False):
+            hint_desc = "n/a (model has no hint tables)"
+        print(f"=== Sampling (hints: {hint_desc}) ===")
+        if self.logger is not None:
+            self._add_scalar("sample/hints_mode", torch.tensor(
+                float(self._hint_mode_id())))
         self.net.eval()
         n = int(self.config.train.get("sample_count", 2))
         frames = int(self.config.train.get("sample_frames", 128))
@@ -909,26 +966,28 @@ class TrainModule(pl.LightningModule):
                      for k, v in batch.items()}
             code_len = int(batch["code_lengths"][0].item())
             gen_frames = max(1, min(frames, code_len))
+            hint_arg, hint_tag = self._sample_hint_arg(batch)
 
             codes, gen_lens = self.net.generate(
                 batch["phone_ids"], batch["phone_lengths"], batch["sid"],
                 max_frames=gen_frames, temperature=temperature, top_k=top_k,
-                return_lengths=True,
+                return_lengths=True, hints=hint_arg,
             )  # (B, K, n) with n <= gen_frames when EOS stopped it early
             n_gen = int(codes.shape[-1])
             if self.net.eos_token:
                 # How many frames the model decided to produce (max over the
                 # batch): with EOS this is the "did it learn to stop?" signal.
-                self._add_scalar(f"sample/gen_frames_{j}", gen_lens.max())
+                self._add_scalar(f"sample{hint_tag}/gen_frames_{j}",
+                                 gen_lens.max())
 
             # Ground truth for the same item (spec rows, then pitch rows).
             gt = torch.cat([batch["spec_codes"][0], batch["pitch_codes"][0]],
                            dim=0)[:, :n_gen]
 
-            self._log_code_maps(j, gt, codes[0])
+            self._log_code_maps(j, gt, codes[0], hint_tag)
 
             if self.net_g is not None:
-                self._log_audio(j, gt, codes[0], batch["sid"])
+                self._log_audio(j, gt, codes[0], batch["sid"], hint_tag)
 
             if self.net.fim:
                 # Regenerate a fixed-length middle span of the *ground-truth*
@@ -936,7 +995,8 @@ class TrainModule(pl.LightningModule):
                 # direct "does infill work?" view (the free-running samples above
                 # are plain AR generation).
                 try:
-                    self._log_infill(j, batch, temperature, top_k)
+                    self._log_infill(j, batch, temperature, top_k,
+                                     hint_arg, hint_tag)
                 except Exception as e:
                     print(f"FIM infill probe failed: {e}")
 
@@ -944,7 +1004,9 @@ class TrainModule(pl.LightningModule):
                 own = int(batch["sid"][0].item())
                 probe = [own] + [s for s in candidates if s != own][:probe_n]
                 self._log_speaker_probe(j, batch, probe, gen_frames,
-                                        temperature, top_k)
+                                        temperature, top_k,
+                                        hint_arg, hint_tag)
+
 
             if ood_sid is None:
                 ood_sid = batch["sid"][:1]
@@ -992,9 +1054,22 @@ class TrainModule(pl.LightningModule):
         self.logger.experiment.add_audio(
             tag, audio, global_step=self.global_step, sample_rate=sample_rate)
 
-    def _log_code_maps(self, j, gt, pred):
-        """Target-vs-generated codebook heatmaps, one figure per group."""
+    @staticmethod
+    def _hint_desc(tag: str) -> str:
+        """Human-readable hint state for figure titles (``""`` = no tables)."""
+        return {"_hint": "with hints", "_nohint": "null hints",
+                "_omit": "hints omitted"}.get(tag, "")
+
+    def _log_code_maps(self, j, gt, pred, tag: str = ""):
+        """Target-vs-generated codebook heatmaps, one figure per group.
+
+        ``tag`` names the hint state that produced ``pred`` (see
+        ``_sample_hint_arg``) and is part of both the image and the scalar tag,
+        so "which state was this sample generated in?" is visible in
+        TensorBoard instead of being a matter of what the code passed.
+        """
         n_spec = self.net.spec_codebook_num
+        desc = self._hint_desc(tag)
         groups = (
             ("spec", gt[:n_spec], pred[:n_spec], self.net.vocab_sizes[0]),
             ("pitch", gt[n_spec:], pred[n_spec:], self.net.vocab_sizes[-1]),
@@ -1003,19 +1078,21 @@ class TrainModule(pl.LightningModule):
             if g.shape[0] == 0:
                 continue
             labels = [f"book {i}" for i in range(g.shape[0])]
+            title = f"{name} codes @ step {self.global_step}"
+            if desc:
+                title = f"{name} codes ({desc}) @ step {self.global_step}"
             self._add_image(
-                f"codes/{name}_{j}",
-                plot_code_comparison_figure(
-                    g, p, pad, f"{name} codes @ step {self.global_step}",
-                    labels))
+                f"codes{tag}/{name}_{j}",
+                plot_code_comparison_figure(g, p, pad, title, labels))
             # Free-running agreement on real (non-pad) target frames: unlike
             # teacher-forced accuracy this is the number that decides whether
             # the generated audio is intelligible.
             valid = g != int(pad)
             if bool(valid.any()):
                 self._add_scalar(
-                    f"sample/{name}_code_match_frac_{j}",
+                    f"sample{tag}/{name}_code_match_frac_{j}",
                     (g == p).float()[valid].mean())
+
 
     def _decode_codes(self, codes, sid):
         """(K, T) codes -> (waveform, f0 in Hz (T,)) through stage 1."""
@@ -1025,7 +1102,7 @@ class TrainModule(pl.LightningModule):
             return_pitch=True)
         return audio[0].squeeze(0).float().cpu().numpy(), f0[0]
 
-    def _log_audio(self, j, gt, pred, sid):
+    def _log_audio(self, j, gt, pred, sid, tag: str = ""):
         try:
             audio_gt, f0_gt = self._decode_codes(gt, sid)
             audio_pred, f0_pred = self._decode_codes(pred, sid)
@@ -1034,29 +1111,38 @@ class TrainModule(pl.LightningModule):
             return
         sr = int(self.config.data.sampling_rate)
         hop = int(self.config.data.hop_length)
-        self._add_audio(f"audio/target_{j}", audio_gt, sr)
-        self._add_audio(f"audio/generated_{j}", audio_pred, sr)
+        desc = self._hint_desc(tag)
+        self._add_audio(f"audio{tag}/target_{j}", audio_gt, sr)
+        self._add_audio(f"audio{tag}/generated_{j}", audio_pred, sr)
+        pitch_title = f"f0 decoded from codes @ step {self.global_step}"
+        mel_title = f"log-mel @ step {self.global_step}"
+        if desc:
+            pitch_title = f"f0 ({desc}) @ step {self.global_step}"
+            mel_title = f"log-mel ({desc}) @ step {self.global_step}"
         self._add_image(
-            f"pitch/{j}",
+            f"pitch{tag}/{j}",
             plot_pitch_curves_figure(
                 [("target codes", f0_gt), ("generated codes", f0_pred)],
-                hop, sr, f"f0 decoded from codes @ step {self.global_step}"))
+                hop, sr, pitch_title))
         self._add_image(
-            f"mel/{j}",
-            plot_mel_comparison_figure(
-                audio_gt, audio_pred, sr, hop,
-                f"log-mel @ step {self.global_step}"))
+            f"mel{tag}/{j}",
+            plot_mel_comparison_figure(audio_gt, audio_pred, sr, hop,
+                                       mel_title))
 
-    def _log_infill(self, j, batch, temperature, top_k):
+
+    def _log_infill(self, j, batch, temperature, top_k, hint_arg="null",
+                    tag: str = ""):
         """Regenerate a fixed-length middle span of a ground-truth item.
 
         Picks ``prefix = T//3`` and ``middle = T//3`` frames (leaving a suffix),
         blanks the middle, calls :meth:`CodeTransformer.infill` with the known
         prefix/suffix, and logs target-vs-regenerated codes (and audio when a
-        stage-1 Generator is loaded).  ``sample/fim_middle_code_match_{j}`` is
-        the free-running agreement of the regenerated middle with the original;
-        it is a *sample* number (voice sampling variance means it is never 1.0
-        for a good model), but a value near chance means the middle is ignored.
+        stage-1 Generator is loaded).  ``sample{tag}/fim_middle_code_match_{j}``
+        is the free-running agreement of the regenerated middle with the
+        original; it is a *sample* number (voice sampling variance means it is
+        never 1.0 for a good model), but a value near chance means the middle is
+        ignored.  ``hint_arg`` is resolved by ``_sample_hint_arg`` and ``tag``
+        names that state in the log.
         """
         T = int(batch["code_lengths"][0].item())
         if T < 6:
@@ -1075,24 +1161,26 @@ class TrainModule(pl.LightningModule):
         middle = self.net.infill(
             batch["phone_ids"][:1], batch["phone_lengths"][:1], batch["sid"][:1],
             prefix, suffix, m, temperature=temperature, top_k=top_k,
+            hints=hint_arg,
         )                                                       # (1, K, m)
         regen = torch.cat([prefix, middle, suffix], dim=2)[0]  # (K, T)
-        self._log_code_maps(f"fim{j}", codes, regen)
+        self._log_code_maps(f"fim{j}", codes, regen, tag)
         match = (middle[0, :, :m] == codes[:, p:p + m]).float().mean()
-        self._add_scalar(f"sample/fim_middle_code_match_{j}", match)
-        self._add_scalar(f"sample/fim_spec_code_match_{j}",
+        self._add_scalar(f"sample{tag}/fim_middle_code_match_{j}", match)
+        self._add_scalar(f"sample{tag}/fim_spec_code_match_{j}",
                          (middle[0, :n_spec, :m] == codes[:n_spec, p:p + m])
                          .float().mean())
         if self.net_g is not None:
-            self._log_audio(f"fim{j}", codes, regen, batch["sid"][:1])
+            self._log_audio(f"fim{j}", codes, regen, batch["sid"][:1], tag)
 
     def _log_speaker_probe(self, j, batch, sids, gen_frames, temperature,
-                           top_k):
+                           top_k, hint_arg="null", tag: str = ""):
         """Generate the same phonemes for several speakers.
 
         Logs (a) how much of the generated code stream changes when only
         ``sid`` changes and (b) the decoded f0 contours / audio, which makes
-        speaker conditioning (and speaker bleed) directly visible.
+        speaker conditioning (and speaker bleed) directly visible.  ``hint_arg``
+        / ``tag`` are the hint state, as in ``_log_code_maps``.
         """
         n_spec = self.net.spec_codebook_num
         b = len(sids)
@@ -1103,7 +1191,8 @@ class TrainModule(pl.LightningModule):
         codes, lens = self.net.generate(phone_ids, phone_lengths, sid_t,
                                         max_frames=gen_frames,
                                         temperature=temperature, top_k=top_k,
-                                        return_lengths=True)
+                                        return_lengths=True,
+                                        hints=hint_arg)
         if self.net.eos_token:
             # Trim to the shortest stream: past its own end each row would be
             # the repeat-filled last frame (see CodeTransformer.generate), which
@@ -1112,9 +1201,12 @@ class TrainModule(pl.LightningModule):
         diff = (codes[1:] != codes[:1]).float()  # (B-1, K, T)
         if self.net.eos_token:
             # Only meaningful with EOS: otherwise every stream is `gen_frames`.
-            self._add_scalar("probe/gen_frames", lens.max())
-        self._add_scalar("probe/spec_code_change_frac", diff[:, :n_spec].mean())
-        self._add_scalar("probe/pitch_code_change_frac", diff[:, n_spec:].mean())
+            self._add_scalar(f"probe{tag}/gen_frames", lens.max())
+        self._add_scalar(f"probe{tag}/spec_code_change_frac",
+                         diff[:, :n_spec].mean())
+        self._add_scalar(f"probe{tag}/pitch_code_change_frac",
+                         diff[:, n_spec:].mean())
+
 
         if self.net_g is None:
             return
@@ -1130,14 +1222,18 @@ class TrainModule(pl.LightningModule):
         sr = int(self.config.data.sampling_rate)
         hop = int(self.config.data.hop_length)
         for i, s in enumerate(sids):
-            self._add_audio(f"probe/audio_sid{s}_{j}",
+            self._add_audio(f"probe{tag}/audio_sid{s}_{j}",
                             audio[i].squeeze(0).float().cpu().numpy(), sr)
+        desc = self._hint_desc(tag)
+        title = f"same phonemes, different speaker @ step {self.global_step}"
+        if desc:
+            title = (f"same phonemes, different speaker, {desc} @ step "
+                     f"{self.global_step}")
         self._add_image(
-            f"probe/pitch_{j}",
+            f"probe{tag}/pitch_{j}",
             plot_pitch_curves_figure(
                 [(f"sid {s}", f0[i]) for i, s in enumerate(sids)],
-                hop, sr,
-                f"same phonemes, different speaker @ step {self.global_step}"))
+                hop, sr, title))
 
         # Mean |delta f0| vs the item's own speaker, over frames voiced in
         # both contours: near-zero => the model is ignoring `sid`.
@@ -1147,7 +1243,8 @@ class TrainModule(pl.LightningModule):
             if bool(both.any()):
                 deltas.append((f0[i][both] - f0[0][both]).abs().mean())
         if deltas:
-            self._add_scalar("probe/f0_delta_hz", torch.stack(deltas).mean())
+            self._add_scalar(f"probe{tag}/f0_delta_hz",
+                             torch.stack(deltas).mean())
 
     # ------------------------------------------------------------------ #
     # Out-of-distribution text probe
@@ -1253,6 +1350,12 @@ class TrainModule(pl.LightningModule):
             sid = torch.tensor([int(sid_cfg)], dtype=torch.long,
                                device=self.device)
 
+        # Held-out text has no `.cond` (there is no target audio to derive one
+        # from), so `cond` cannot apply here: fall back to the trained null
+        # state, or `omit` when that is what the run asked for.
+        hint_arg, hint_tag = self._sample_hint_arg(None)
+        print(f"OOD generation (hints: {self._hint_desc(hint_tag) or 'none'})")
+
         for i, (text, ids) in enumerate(items[:limit]):
             phone_ids = torch.tensor(ids, dtype=torch.long,
                                      device=self.device).unsqueeze(0)
@@ -1261,6 +1364,7 @@ class TrainModule(pl.LightningModule):
             codes, lens = self.net.generate(
                 phone_ids, phone_lengths, sid, max_frames=frames,
                 temperature=temperature, top_k=top_k, return_lengths=True,
+                hints=hint_arg,
             )  # (1, K, n)
             codes = codes[0]  # (K, n)
             n_gen = int(codes.shape[-1])
@@ -1268,14 +1372,15 @@ class TrainModule(pl.LightningModule):
                 # The whole point of the probe is to run past the trained
                 # length; with EOS the model may instead decide to stop, so log
                 # the length it chose (`frames` is only the upper bound).
-                self._add_scalar(f"ood/gen_frames_{i}", lens.max())
+                self._add_scalar(f"ood{hint_tag}/gen_frames_{i}", lens.max())
 
             if self.logger is not None:
                 self.logger.experiment.add_text(
-                    f"ood/text_{i}", text, global_step=self.global_step)
+                    f"ood{hint_tag}/text_{i}", text,
+                    global_step=self.global_step)
             print(f"OOD sample {i}: {len(ids)} phonemes -> {n_gen} code "
                   f"frames: {text}")
-            self._log_generated_code_maps(f"ood/{i}", codes)
+            self._log_generated_code_maps(f"ood{hint_tag}/{i}", codes)
 
             if self.net_g is None:
                 continue
@@ -1286,17 +1391,18 @@ class TrainModule(pl.LightningModule):
                 continue
             sr = int(self.config.data.sampling_rate)
             hop = int(self.config.data.hop_length)
-            self._add_audio(f"ood/audio_{i}", audio, sr)
+            self._add_audio(f"ood{hint_tag}/audio_{i}", audio, sr)
             self._add_image(
-                f"ood/pitch_{i}",
+                f"ood{hint_tag}/pitch_{i}",
                 plot_pitch_curves_figure(
                     [("generated", f0)], hop, sr,
                     f"OOD f0 @ step {self.global_step}"))
             self._add_image(
-                f"ood/mel_{i}",
+                f"ood{hint_tag}/mel_{i}",
                 plot_mel_figure(
                     audio, sr, hop,
                     f"OOD log-mel @ step {self.global_step}"))
+
 
     # ------------------------------------------------------------------ #
     # Train / val
@@ -1581,12 +1687,17 @@ class TrainModule(pl.LightningModule):
         rotate = torch.roll(torch.arange(B, device=dev), 1)
 
         # The encoder output is the same in four of the five arms, so encode
-        # once per distinct text (twice in total) instead of five times.
+        # once per distinct text (twice in total) instead of five times.  The
+        # hints must be the same state training used (the val batch carries
+        # them), otherwise the probe measures a different function than the
+        # loss it is compared against.
+        hint_arg = batch if "hint_int" in batch else "null"
         mem, mmask = self.net.encode(batch["phone_ids"], batch["phone_lengths"],
-                                     batch["sid"])
+                                     batch["sid"], hints=hint_arg)
         mem_rot, mmask_rot = self.net.encode(batch["phone_ids"][rotate],
                                              batch["phone_lengths"][rotate],
-                                             batch["sid"])
+                                             batch["sid"], hints=hint_arg)
+
 
         def run(memory, mask, codes_use=None, **override):
             return self.net.code_loss(

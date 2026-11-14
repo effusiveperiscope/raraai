@@ -7,6 +7,16 @@
 `fim_rate: 0.2`. M3b (per-channel probes) and M5 (inference ergonomics) are not
 started.
 
+> **Phase 0 (2026-11-14):** the generation paths were passing `hints=None`,
+> which omits the hint vectors instead of using the trained level-0 "not
+> provided" state (measured: +0.051 nats and a 52 % encoder-memory shift on
+> `transformer_v0.9`). Fixed: `CodeTransformer.null_hints()` /
+> `resolve_hints()`, `train.sample_hints`, and the hint state is now part of
+> every sample log tag. Evidence, open design questions (injection site,
+> guidance, register vs the spec codes) and the phase plan live in
+> **`scratch/HINTS_V1_PLAN.md`**.
+
+
 **Register objection — resolved in v0.9.** The absolute register channel was
 ~79 % between-speaker variance (ICC(1) = 0.794), i.e. redundant with `spk_emb`
 and confounded with it. It is now bucketed on the **deviation from the
@@ -23,9 +33,10 @@ evidence.
 ## 1. Goal
 
 Give the stage-2 `CodeTransformer` **optional, coarse control knobs** over how a
-sentence is spoken — loudness, register (pitch level), per-word pitch, per-word
-pacing, and a sentence-level semantic vector — without touching the stage-1 code
-space.
+sentence is spoken — perceptual intensity (emotional / phonation effort, *not*
+loudness), register (pitch level), per-word pitch, per-word pacing, and a
+sentence-level semantic vector — without touching the stage-1 code space.
+
 
 Two things this buys:
 
@@ -56,7 +67,8 @@ Five additive side channels, all owned by `CodeTransformer`:
 | intensity | `n_levels` corpus quantiles | DSP regressor on the 48 kHz wave (calibrated + whisper-gated, 1–9) | encoder + decoder (constant per clip) |
 | register | `n_levels` corpus quantiles | voiced-median f0, semitones re: 100 Hz — **absolute; under review, see §8.5** | encoder (constant per clip) |
 | semantic | 384-d continuous | `bge-small-en-v1.5` CLS, L2-normalised | encoder + decoder (`Linear(384, H)`) |
-| word pitch | 7 voiced bins + 1 unvoiced | word's voiced-mean f0, semitones re: the utterance's voiced median | encoder, per phone |
+| word pitch | 8 voiced bins + 1 unvoiced | word's voiced-mean f0, semitones re: the utterance's voiced median | encoder, per phone |
+
 | word timing | 8 log2 buckets | word's start-to-start duration in code frames | encoder, per phone |
 
 Decisions worth remembering:
@@ -259,7 +271,8 @@ Watch, in order: `val_hint_gap` (should grow from ~0), `val_loss_nohint` (must
 
 | channel | measurable prediction |
 |---|---|
-| intensity | decoded RMS / loudest-frame dBFS should move monotonically with the level |
+| intensity | **counterfactual sweep, not CE**: same text/speaker/seed at levels 0..8, decode, and score the *decoded audio* with the same DSP intensity model (the matched instrument). Loudness/RMS is **not** the metric — the channel is loudness-independent by construction. Pair it with an intelligibility check at the extremes |
+
 | register | voiced-median f0 of the decoded audio vs level (RMVPE) — **necessary but not sufficient**: a voice swap also moves f0, so pair it with the identity check in §8.5 |
 | word pitch | per-word f0 delta ≈ the bin's semitones |
 | word timing | word durations follow the slot bucket |

@@ -123,7 +123,9 @@ def load_level_edges(path: str, name: str):
 
 #: Default cuts for the **word pitch** hint, in semitones relative to the
 #: utterance's voiced median.  Two semitones per bin, symmetric, saturating --
-#: 7 voiced bins (``< -6``, ``-6..-4``, ... , ``>= 6``).
+#: **8** voiced bins (``< -6``, ``-6..-4``, ... , ``>= 6``; ``N = len(edges)+1``),
+#: then the unvoiced class at ``N + 1`` and "absent" at 0.
+
 #:
 #: Fixed rather than corpus quantiles on purpose: the value is *relative to the
 #: utterance*, and an inference UI has to be able to say "raise this word a
@@ -144,15 +146,25 @@ def word_pitch_levels(pitch_st, voiced, edges=None):
     ``pitch_st`` is the word's voiced-mean f0 in semitones relative to the
     utterance (``FeatureExtractor.hint_words`` -> ``pitch_word_st``, NaN where
     the word has no voiced frames) and ``voiced`` its ``pitch_word_voiced``
-    flag.  The explicitly-unvoiced class is the last row of the table rather
-    than ``0`` so that "not provided" and "this word is unvoiced" stay
+    flag.  ``N`` is the number of voiced bins, i.e. ``len(edges) + 1`` (the
+    outermost bins saturate), so the unvoiced class is ``len(edges) + 2``.
+
+    The explicitly-unvoiced class is the last row of the table rather than
+    ``0`` so that "not provided" and "this word is unvoiced" stay
     distinguishable -- the whole point of the dropout design.
+
+    Note: this id must be *above* every voiced bin.  It used to be
+    ``len(edges) + 1``, which collides with the top voiced bin (``>= +6 st``),
+    so unvoiced words were indistinguishable from the highest pitch bin and the
+    table's real unvoiced row (``n_pitch_levels + 1``) never received a
+    gradient (measured on transformer_v0.9: row 9 exactly 0.0).
     """
     edges = list(DEFAULT_PITCH_EDGES if edges is None else edges)
     lv = np.asarray(bucket_levels(pitch_st, edges), dtype=np.int64)
     v = np.asarray(voiced, dtype=bool)
-    lv = np.where(v, lv, len(edges) + 1)
+    lv = np.where(v, lv, len(edges) + 2)
     return int(lv) if np.ndim(voiced) == 0 else lv
+
 
 
 def slot_bucket(slots, n_buckets: int = DEFAULT_SLOT_BUCKETS):

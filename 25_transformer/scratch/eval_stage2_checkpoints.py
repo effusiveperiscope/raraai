@@ -123,11 +123,13 @@ def fim_probe(net, loader, batches, device) -> Dict[str, float]:
         mid = torch.full((B,), m, dtype=torch.long, device=device)
         rot = torch.roll(torch.arange(B, device=device), 1)
 
+        hint_arg = batch if "hint_int" in batch else "null"
         mem, mmask = net.encode(batch["phone_ids"], batch["phone_lengths"],
-                                batch["sid"])
+                                batch["sid"], hints=hint_arg)
         mem_rot, mmask_rot = net.encode(batch["phone_ids"][rot],
                                         batch["phone_lengths"][rot],
-                                        batch["sid"])
+                                        batch["sid"], hints=hint_arg)
+
 
         def run(memory, mask, codes_use=None, **override):
             return net.code_loss(
@@ -209,12 +211,27 @@ def main():
     device = torch.device(args.device if args.device else
                           ("cuda:0" if torch.cuda.is_available() else "cpu"))
     val_filelist = args.val_filelist or config.train.val_filelist
+    # Hints: the val dataset must carry the same channels training's `val_loss`
+    # saw, otherwise a hints checkpoint is scored against its *null* state and
+    # the number is not comparable to TensorBoard.  `hints: false` runs are
+    # unaffected (the dataset emits no hint keys).
+    tc = config.transformer
+    hint_kwargs = dict(
+        hints=bool(tc.get("hints", False)),
+        hints_json=tc.get("hints_json", None),
+        hint_dropout=dict(tc.get("hint_dropout", {}) or {}),
+        hint_null_all=0.0,          # never drop on a val item
+        hint_pitch_edges=tc.get("hint_pitch_edges", None),
+        n_slot_buckets=int(tc.get("n_slot_buckets", 8) or 8),
+    )
     dataset = CodeDataset(
         val_filelist, is_train=False,
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
+        **hint_kwargs,
     )
+
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         collate_fn=CodeCollator(config=config), num_workers=0)
     print(f"val: {val_filelist} ({len(dataset)} items)  device={device}  "

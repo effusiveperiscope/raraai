@@ -88,9 +88,10 @@ a level id cannot mean two different things.
 
 The **word-pitch** and **word-timing** hints deliberately do *not* use fitted
 edges. Word pitch is in semitones relative to the utterance's voiced median
-(`DEFAULT_PITCH_EDGES`: +-2 st cuts, i.e. 7 voiced bins, plus one explicit
-"unvoiced" bin) and word timing is a log2 bucket of the word's duration in code
-frames (`DEFAULT_SLOT_BUCKETS` = 8). Both are defined by their units, and a UI
+(`DEFAULT_PITCH_EDGES`: 2 st cuts from -6 to +6, saturating, i.e. 8 voiced bins,
+plus one explicit "unvoiced" bin) and word timing is a log2 bucket of the word's
+duration in code frames (`DEFAULT_SLOT_BUCKETS` = 8). Both are defined by their
+units, and a UI
 has to be able to say "raise this word a major third" or "make it 12 frames" and
 have that mean the same thing in every corpus -- quantile edges would renumber
 the bins per corpus and make a stored level meaningless outside it. See
@@ -154,7 +155,8 @@ the problem away.
 |---|---|---|
 | `version` | int | 1 |
 | `n_phone` | int | `phone_ids.numel()` -- the staleness anchor |
-| `intensity` | float32(1) | calibrated + whisper-gated DSP score, 1..9 |
+| `intensity` | float32(1) | calibrated + whisper-gated DSP prediction of **perceptual intensity** (emotional / phonation effort), 1..9. **Not loudness**: the feature set peak-normalises every clip on purpose |
+
 | `register_st` | float32(1) | voiced-median f0, semitones re: 100 Hz |
 | `semantic` | float16(384) | bge-small-en-v1.5 CLS embedding, L2-normalised |
 

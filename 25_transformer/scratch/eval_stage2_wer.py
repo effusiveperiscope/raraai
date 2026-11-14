@@ -239,10 +239,14 @@ def synthesize_from_generated(net, net_g, items, args, device, pad_id,
     ``collator`` (a ``CodeCollator``) is only passed with ``--hints``: it turns
     the chunk into the batch dict the model expects, so the hint channels are
     supplied from each item's ``.cond`` exactly as they are at training time.
-    Without it the generation runs in the "no hints" state (level 0 everywhere),
-    which is what every pre-v0.9 inference path did -- and measuring both arms
-    is how a hint train/inference mismatch becomes visible instead of being
-    guessed at.
+    Without it the generation runs in the model's **trained null state** (level
+    0 everywhere / ``sem_null``) -- that is the state ``hint_dropout`` trains,
+    and ``CodeTransformer.resolve_hints`` maps ``None`` to it.  (Pre-Phase-0
+    every path instead *omitted* the hint vectors, a different function worth
+    +0.051 nats on v0.9; pass ``hints="omit"`` to reproduce those numbers.)
+    Measuring both arms is how a hint train/inference mismatch becomes visible
+    instead of being guessed at.
+
     """
     wavs = []
     hop = code_frame_samples(net_g)
@@ -397,11 +401,15 @@ def main():
                          "errors from duration errors")
     ap.add_argument("--hints", action="store_true",
                     help="supply each item's <.cond> hint channels at "
-                         "generation time (default: none, i.e. every channel at "
-                         "its 'absent' level 0).  Run both ways to see whether a "
-                         "model depends on the hints at inference -- v0.8 was "
-                         "identical either way, i.e. the channels were inert "
-                         "(HINTS_PLAN.md 9).")
+                         "generation time (default: the model's *trained null "
+                         "state*, i.e. every channel at its 'absent' level 0 / "
+                         "sem_null -- the state hint_dropout trains, not the "
+                         "pre-Phase-0 'send no vectors' path; use "
+                         "CodeTransformer's hints='omit' yourself if you need "
+                         "that).  Run both ways to see whether a model depends "
+                         "on the hints at inference -- v0.8 was identical either "
+                         "way, i.e. the channels were inert (HINTS_PLAN.md 9).")
+
     ap.add_argument("--arms", default="generated,reference",
                     help="comma separated subset of generated,reference")
     ap.add_argument("--asr_model", default="Qwen/Qwen3-ASR-0.6B")

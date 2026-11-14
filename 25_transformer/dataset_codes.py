@@ -32,9 +32,13 @@ Conditioning hints (``transformer.hints``)
 ``hints/build.py`` writes a sibling ``<base>.cond`` next to each
 ``<base>.phone_ids`` holding *continuous* values (intensity 1-9, register in
 semitones, a 384-d sentence vector, and -- once the alignment pass has run --
-per-word pitch/timing).  With ``hints=True`` this dataset reads that file and
-emits level ids, so the *bucket count* stays a config change and never needs the
-corpus rebuilt:
+per-word pitch/timing).  ``intensity`` is *perceptual* intensity (emotional /
+phonation effort, loudness-independent by construction -- its DSP features
+peak-normalise) and is a deliberately coarse, clip-level, end-user control; see
+``configs/transformer.yaml``.  With ``hints=True`` this dataset reads that file
+and emits level ids, so the *bucket count* stays a config change and never needs
+the corpus rebuilt:
+
 
     hint_int      (B,)      long   intensity level,      0 = absent
     hint_reg      (B,)      long   register level,       0 = absent

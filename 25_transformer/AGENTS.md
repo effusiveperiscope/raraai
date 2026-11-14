@@ -1122,7 +1122,8 @@ levels is a config change and never a re-run):
 |---|---|---|
 | `version` | int | 1 |
 | `n_phone` | int | `phone_ids.numel()`, the staleness anchor |
-| `intensity` | float32(1) | calibrated + whisper-gated DSP score, 1..9 |
+| `intensity` | float32(1) | calibrated + whisper-gated DSP prediction of **perceptual intensity** (emotional / phonation effort, 1..9). **Not loudness** — the feature set peak-normalises every clip on purpose. A deliberately coarse, *clip-level*, end-user control, not a reconstruction aid |
+
 | `register_st` | float32(1) | voiced-median f0, semitones re: 100 Hz |
 | `semantic` | float16(384) | bge-small-en-v1.5 CLS embedding, L2-normalised |
 
@@ -1219,16 +1220,28 @@ obvious place for them):
 
 | channel | levels | where |
 |---|---|---|
-| intensity | `n_levels` equal-frequency bins from `hints.json` | encoder + decoder |
+| intensity | `n_levels` equal-frequency bins from `hints.json` (perceptual intensity, loudness-independent) | encoder + decoder |
+
 | register | `n_levels` equal-frequency bins from `hints.json`, fitted on the **deviation from the speaker's median** (v0.9; see below) | encoder |
 | semantic | 384-d bge vector -> `Linear(384, H)` | encoder + decoder |
-| word pitch | 7 voiced bins + 1 unvoiced (`hint_pitch_edges`, fixed) | encoder, per phone |
+| word pitch | 8 voiced bins (2 st cuts in [-6, +6], saturating) + 1 unvoiced (`hint_pitch_edges`, fixed) | encoder, per phone |
+
 | word timing | 8 log2 duration buckets (`n_slot_buckets`, fixed) | encoder, per phone |
 
 Level id `0` is **"not provided"** in every table -- a trained state, because
 `hint_dropout` (per channel) and `hint_null_all` drop hint channels on training
 items. The unvoiced word-pitch class is the *last* row (`n_pitch_levels + 1`),
 not `0`, so "this word has no f0" and "no hint" stay distinct.
+
+> **Phase 0 fix: the unvoiced pitch id was colliding with the top voiced bin.**
+> `word_pitch_levels` emitted `len(edges) + 1` (= 8) for unvoiced, but the voiced
+> bins are `1..len(edges)+1` (the outer bins saturate), so unvoiced words were
+> indistinguishable from `>= +6 st` and the table's real unvoiced row
+> (`n_pitch_levels + 1` = 9) never received a gradient — measured on
+> `transformer_v0.9`, `pitch_emb` row 9 was exactly 0.0. It is now
+> `len(edges) + 2`. No re-preprocessing is needed (`.cond` stores the continuous
+> `pitch_word_st` / `pitch_word_voiced`, and the bucketing happens at load).
+
 
 Why intensity/register are corpus quantiles but pitch/timing are fixed: the
 former are absolute scales, so equal-frequency edges make the table usable
@@ -1287,7 +1300,26 @@ Wiring:
   this is the only number that distinguishes "the model got better" from "the
   model reads the answer": a flat ~0 gap means the tables are dead (or dropout is
   too high), a growing gap while `val_loss_nohint` rises is the VC failure mode.
+- **Generation runs in the trained null state, not "no hints" (Phase 0).**
+  `train.hint_dropout` / `hint_null_all` train **level 0** (`sem_null` for the
+  semantic vector) as the "not provided" state, so
+  `CodeTransformer.null_hints(B, N)` is the only hint-free state the model ever
+  saw. Every generation path used to pass `hints=None`, which omits the vectors
+  altogether — a *different* function: measured on `transformer_v0.9` it costs
+  **+0.051 nats** and shifts the encoder memory by **52 %** versus the level-0
+  rows (+0.014 nats vs real hints), and greedy generation agrees on only 32 % of
+  frames. `resolve_hints()` now maps `None` (and `"null"`/`"zero"`) to that
+  state, `"omit"` reproduces the old behaviour (ablation only), and
+  `train.sample_hints: cond | null | omit` chooses it for the TensorBoard
+  samples, the FIM infill probe, the speaker probe and the OOD probe (OOD has no
+  `.cond`, so `cond` degrades to `null`). The REPL reads the same key and takes
+  `--hints null|omit`. **Every sample log tag now carries the state**
+  (`codes_hint/`, `codes_nohint/`, `codes_omit/`, `audio…`, `probe…`, `ood…`; no
+  suffix when the model has no hint tables), plus the scalar
+  `sample/hints_mode` (0 = omit, 1 = null, 2 = real `.cond`) and a printed
+  `=== Sampling (hints: …) ===` line.
 - **Guards**: `check_special_layout` refuses a checkpoint whose hint tables have
+
   different row counts than this `hints_json` (the level ids would be silently
   reinterpreted), and refuses a hints checkpoint loaded into `hints: false`.
   Warm-starting a hints model from a hints-less checkpoint is the intended
@@ -1367,14 +1399,20 @@ Wiring:
   come from `code_loss` on diagnostics steps. Every `train.sample_interval`
   epochs (and at train start) it also samples
   `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
-  `codes/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the
-  free-running agreement scalars `sample/{spec,pitch}_code_match_frac_{j}`,
-  `mel/`, `pitch/`, and — when `train.speaker_probe > 0` and the val set has
-  ≥2 speakers — `probe/*` (same phonemes re-generated per speaker, with
-  `probe/{spec,pitch}_code_change_frac` and `probe/f0_delta_hz` as numeric
-  "is the speaker conditioning doing anything" signals). Pitch curves come
+  `codes{tag}/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the
+  free-running agreement scalars `sample{tag}/{spec,pitch}_code_match_frac_{j}`,
+  `mel{tag}/`, `pitch{tag}/`, and — when `train.speaker_probe > 0` and the val
+  set has ≥2 speakers — `probe{tag}/*` (same phonemes re-generated per speaker,
+  with `probe{tag}/{spec,pitch}_code_change_frac` and `probe{tag}/f0_delta_hz`
+  as numeric "is the speaker conditioning doing anything" signals). `{tag}` is
+  the hint state the sample was generated in — `_hint` (real `.cond`),
+  `_nohint` (the trained null state, the default) or `_omit` (no hint vectors;
+  pre-Phase-0 behaviour), and empty when the model has no hint tables — so it is
+  always visible which state a clip came from; `sample/hints_mode` carries it as
+  a number and the sampling pass prints it. Pitch curves come
   from `Generator.infer_from_codes(..., return_pitch=True)`, which returns f0
   in Hz at the audio frame rate (`sampling_rate / hop_length`).
+
   Each sampling pass also runs an **out-of-distribution text probe**
   (`train.ood_samples`, default 1; `0` disables): `DEFAULT_OOD_TEXTS` (or
   `train.ood_texts`) is phonemized on CPU via
@@ -1705,6 +1743,28 @@ Wiring:
     needs `hints/build.py` to have written its `.cond` files (the dataset degrades
     a missing one to "no hints", counting them for the one-time
     `Hints: N without a .cond` print).
+
+22. **`hints=None` is not "no hints" for a hint-enabled model (Phase 0).**
+    `generate`/`infill`/`encode` resolve `None` (and `"null"`/`"zero"`) to
+    `CodeTransformer.null_hints()` -- the trained level-0 / `sem_null` state --
+    because that is the only hint-free state `hint_dropout` / `hint_null_all`
+    ever trained. Passing no vectors at all is a *different* function (measured:
+    +0.051 nats and a 52 % encoder-memory shift on `transformer_v0.9`), reachable
+    only via the explicit `"omit"`. Consequences:
+    - every generation path (TensorBoard samples, FIM infill probe, speaker
+      probe, OOD probe, `scratch/stage2_repl.py`, `eval_stage2_checkpoints.py`)
+      gets the null state for free, and the state is in the log tags
+      (`codes_hint/`, `codes_nohint/`, `codes_omit/`) and in
+      `sample/hints_mode`;
+    - a v0.7 (hints-less) checkpoint loaded into a `hints: true` config has
+      zero-valued hint tables, so for it null == omit and comparisons stay valid;
+    - `train.sample_hints: cond` is the only way to log samples *with* the
+      item's real `.cond`, and it is what a hint-quality claim must be measured
+      on (the default is `null`, the honest no-oracle state);
+    - do not add a new sampling path that forwards `hints` straight through
+      from an optional argument without calling `_sample_hint_arg` /
+      `resolve_hints` -- that is exactly how the mismatch above got in.
+
 
 
 ---

@@ -680,9 +680,17 @@ class CodeTransformer(nn.Module):
         self.relative_register = relative_register
         self.n_intensity_levels = 0
         self.n_register_levels = 0
-        # Voiced pitch bins; row ``n_pitch_levels + 1`` is "this word is
-        # unvoiced" (see ``hints.levels.word_pitch_levels``), hence ``+ 2`` rows.
+        # Voiced pitch bins (``len(edges) + 1`` of them, the outer bins
+        # saturate); row ``n_pitch_levels + 1`` is "this word is unvoiced" (see
+        # ``hints.levels.word_pitch_levels``), hence ``+ 2`` rows.
+        #
+        # Before Phase 0 the unvoiced class was emitted as ``len(edges) + 1``,
+        # which *collides* with the top voiced bin, so the last row never
+        # received a gradient (measured on transformer_v0.9: exactly 0.0) and
+        # unvoiced words were indistinguishable from ">= +6 st".  The table
+        # width was always right; the level id was not.
         self.n_pitch_levels = len(self.pitch_edges) + 1
+
         if self.hints:
             if not self.hints_json:
                 raise ValueError(
@@ -1064,15 +1072,88 @@ class CodeTransformer(nn.Module):
 
         ``hints`` is the collated batch (or any dict with the same keys); the
         hint channels are added to the phoneme embeddings inside the encoder.
-        Omitting it is identical to a pre-v0.8 model.
+        ``None`` on a hint-enabled model resolves to the **trained null state**
+        (all level 0 / ``sem_null``, see :meth:`resolve_hints`), which is what
+        every generation path should use; ``"omit"`` reproduces the historical
+        "no vectors at all" behaviour for ablations.  On a model without hint
+        tables both are a no-op, identical to a pre-v0.8 model.
         """
+        hints = self.resolve_hints(hints, phone_ids.shape[0], phone_ids.shape[1],
+                                   phone_ids.device)
         hint_vec, pos_hint = self._enc_hints(hints, phone_ids.device)
         return self.encoder(phone_ids, phone_lengths, sid,
                             hint_vec=hint_vec, pos_hint=pos_hint)
 
+
     # ------------------------------------------------------------------ #
     # Conditioning hints (v0.8)
     # ------------------------------------------------------------------ #
+    def null_hints(self, batch_size: int, n_phone: int, device=None,
+                   dtype: torch.dtype = torch.long) -> Optional[dict]:
+        """The trained "not provided" state, as a collator-shaped dict.
+
+        Every hint table has a level-0 row and ``sem_null`` is its own learned
+        vector, and ``train.hint_dropout`` / ``train.hint_null_all`` exercise
+        exactly this state during training.  **Omitting the vectors instead**
+        is a *different* function: measured on ``transformer_v0.9``, dropping
+        every channel to level 0 costs +0.014 nats against real hints, while
+        passing no hints at all costs +0.051 and changes the encoder memory by
+        52 %.  So generation must send this dict, not ``None``.
+
+        Args:
+            batch_size, n_phone: leading dimensions of the batch.
+            device: where to allocate; defaults to the hint tables' device.
+
+        Returns:
+            A dict with the same keys ``dataset_codes.CodeCollator`` produces,
+            or ``None`` when the model has no hint tables.
+        """
+        if not self.hints:
+            return None
+        dev = self.int_emb.weight.device if device is None else device
+
+        def zeros(*shape, dt=dtype):
+            return torch.zeros(*shape, dtype=dt, device=dev)
+
+        return {
+            "hint_int": zeros(batch_size),
+            "hint_reg": zeros(batch_size),
+            "hint_sem": zeros(batch_size, self.semantic_dim, dt=torch.float32),
+            "hint_sem_valid": zeros(batch_size, dt=torch.bool),
+            "hint_pitch": zeros(batch_size, n_phone),
+            "hint_slot": zeros(batch_size, n_phone),
+        }
+
+    def resolve_hints(self, hints, batch_size: int, n_phone: int, device):
+        """Normalise a ``hints`` argument; ``None`` -> the trained null state.
+
+        Accepts ``None`` (or ``"null"`` / ``"zero"``) for the trained "not
+        provided" state, ``"omit"`` for the pre-Phase-0 behaviour of passing no
+        vectors at all (kept only for ablations -- it is *out of distribution*
+        for a hint-enabled model), or an already-shaped dict/batch.  A dict
+        with no ``hint_int`` (a batch from a hints-less dataset) also means
+        "no hints available", i.e. the null state, so a hint-enabled model
+        never silently falls back to the out-of-distribution path.
+        """
+        if not self.hints:
+            return None
+        if hints is None:
+            return self.null_hints(batch_size, n_phone, device)
+        if isinstance(hints, str):
+            if hints in ("null", "zero"):
+                return self.null_hints(batch_size, n_phone, device)
+            if hints == "omit":
+                return None
+            raise ValueError(
+                f"unknown hints mode {hints!r}; expected 'null'/'zero' (the "
+                f"trained null state), 'omit' (no vectors at all), or a hint "
+                f"dict")
+        if isinstance(hints, dict) and hints.get("hint_int") is None:
+            return self.null_hints(batch_size, n_phone, device)
+        return hints
+
+
+
     def _semantic_hint(self, hints) -> Optional[torch.Tensor]:
         """Project the 384-d sentence vector to ``hidden_size``.
 
@@ -1549,6 +1630,11 @@ class CodeTransformer(nn.Module):
             stop_on_eos: ``None`` -> ``self.eos_token``.  Ignored when the model
                 was built without EOS.
             return_lengths: also return the ``(B,)`` per-sample frame counts.
+            hints: optional collated batch / hint dict.  ``None`` means the
+                **trained null state** (every channel at level 0, ``sem_null``
+                for the semantic vector) -- not "no hints"; pass ``"omit"`` for
+                the historical behaviour of dropping the vectors entirely (see
+                :meth:`resolve_hints`).
 
         Returns:
             ``(B, K, n)`` codes, or ``(codes, lengths)`` if ``return_lengths``.
@@ -1558,6 +1644,11 @@ class CodeTransformer(nn.Module):
         use_eos = self.eos_token if stop_on_eos is None else bool(stop_on_eos)
         use_eos = use_eos and self.eos_token
         try:
+            # ``None`` -> the trained null state (level 0 / ``sem_null``), which
+            # is the only hint-free state the model ever saw.  See
+            # ``resolve_hints``; pass "omit" to reproduce the pre-Phase-0 path.
+            hints = self.resolve_hints(hints, phone_ids.shape[0],
+                                       phone_ids.shape[1], phone_ids.device)
             memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
                                               hints=hints)
             dec_hint = self._dec_hint(hints)
@@ -1694,6 +1785,9 @@ class CodeTransformer(nn.Module):
                 Either may be empty (``p``/``s`` == 0).
             middle_frames: number of frames to generate (> 0).
             temperature, top_k: decoding knobs (``top_k=None`` disables).
+            hints: optional collated batch / hint dict; ``None`` = the trained
+                null state, ``"omit"`` = the historical "no vectors" path (see
+                :meth:`resolve_hints`).
 
         Returns:
             ``(B, K, middle_frames)`` freshly generated middle codes.
@@ -1705,6 +1799,8 @@ class CodeTransformer(nn.Module):
                 "sentinel classes); this model was built without it.")
         self.eval()
         try:
+            hints = self.resolve_hints(hints, phone_ids.shape[0],
+                                       phone_ids.shape[1], phone_ids.device)
             memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
                                               hints=hints)
             dec_hint = self._dec_hint(hints)

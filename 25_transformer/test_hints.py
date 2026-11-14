@@ -10,7 +10,12 @@ Covers the pieces that need no GPU, no Qwen aligner and no RMVPE:
 * ``FeatureExtractor.extract_hints`` vs ``hints/build.py`` on the same clip --
   the one-stop shop and the bulk builder must produce identical numbers, or a
   UI-built ``.cond`` and an offline one would mean different things;
-* the ``.cond`` round trip through ``torch.save`` / ``weights_only=True`` load.
+* the ``.cond`` round trip through ``torch.save`` / ``weights_only=True`` load;
+* the model's hint side channels, including the **null-hint state**: for a
+  hint-enabled model ``generate(hints=None)`` must equal
+  ``generate(hints="null")`` (the trained level-0 state every generation path
+  should use) and differ from ``hints="omit"`` (the pre-Phase-0 behaviour).
+
 
 Run from the repo root:
 
@@ -320,8 +325,17 @@ def test_word_hints_in_dataset(ds, filelist, hints_json):
     check("pitch level gathered from the word",
           item["hint_pitch"].tolist() == want_pitch.tolist(),
           f"{item['hint_pitch'].tolist()} vs {want_pitch.tolist()}")
+    n_voiced_bins = len(ds.pitch_edges) + 1     # ids 1..n_voiced_bins
     check("unvoiced word gets its own level",
-          (len(ds.pitch_edges) + 1) in want_pitch.tolist())
+          (n_voiced_bins + 1) in want_pitch.tolist())
+    # Phase 0: the unvoiced class used to be ``len(edges) + 1``, which collides
+    # with the *top voiced bin*, so the table's last row never got a gradient.
+    check("unvoiced id is above every voiced bin",
+          word_pitch_levels(99.0, True, ds.pitch_edges) == n_voiced_bins
+          and word_pitch_levels(0.0, False, ds.pitch_edges)
+          == n_voiced_bins + 1,
+          f"voiced {n_voiced_bins}, unvoiced {n_voiced_bins + 1}")
+
     check("slot level gathered from the word",
           item["hint_slot"].tolist() == want_slot.tolist(),
           f"{item['hint_slot'].tolist()}")
@@ -417,6 +431,45 @@ def test_model(batch, hints_json):
                      codes_all[:, :, :4], codes_all[:, :, 8:],
                      middle_frames=3, hints=b)
     check("infill with hints", tuple(mid.shape) == (B, 3, 3), f"{tuple(mid.shape)}")
+
+    # ---- null-hint state (Phase 0) ------------------------------------ #
+    # ``None`` must mean the *trained* "not provided" state (level 0 rows /
+    # sem_null), **not** "send no vectors": every generation path used to pass
+    # None, which is a different function (+0.051 nats and a 52 % memory shift
+    # on transformer_v0.9).  ``"omit"`` keeps the historical behaviour.
+    null = net.null_hints(B, int(b["phone_ids"].shape[1]))
+    check("null_hints has the collator's keys",
+          set(("hint_int", "hint_reg", "hint_sem", "hint_sem_valid",
+               "hint_pitch", "hint_slot")) <= set(null)
+          and int(null["hint_int"].abs().sum()) == 0
+          and null["hint_sem_valid"].sum() == 0)
+    with torch.no_grad():
+        args = (b["phone_ids"], b["phone_lengths"], b["sid"])
+        torch.manual_seed(1)
+        g_none, _ = net.generate(*args, max_frames=6, hints=None,
+                                 return_lengths=True)
+        torch.manual_seed(1)
+        g_null, _ = net.generate(*args, max_frames=6, hints="null",
+                                 return_lengths=True)
+        torch.manual_seed(1)
+        g_omit, _ = net.generate(*args, max_frames=6, hints="omit",
+                                 return_lengths=True)
+        m_none, _ = net.encode(*args, hints=None)
+        m_null, _ = net.encode(*args, hints=null)
+        m_omit, _ = net.encode(*args, hints="omit")
+    check("generate(hints=None) == generate(hints='null')",
+          torch.equal(g_none, g_null))
+    check("'omit' is a distinct (pre-Phase-0) state",
+          not torch.equal(g_none, g_omit))
+    check("encode(None) applies the level-0 rows",
+          torch.allclose(m_none, m_null)
+          and not torch.allclose(m_none, m_omit))
+    try:
+        net.encode(*args, hints="bogus")
+        check("unknown hint mode raises", False)
+    except ValueError:
+        check("unknown hint mode raises", True)
+
 
 
 def test_word_index(fe):
