@@ -20,17 +20,21 @@ revision, with the measurements that motivate it.
 state: `int_emb(0)`, `reg_emb(0)`, `pitch_emb(0)`, `slot_emb(0)`, `sem_null`.
 Every generation path, however, passed `hints=None`, which `_enc_hints` /
 `_dec_hint` interpret as "omit the vectors entirely" — a *different* function.
-Measured on `transformer_v0.9/best-checkpoint.ckpt`, 8 val items:
+Measured with `scratch/hint_channel_probe.py` on the **finished**
+`transformer_v0.9/last.ckpt` (step 433 455, epoch 70), 16 val items:
 
-| state passed to `generate` | CE (teacher-forced) | ‖memory‖ rel. diff vs real hints |
+| state passed to `generate` | CE (teacher-forced) | Δ vs real hints |
 |---|---|---|
-| real `.cond` hints | 2.3343 | — |
-| level-0 rows (`null`) | 2.3480 | 0.291 |
-| `None` (what every path did) | 2.3850 | **0.518** |
+| real `.cond` hints | 2.3142 | — |
+| level-0 rows (`null`) | 2.3371 | +0.0229 |
+| `None` (what every path did) | 2.4502 | **+0.1360** |
 
-and greedy generation `None` vs `null` agrees on only **32 %** of frames
-(5 items, range 1.8–68 %). So the "hint-free inference" that was listened to is
-+0.051 nats off the trained null state, and the encoder memory is 52 % different.
+i.e. **0.113 nats of pure out-of-distribution error**, three times what the
+entire trained null state is worth — and the encoder memory shifts by 52 %
+(level-0 vs omitted). Greedy generation `None` vs `null` agrees on only **32 %**
+of frames. (An earlier measurement at step 274 k on `best-checkpoint.ckpt` read
+2.3343 / 2.3480 / 2.3850, the same ordering at a smaller magnitude.)
+
 
 Paths that passed nothing: `2_training.py:_sample_and_log` (codes/audio/mel/pitch),
 `_log_infill`, `_log_speaker_probe`, `_log_ood_generation`,
@@ -42,22 +46,49 @@ means the trained null state for a hint-enabled model, `"omit"` keeps the old
 behaviour for ablation. Every sample log carries the state in its tag and as
 `sample/hints_mode` (0 = omit, 1 = null, 2 = real `.cond`).
 
-## 2. Measured channel liveness (v0.9 best, real val batches)
+## 2. Measured channel liveness (v0.9 final, step 433 455)
 
-Per-channel `CE(ablated) − CE(base)`, i.e. how much the model actually uses each
-channel. Base CE 2.3343.
+`scratch/hint_channel_probe.py --batches 2 --batch_size 8`, i.e. 16 val items,
+teacher-forced CE with all hints = **2.3142** nats.
 
-| channel | effect (nats) |
-|---|---|
-| intensity off | **-0.0000** |
-| register off | +0.0010 |
-| semantic off | -0.0024 |
-| word pitch off | +0.0113 |
-| word timing off | +0.0055 |
-| all off (level-0 rows) | +0.0137 |
-| all off (omitted) | +0.0510 |
-| intensity maxed | +0.0073 |
-| timing maxed | +0.0916 |
+| channel dropped | CE | delta (nats) |
+|---|---|---|
+| intensity | 2.3146 | **+0.0004** |
+| register | 2.3162 | +0.0020 |
+| semantic | 2.3142 | **-0.0000** |
+| word pitch | 2.3284 | **+0.0142** |
+| word timing | 2.3199 | +0.0057 |
+| all (trained null state) | 2.3371 | +0.0229 |
+| omit (no vectors at all) | 2.4502 | **+0.1360** |
+
+So on the finished model the Phase-0 bug cost **0.113 nats** — three times what
+the whole trained null state is worth — which is exactly why the level-0 path
+sounds better than what every earlier listening path used.
+
+Level sweeps (same batch, CE delta vs the real levels):
+
+- intensity `L0:+0.0456 L1:+0.0464 L2:+0.0457 L3:+0.0464 L4:+0.0466 L5:+0.0462
+  L6:+0.0471 L7:+0.0483 L8:+0.0506` — monotone *worse* with level, i.e. no
+  benefit from the true level at all (the table is not a knob yet).
+- register `L0:+0.0464 L1:+0.0512 L2:+0.0485 L3:+0.0473 L4:+0.0460 L5:+0.0471`
+  — flat/noisy, argmin at the top level.
+
+### Is the information even in the codes?  (`scratch/hint_codespace_probe.py`)
+
+Ridge on per-book code histograms + duration, 5-fold **GroupKFold by speaker**,
+3997 clips / 719 speakers, and a leave-one-out per-speaker-mean control:
+
+| target | R²(codes) | R²(speaker mean) |
+|---|---|---|
+| intensity | **0.538** | -0.100 |
+| register (relative) | 0.170 | -0.000 |
+
+Intensity is *half* the variance of the code stream beyond the speaker, yet the
+channel is worth 0.0004 nats — a pure wiring failure, which is what
+`hint_film_memory` / `hint_decoder_proj` and the guidance mechanism address.
+The relative register is only 17 % present, which bounds that knob: it is worth
+wiring, but not worth expecting a large swing. (`R²(speaker) ≈ 0` is the v0.9
+relative parameterisation working as designed.)
 
 The hint tables are *not* small: `int_emb` row norms 0.58–1.21, `pitch_emb`
 0.82–1.97, `slot_emb` 1.07–2.57, `dec_int_emb` 0.73–1.68 (vs `phone_emb` 2.42) —
@@ -65,6 +96,7 @@ a lot of learned parameter for ~0 CE effect.
 
 **Conclusion**: only the two *time-varying* (per-phone) channels do anything.
 The clip-level ones are inert *at the current injection site*.
+
 
 ## 3. Why the clip-level channels cannot work where they are
 
@@ -183,26 +215,32 @@ no-hint arm documents that it now runs the trained null state.
 
 
 
-### Phase 1 — measurement (read-only, GPU free)
+### Phase 1 — measurement (read-only, GPU free) — **scripts done, numbers in §2**
 1. `eval_stage2_wer.py --num_items 50`, both hint arms, `--ignore_eos` and
    default, for v0.7 best/last, v0.8 last, v0.9 best/last.
 2. `eval_stage2_checkpoints.py` on identical batches (teacher-forced, FIM, free-running).
 3. Repetition probe (done: v0.9 best 0.184 vs v0.7 best 0.235, v0.8 0.290, gt 0.220).
-4. `scratch/hint_channel_probe.py` (promoted from the throwaway), also wired as
-   `train.hint_channel_probe` so M3b is logged per epoch.
-5. `scratch/hint_codespace_probe.py`: how well each hint is predictable from the
-   **ground-truth codes** (speaker-grouped CV, `sid`-only control). This decides
-   per channel whether the code space can express the knob at all.
+4. `scratch/hint_channel_probe.py` — done (§2); also wired into training as
+   `train.hint_channel_probe` → `val_hint_channel_delta/*` per epoch.
+5. `scratch/hint_codespace_probe.py` — done (§2): intensity R² 0.54, register
+   0.17, speaker control ≈ 0.
 
-### Phase 2 — wiring test (~40 min GPU)
-Four 2 k-step runs from `5090_v0.7_fim2/best-checkpoint.ckpt`, identical except
-the injection site: `additive` (current) / `film_memory` / `postnorm_proj` /
-`head_bias`. Decide by per-channel CE + grad norm on the new tables.
+### Phase 2 — wiring test (~40 min GPU) — **switches implemented, runs pending**
+Four 2 k-step runs from `5090_v0.7_fim2/best-checkpoint.ckpt` (or from
+`transformer_v0.9/last.ckpt`), identical except `transformer.hint_film_memory` /
+`hint_decoder_proj`: (F,F) baseline / (T,F) / (F,T) / (T,T). Decide by
+`val_hint_channel_delta/*` + the level sweeps, then by the audio sweep.
 
-### Phase 3 — guidance (no retraining)
-`generate`/`infill`: `hint_guidance` (scalar or per-book), `uncond` = null state;
-sweep `w` per channel against WER + repetition; produce the knob sweep report
-(level → decoded intensity / f0 / durations / WER).
+
+### Phase 3 — guidance (no retraining) — **implemented, sweep pending**
+`generate`/`infill`: `hint_guidance` / `hint_guidance_books` (CFG against the
+null state), plus `--hint_guidance[_books]` on `scratch/eval_stage2_wer.py`.
+`w=1` is the exact identity, `w=0` reproduces the unconditional arm, and the
+second pass is skipped when the hints already *are* the null state (all three
+asserted in `test_hints.py`).  Next: sweep `w` per channel against WER +
+repetition and produce the knob report (level → decoded intensity / f0 /
+durations / WER).
+
 
 ### Phase 4 — one short-anneal run from v0.7 best
 `lr 5e-5`, `cosine_anneal_end = max_steps = 80k`, winning injection, all five
@@ -217,9 +255,15 @@ control run reproduces v0.7's coherency.
 ## 6. Commands
 
 ```bash
-# Phase 0 smoke tests (CPU, safe next to a GPU job)
+# Phase 0/1 smoke tests (CPU, safe next to a GPU job)
 python test_hints.py
 python test_fim.py
+
+# Phase 1: per-channel liveness + level sweeps on a checkpoint (read-only)
+python scratch/hint_channel_probe.py \
+    --checkpoint checkpoints_stage2/transformer_v0.9/last.ckpt
+# Phase 1.5: is the covariate even in the code space? (speaker-grouped CV, CPU)
+python scratch/hint_codespace_probe.py --n 4000
 
 # Phase 1: same val batches / same utterances across checkpoints
 python scratch/eval_stage2_checkpoints.py \
@@ -231,10 +275,21 @@ python scratch/eval_stage2_wer.py --num_items 50 \
                   checkpoints_stage2/transformer_v0.9/best-checkpoint.ckpt \
     --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt
 
-# Phase 3: knob sweep (level -> decoded intensity / f0 / WER)
-python scratch/eval_stage2_wer.py --num_items 24 --hints \
+# Phase 2: one arm per injection-site combination (fresh exp_name each,
+# --transfer_from the hints checkpoint).  Watch val_hint_channel_delta/* and
+# the level sweeps before spending a full run.
+python 2_training.py --config configs/transformer.yaml --exp_name h_film \
+    --transfer_from checkpoints_stage2/transformer_v0.9/last.ckpt   # + edit hint_film_memory: true
+
+# Phase 3: guidance sweep (needs --hints so cond != uncond)
+python scratch/eval_stage2_wer.py --num_items 24 --hints --hint_guidance 2.0 \
     --checkpoints checkpoints_stage2/<exp>/last.ckpt \
-    --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt
+    --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt --ignore_eos
+python scratch/eval_stage2_wer.py --num_items 24 --hints \
+    --hint_guidance_books 1,1,1,1,1,1,1,1,2,2 \
+    --checkpoints checkpoints_stage2/<exp>/last.ckpt \
+    --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt --ignore_eos
 ```
+
 
 

@@ -1300,16 +1300,29 @@ Wiring:
   this is the only number that distinguishes "the model got better" from "the
   model reads the answer": a flat ~0 gap means the tables are dead (or dropout is
   too high), a growing gap while `val_loss_nohint` rises is the VC failure mode.
+  `train.hint_channel_probe` (default 1 batch) goes one level finer: it re-scores
+  the same batch with each channel dropped *separately* and logs
+  `val_hint_channel_delta/{int,reg,sem,pitch,slot,all,omit}` (plus
+  `val_hint_channel_base`), printing the table each epoch. `val_hint_gap` drops
+  all five at once, so one live channel hides four dead ones — measured on the
+  finished v0.9: pitch +0.0142, slot +0.0057, register +0.0020, intensity
+  +0.0004, semantic -0.0000, `all` +0.0229, `omit` +0.1360 (`omit` - `all` = the
+  Phase-0 bug's cost, 0.113 nats).
+
 - **Generation runs in the trained null state, not "no hints" (Phase 0).**
   `train.hint_dropout` / `hint_null_all` train **level 0** (`sem_null` for the
   semantic vector) as the "not provided" state, so
   `CodeTransformer.null_hints(B, N)` is the only hint-free state the model ever
   saw. Every generation path used to pass `hints=None`, which omits the vectors
-  altogether — a *different* function: measured on `transformer_v0.9` it costs
-  **+0.051 nats** and shifts the encoder memory by **52 %** versus the level-0
-  rows (+0.014 nats vs real hints), and greedy generation agrees on only 32 % of
-  frames. `resolve_hints()` now maps `None` (and `"null"`/`"zero"`) to that
-  state, `"omit"` reproduces the old behaviour (ablation only), and
+  altogether — a *different* function: on the finished v0.9 (step 433 455) it
+  costs **+0.136 nats** against +0.023 for the trained null state (+0.113 for
+  the bug alone; the same measurement at step 274 k read +0.051 / +0.014), it
+  shifts the encoder memory by **52 %**, and greedy generation agrees on only
+  32 % of frames. `resolve_hints()` now maps `None` (and `"null"`/`"zero"`) to
+  that state, `"omit"` returns the `OMIT_HINTS` marker (an empty dict, *not*
+  `None` — collapsing the two silently made the ablation arm a copy of the
+  trained one), and
+
   `train.sample_hints: cond | null | omit` chooses it for the TensorBoard
   samples, the FIM infill probe, the speaker probe and the OOD probe (OOD has no
   `.cond`, so `cond` degrades to `null`). The REPL reads the same key and takes
@@ -1318,6 +1331,30 @@ Wiring:
   suffix when the model has no hint tables), plus the scalar
   `sample/hints_mode` (0 = omit, 1 = null, 2 = real `.cond`) and a printed
   `=== Sampling (hints: …) ===` line.
+- **Injection sites and hint guidance (v1.0).** The additive channels above
+  `_temporal_norm` *cannot* express a clip-level value: that norm standardises
+  each dimension over time, so the mean subtraction cancels any
+  position-independent offset — and a FiLM computed from it. Measured on the
+  finished v0.9, intensity is worth **+0.0004** nats while
+  `scratch/hint_codespace_probe.py` shows it is **54 % predictable from the
+  codes alone** (Ridge on code histograms, GroupKFold by speaker), i.e. the
+  information is there and the wiring is not. Two independent, zero-initialised
+  switches add a path *after* the norm:
+  - `transformer.hint_film_memory` — encoder memory,
+    `mem * (1 + gamma(h)) + beta(h)`;
+  - `transformer.hint_decoder_proj` — decoder output, `out + W h`, after the
+    final decoder norm and before the heads (rank-H, shared by all codebooks).
+  Zero-init means a `--transfer_from` model reproduces its source exactly, and
+  both are new parameters (fresh `exp_name`, like `hints`/`eos_token`). The
+  four Phase-2 arms are the two flags' four combinations.
+  `transformer.hint_guidance` / `hint_guidance_books` add
+  classifier-free guidance over the hints at **generation time**
+  (`logits = uncond + w*(cond - uncond)`, `uncond` = the null state):
+  `w=1` is the exact identity, `w=0` reproduces the unconditional arm, the
+  second decoder pass is skipped when the hints already *are* the null state,
+  and the per-book list (order `spec0..pitch9`) lets the pitch books be guided
+  without touching timbre. `scratch/hint_channel_probe.py` reports both the
+  per-channel CE deltas and level sweeps on a checkpoint.
 - **Guards**: `check_special_layout` refuses a checkpoint whose hint tables have
 
   different row counts than this `hints_json` (the level ids would be silently
@@ -1745,12 +1782,18 @@ Wiring:
     `Hints: N without a .cond` print).
 
 22. **`hints=None` is not "no hints" for a hint-enabled model (Phase 0).**
-    `generate`/`infill`/`encode` resolve `None` (and `"null"`/`"zero"`) to
-    `CodeTransformer.null_hints()` -- the trained level-0 / `sem_null` state --
-    because that is the only hint-free state `hint_dropout` / `hint_null_all`
-    ever trained. Passing no vectors at all is a *different* function (measured:
-    +0.051 nats and a 52 % encoder-memory shift on `transformer_v0.9`), reachable
-    only via the explicit `"omit"`. Consequences:
+    `generate`/`infill`/`encode`/`forward` resolve `None` (and
+    `"null"`/`"zero"`) to `CodeTransformer.null_hints()` -- the trained
+    level-0 / `sem_null` state -- because that is the only hint-free state
+    `hint_dropout` / `hint_null_all` ever trained. Passing no vectors at all is a
+    *different* function (measured on the finished v0.9: **+0.136 nats** vs
+    +0.023 for the null state), reachable only via the explicit `"omit"`, which
+    returns the `OMIT_HINTS` marker: an **empty dict**, not `None`. That
+    distinction is load-bearing -- resolving `"omit"` to `None` made `encode`
+    re-resolve it to the null state, so the `omit` diagnostic arm read exactly
+    like the trained one and hid the 0.113-nat difference it exists to measure.
+    Consequences:
+
     - every generation path (TensorBoard samples, FIM infill probe, speaker
       probe, OOD probe, `scratch/stage2_repl.py`, `eval_stage2_checkpoints.py`)
       gets the null state for free, and the state is in the log tags
@@ -1937,6 +1980,18 @@ python scratch/test_stage1_codes.py test.wav \
 # --codebook_levels writes one wav per progressive spec-codebook level
 # (<name>_spec_k<K>.wav decodes with only the first K of 8 books; 'all' or
 # '1,2,4'; pitch codes always stay complete) plus a per-level mel L1.
+
+# Per-channel hint liveness + level sweeps on a stage-2 checkpoint (read-only,
+# no Trainer): CE[channel dropped] - CE[all hints] per channel, plus `all`
+# (trained null state) and `omit` (no vectors -- the pre-Phase-0 path), and a
+# CE sweep over one channel's whole level table.  This is the "is the table a
+# knob or decoration?" measurement; CE is the *diagnostic*, the audio sweep is
+# the KPI.
+python scratch/hint_channel_probe.py --checkpoint checkpoints_stage2/<exp>/last.ckpt
+# Is the covariate even in the code space?  Ridge on code histograms with
+# GroupKFold by speaker vs a speaker-mean control.  R2(codes) >> R2(speaker)
+# means a dead channel is a wiring problem, not missing information.
+python scratch/hint_codespace_probe.py --n 4000
 
 # Stage-2 step-time benchmark: parts + totals, no Trainer, real code tensors
 # (see §4 "Stage-2 step cost"). Add --ns_steps 5 --muon_all for the pre-v0.6

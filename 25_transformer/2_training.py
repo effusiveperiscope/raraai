@@ -424,6 +424,25 @@ class TrainModule(pl.LightningModule):
         if self.sample_hints == "zero":       # alias
             self.sample_hints = "null"
 
+        # Per-channel hint liveness probe (Phase 1).  `val_hint_gap` drops every
+        # channel at once, so one live channel hides four dead ones; this one
+        # re-scores the first `hint_channel_probe` validation batches with each
+        # channel dropped *separately* and logs
+        # `val_hint_channel_delta/{int,reg,sem,pitch,slot,all,omit}`.  `all` is
+        # the trained null state, `omit` the pre-Phase-0 inference path, so
+        # `all - omit` is that bug's cost on this checkpoint.  Seven extra
+        # forwards per probed batch; 0 disables it.
+        self.hint_channel_probe = int(
+            config.train.get("hint_channel_probe", 0) or 0)
+        self._reset_hint_channel_probe()
+
+        # Guidance weight for the *generated* audio in TensorBoard (Phase 3).
+        # `None` uses `transformer.hint_guidance` (off by default); the sweep
+        # belongs in `scratch/hint_guidance_sweep.py`, not in a training run.
+        self.sample_hint_guidance = config.train.get(
+            "sample_hint_guidance", None)
+
+
 
         # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a *synthetic*
         # prefix/suffix split on the first `fim_probe_batches` validation batches
@@ -524,6 +543,40 @@ class TrainModule(pl.LightningModule):
         if batch.get("hint_sem_valid") is not None:
             off["hint_sem_valid"] = torch.zeros_like(batch["hint_sem_valid"])
         return off
+
+    def _reset_hint_channel_probe(self):
+        """Clear the per-epoch accumulators of the per-channel hint probe."""
+        self._hint_channel_sum = {}
+        self._hint_channel_count = 0
+
+    def _accumulate_hint_channel(self, batch):
+        """Per-channel CE deltas for one validation batch (see ``_log_*``)."""
+        deltas = self.net.hint_channel_deltas(batch)
+        if not deltas:
+            return
+        self._hint_channel_count += 1
+        for key, value in deltas.items():
+            self._hint_channel_sum[key] = (self._hint_channel_sum.get(key, 0.0)
+                                           + float(value))
+
+    def _log_hint_channel_probe(self):
+        """Log ``val_hint_channel_delta/*`` and print the per-channel table."""
+        if self.hint_channel_probe <= 0 or not self._hint_channel_count:
+            return
+        n = float(self._hint_channel_count)
+        base = self._hint_channel_sum.get("base", 0.0) / n
+        self._add_scalar("val_hint_channel_base", torch.tensor(base))
+        parts = []
+        for name in (list(self.net.HINT_CHANNEL_KEYS)
+                     + ["all", "omit"]):
+            if name not in self._hint_channel_sum:
+                continue
+            delta = self._hint_channel_sum[name] / n
+            self._add_scalar(f"val_hint_channel_delta/{name}",
+                             torch.tensor(delta))
+            parts.append(f"{name} {delta:+.4f}")
+        print(f"val_hint_channel_delta (nats, CE[channel dropped] - CE[all "
+              f"hints], base {base:.4f}): " + ", ".join(parts))
 
     def _sample_hint_arg(self, batch=None, mode=None):
         """``(hints argument, log tag)`` for one **generation** call.
@@ -972,7 +1025,9 @@ class TrainModule(pl.LightningModule):
                 batch["phone_ids"], batch["phone_lengths"], batch["sid"],
                 max_frames=gen_frames, temperature=temperature, top_k=top_k,
                 return_lengths=True, hints=hint_arg,
+                hint_guidance=self.sample_hint_guidance,
             )  # (B, K, n) with n <= gen_frames when EOS stopped it early
+
             n_gen = int(codes.shape[-1])
             if self.net.eos_token:
                 # How many frames the model decided to produce (max over the
@@ -1161,8 +1216,9 @@ class TrainModule(pl.LightningModule):
         middle = self.net.infill(
             batch["phone_ids"][:1], batch["phone_lengths"][:1], batch["sid"][:1],
             prefix, suffix, m, temperature=temperature, top_k=top_k,
-            hints=hint_arg,
+            hints=hint_arg, hint_guidance=self.sample_hint_guidance,
         )                                                       # (1, K, m)
+
         regen = torch.cat([prefix, middle, suffix], dim=2)[0]  # (K, T)
         self._log_code_maps(f"fim{j}", codes, regen, tag)
         match = (middle[0, :, :m] == codes[:, p:p + m]).float().mean()
@@ -1192,7 +1248,9 @@ class TrainModule(pl.LightningModule):
                                         max_frames=gen_frames,
                                         temperature=temperature, top_k=top_k,
                                         return_lengths=True,
-                                        hints=hint_arg)
+                                        hints=hint_arg,
+                                        hint_guidance=self.sample_hint_guidance)
+
         if self.net.eos_token:
             # Trim to the shortest stream: past its own end each row would be
             # the repeat-filled last frame (see CodeTransformer.generate), which
@@ -1365,7 +1423,9 @@ class TrainModule(pl.LightningModule):
                 phone_ids, phone_lengths, sid, max_frames=frames,
                 temperature=temperature, top_k=top_k, return_lengths=True,
                 hints=hint_arg,
+                hint_guidance=self.sample_hint_guidance,
             )  # (1, K, n)
+
             codes = codes[0]  # (K, n)
             n_gen = int(codes.shape[-1])
             if self.net.eos_token:
@@ -1635,6 +1695,7 @@ class TrainModule(pl.LightningModule):
         self._reset_text_delta()
         self._reset_fim_probe()
         self._reset_hint_probe()
+        self._reset_hint_channel_probe()
 
     @torch.no_grad()
     def _fim_probe(self, batch):
@@ -1704,7 +1765,9 @@ class TrainModule(pl.LightningModule):
                 memory, mask, codes if codes_use is None else codes_use,
                 code_lengths=lengths, sid=batch["sid"],
                 complete=batch["complete"], diagnostics=True,
+                hints=hint_arg,
                 fim_mask=fim, fim_prefix_len=pfx, fim_mid_len=mid, **override)
+
 
         base = run(mem, mmask)
         if "fim_middle_loss" not in base:
@@ -1808,6 +1871,7 @@ class TrainModule(pl.LightningModule):
         """Log ``val_text_delta`` (the "is the text conditioning alive?" metric)."""
         self._log_fim_probe()
         self._log_hint_probe()
+        self._log_hint_channel_probe()
         if self.text_delta_batches <= 0 or not self._text_delta_count:
             return
         n = float(self._text_delta_count)
@@ -1834,6 +1898,8 @@ class TrainModule(pl.LightningModule):
             self._accumulate_text_delta(batch, out)
         if batch_idx < self.hint_probe_batches:
             self._accumulate_hint_gap(batch, out)
+        if batch_idx < self.hint_channel_probe:
+            self._accumulate_hint_channel(batch)
         if batch_idx < self.fim_probe_batches:
             self._fim_probe(batch)
         return out["loss"]

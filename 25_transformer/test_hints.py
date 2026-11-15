@@ -443,6 +443,14 @@ def test_model(batch, hints_json):
                "hint_pitch", "hint_slot")) <= set(null)
           and int(null["hint_int"].abs().sum()) == 0
           and null["hint_sem_valid"].sum() == 0)
+    # ``"omit"`` must survive as its own marker: resolving it to None would make
+    # ``encode`` re-resolve it to the null state, i.e. silently turn the
+    # pre-Phase-0 ablation arm into a copy of the trained one (that bug made the
+    # `omit` column of scratch/hint_channel_probe.py read exactly like `all`).
+    omit = net.resolve_hints("omit", B, int(b["phone_ids"].shape[1]),
+                             b["phone_ids"].device)
+    check("'omit' is a distinct marker, not None",
+          omit is not None and len(omit) == 0)
     with torch.no_grad():
         args = (b["phone_ids"], b["phone_lengths"], b["sid"])
         torch.manual_seed(1)
@@ -536,6 +544,163 @@ def test_word_index(fe):
           fe.word_index_for_phones(stored, items[:-1], text=text) is None)
 
 
+def test_injection_and_guidance(batch, hints_json):
+    """Post-norm injection sites (Phase 2) and hint guidance (Phase 3)."""
+    print("model (injection sites + classifier-free guidance)")
+    from omegaconf import OmegaConf
+
+    from modeling.transformer import CodeTransformer
+
+    def build(**over):
+        tcfg = {
+            "hidden_size": 32, "n_heads": 2, "encoder_layers": 1,
+            "decoder_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
+            "max_positions": 512, "phone_vocab_size": 1024, "n_speakers": 4096,
+            "eos_token": True, "fim": True, "region_cond": True,
+            "length_cond": True, "hints": True, "hints_json": hints_json,
+            "semantic_dim": 384, "decoder_hints": True,
+        }
+        tcfg.update(over)
+        cfg = OmegaConf.create({
+            "codec": {"codebook_num": 2, "codebook_size": 32},
+            "pitch_codec": {"codebook_num": 1, "codebook_size": 32},
+            "transformer": tcfg,
+        })
+        torch.manual_seed(0)
+        net = CodeTransformer(cfg)
+        net.eval()
+        return net
+
+    b = dict(batch)
+    B, T = int(b["sid"].numel()), 12
+    b["spec_codes"] = torch.randint(0, 32, (B, 2, T))
+    b["pitch_codes"] = torch.randint(0, 32, (B, 1, T))
+    b["code_lengths"] = torch.full((B,), T, dtype=torch.long)
+    b["complete"] = torch.ones(B, dtype=torch.bool)
+    b["fim"] = torch.zeros(B, dtype=torch.bool)
+
+    net = build(hint_film_memory=True, hint_decoder_proj=True)
+    check("injection modules exist",
+          net.encoder.film_gamma is not None and net.decoder.hint_out is not None
+          and net.describe().count("inject=") == 1)
+    args = (b["phone_ids"], b["phone_lengths"], b["sid"])
+    with torch.no_grad():
+        mem_on, _ = net.encode(*args, hints=b)
+        mem_off, _ = net.encode(*args, hints="omit")
+    # Zero-init => identity: enabling the switches must not perturb a
+    # --transfer_from model at step 0.
+    check("FiLM is identity at initialisation",
+          torch.allclose(mem_on, mem_off, atol=0, rtol=0))
+
+    # Every hint table is zero-initialised too (v0.9), so nothing can be
+    # observed until they are perturbed -- *all* of them, plus the zero-init
+    # post-norm projections.
+    def randomise(model):
+        with torch.no_grad():
+            for table in (model.int_emb, model.reg_emb, model.pitch_emb,
+                          model.slot_emb, model.dec_int_emb):
+                if table is not None:
+                    table.weight.normal_(std=0.05)
+            model.sem_proj.weight.normal_(std=0.05)
+            if model.encoder.film_gamma is not None:
+                model.encoder.film_gamma.weight.normal_(std=0.05)
+                model.encoder.film_beta.weight.normal_(std=0.05)
+            if model.decoder.hint_out is not None:
+                model.decoder.hint_out.weight.normal_(std=0.05)
+
+    randomise(net)
+    # Two *different* hint states for the same text: intensity 0 vs 6.  That
+    # difference is a per-clip constant, which is exactly what ``_temporal_norm``
+    # cancels -- so the plain additive model must be (nearly) blind to it while
+    # the FiLM model is not.
+    hi = dict(b)
+    hi["hint_int"] = torch.full_like(b["hint_int"], int(net.n_intensity_levels))
+
+    plain = build()
+    randomise(plain)
+
+    def rel_mem(model):
+        with torch.no_grad():
+            m_hi, _ = model.encode(*args, hints=hi)
+            m_lo, _ = model.encode(*args, hints="null")
+            return float((m_hi - m_lo).norm() / m_lo.norm().clamp_min(1e-6))
+
+    rel_plain, rel_film = rel_mem(plain), rel_mem(net)
+    with torch.no_grad():
+        loss_hi = float(net.compute_batch_loss(hi, diagnostics=False)["loss"])
+        loss_lo = float(net.compute_batch_loss(b, diagnostics=False,
+                                               hints="null")["loss"])
+    check("post-norm injection is outside the cancellation",
+          rel_film > rel_plain and rel_film > 1e-3,
+          f"memory shift {rel_film:.4f} with injection vs {rel_plain:.4f} "
+          f"without; CE {loss_hi:.5f} vs {loss_lo:.5f}")
+    check("the injected channel moves the loss",
+          abs(loss_hi - loss_lo) > 1e-7, f"{loss_hi:.6f} vs {loss_lo:.6f}")
+
+    # ---- per-channel probe -------------------------------------------- #
+    deltas = net.hint_channel_deltas(b)
+    check("hint_channel_deltas reports every channel",
+          {"base", "int", "reg", "sem", "pitch", "slot", "all", "omit"}
+          <= set(deltas) and all(math.isfinite(v) for v in deltas.values()),
+          ", ".join(f"{k} {v:+.4f}" for k, v in deltas.items()))
+    # The API contract (not a statistical claim -- on a 1-layer random model the
+    # deltas are noise; the real numbers come from scratch/hint_channel_probe.py
+    # on a trained checkpoint).
+    subset = net.hint_channel_deltas(b, channels=["pitch"])
+    check("hint_channel_deltas honours the channel subset",
+          set(subset) == {"base", "pitch"}, f"{sorted(subset)}")
+    try:
+        net.hint_channel_deltas(b, channels=["nope"])
+        check("unknown channel raises", False)
+    except ValueError:
+        check("unknown channel raises", True)
+
+    # ---- classifier-free guidance -------------------------------------- #
+    net2 = build()
+    randomise(net2)
+    with torch.no_grad():
+        torch.manual_seed(7)
+        base, _ = net2.generate(*args, max_frames=6, hints=b,
+                                return_lengths=True)
+        torch.manual_seed(7)
+        w1, _ = net2.generate(*args, max_frames=6, hints=b,
+                              hint_guidance=1.0, return_lengths=True)
+        torch.manual_seed(7)
+        w0, _ = net2.generate(*args, max_frames=6, hints="null",
+                              hint_guidance=2.0, return_lengths=True)
+        torch.manual_seed(7)
+        null, _ = net2.generate(*args, max_frames=6, hints="null",
+                                return_lengths=True)
+        torch.manual_seed(7)
+        guided, _ = net2.generate(*args, max_frames=6, hints=b,
+                                  hint_guidance=2.0, return_lengths=True)
+        torch.manual_seed(7)
+        zero, _ = net2.generate(*args, max_frames=6, hints=b,
+                                hint_guidance=0.0, return_lengths=True)
+        books, _ = net2.generate(*args, max_frames=6, hints=b,
+                                 hint_guidance_books=[3.0, 0.0, 2.0],
+                                 return_lengths=True)
+    check("guidance w=1 is the exact identity", torch.equal(base, w1))
+    # w=0 collapses the logits to the unconditional arm (`lu + 0*(lc-lu)`), and
+    # when the conditional hints already ARE the null state the direction is
+    # zero, so the second pass is skipped and the result is the plain one.
+    check("w=0 reproduces the unconditional sample", torch.equal(zero, null))
+    check("guidance is skipped when the hints are already null",
+          torch.equal(w0, null))
+    check("guidance changes the sample", not torch.equal(guided, base))
+    check("per-book guidance weights accepted",
+          tuple(books.shape[:2]) == (B, 3))
+
+
+    try:
+        with torch.no_grad():
+            net2.generate(*args, max_frames=4, hints=b,
+                          hint_guidance_books=[2.0, 2.0])
+        check("wrong-length guidance books raise", False)
+    except ValueError:
+        check("wrong-length guidance books raise", True)
+
+
 def main() -> int:
     from omegaconf import OmegaConf
 
@@ -556,6 +721,7 @@ def main() -> int:
         ds, filelist, hints_json, batch = made
         test_word_hints_in_dataset(ds, filelist, hints_json)
         test_model(batch, hints_json)
+        test_injection_and_guidance(batch, hints_json)
 
     print()
     if _failures:

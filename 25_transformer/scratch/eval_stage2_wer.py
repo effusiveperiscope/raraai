@@ -275,7 +275,10 @@ def synthesize_from_generated(net, net_g, items, args, device, pad_id,
                                  top_k=args.top_k,
                                  stop_on_eos=(False if args.ignore_eos else None),
                                  hints=hint_arg,
+                                 hint_guidance=args.hint_guidance,
+                                 hint_guidance_books=args.hint_guidance_books,
                                  return_lengths=True)
+
         # infer_from_codes wants (Q, B, T) or (B, T, Q); generate returns (B, K, n).
         spec = gen[:, :Qs].transpose(0, 1).contiguous()
         pitch = gen[:, Qs:Qs + Qp].transpose(0, 1).contiguous()
@@ -410,6 +413,20 @@ def main():
                          "on the hints at inference -- v0.8 was identical either "
                          "way, i.e. the channels were inert (HINTS_PLAN.md 9).")
 
+    ap.add_argument("--hint_guidance", "--hint-guidance", type=float,
+                    default=None, dest="hint_guidance",
+                    help="classifier-free guidance weight over the hint "
+                         "channels (logits = uncond + w*(cond - uncond), "
+                         "uncond = the trained null state).  Needs --hints: "
+                         "with the default arm the conditional hints ARE the "
+                         "null state, so the direction is zero and this is a "
+                         "no-op.  Sweep it against WER *and* repetition -- "
+                         "guidance sharpens, and v0.8's failure mode was a "
+                         "sharpening-induced repetition attractor.")
+    ap.add_argument("--hint_guidance_books", "--hint-guidance-books",
+                    default=None, dest="hint_guidance_books",
+                    help="comma separated per-codebook guidance weights "
+                         "(spec0..spec7,pitch8,pitch9), overrides the scalar")
     ap.add_argument("--arms", default="generated,reference",
                     help="comma separated subset of generated,reference")
     ap.add_argument("--asr_model", default="Qwen/Qwen3-ASR-0.6B")
@@ -423,6 +440,11 @@ def main():
                          "every checkpoint draws the same samples (0 = fixed)")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
+    if args.hint_guidance_books:
+        args.hint_guidance_books = [float(w) for w in
+                                    str(args.hint_guidance_books).split(",")
+                                    if w.strip()]
+
 
     config = OmegaConf.load(args.config)
     device = torch.device(args.device if args.device else

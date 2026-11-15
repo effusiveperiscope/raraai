@@ -136,8 +136,10 @@ def fim_probe(net, loader, batches, device) -> Dict[str, float]:
                 memory, mask, codes if codes_use is None else codes_use,
                 code_lengths=lengths, sid=batch["sid"],
                 complete=batch["complete"], diagnostics=True,
+                hints=hint_arg,
                 fim_mask=fim, fim_prefix_len=pfx, fim_mid_len=mid,
                 **override)
+
 
         base = run(mem, mmask)
         if "fim_middle_loss" not in base:

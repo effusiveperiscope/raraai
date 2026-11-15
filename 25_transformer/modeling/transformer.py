@@ -154,6 +154,28 @@ class SinusoidalPositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)].to(dtype=x.dtype)
 
 
+class _OmitHints(dict):
+    """Marker for "pass **no** hint vectors at all" (the pre-Phase-0 path).
+
+    It has to be an object rather than ``None`` because ``None`` means "the
+    trained null state" everywhere else (see
+    :meth:`CodeTransformer.resolve_hints`); collapsing the two turned the
+    ``omit`` diagnostic arm into a copy of the ``null`` one, which hid the very
+    difference it exists to measure.  Being an empty ``dict`` makes
+    ``_enc_hints``/``_dec_hint`` do the right thing for free: no ``hint_int``
+    key -> no vectors.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<omit hints>"
+
+
+#: The singleton returned by ``resolve_hints("omit")``.
+OMIT_HINTS = _OmitHints()
+
+
 class PhonemeEncoder(nn.Module):
     """Encodes phoneme tokens + a speaker id into a cross-attention memory.
 
@@ -202,6 +224,7 @@ class PhonemeEncoder(nn.Module):
         max_positions: int,
         memory_norm: str = "temporal",
         residual_scale: bool = True,
+        hint_film: bool = False,
     ):
         super().__init__()
         if memory_norm not in ("temporal", "layer", "none"):
@@ -244,6 +267,26 @@ class PhonemeEncoder(nn.Module):
                 enc_layer.self_attn.out_proj.weight.data.mul_(scale)
                 enc_layer.linear2.weight.data.mul_(scale)
 
+        # Post-normalisation FiLM of the clip-level hints
+        # (``transformer.hint_film_memory``).  ``_temporal_norm`` standardises
+        # every dimension over *time*, which is exactly invariant to adding a
+        # per-clip constant (and to a FiLM that is computed from one): the mean
+        # subtraction cancels it.  That is why the additive clip-level channels
+        # measured ~0 nats -- intensity 0 -> 4 moved the pre-norm residual by
+        # 4.0 % and its CE by 0.0000.  Applying the modulation *after* the norm
+        # puts it beyond the cancellation point, where the decoder sees it.
+        # Zero-initialised, so a ``--transfer_from`` model reproduces its source
+        # exactly and the two projections must earn their effect.
+        if hint_film:
+            self.film_gamma = nn.Linear(hidden_size, hidden_size)
+            self.film_beta = nn.Linear(hidden_size, hidden_size)
+            for lin in (self.film_gamma, self.film_beta):
+                nn.init.zeros_(lin.weight)
+                nn.init.zeros_(lin.bias)
+        else:
+            self.film_gamma = None
+            self.film_beta = None
+
     def _temporal_norm(
         self, x: torch.Tensor, valid: torch.Tensor
     ) -> torch.Tensor:
@@ -273,6 +316,10 @@ class PhonemeEncoder(nn.Module):
         encoding, exactly like ``spk_emb``, so their contribution follows the
         same path through the residual stream; ``None`` (the default) is a plain
         unconditional encode.
+
+        With ``hint_film`` the clip-level hints are *also* applied as a
+        post-normalisation FiLM on the returned memory (see ``__init__``), which
+        is the only place a per-clip constant can survive ``_temporal_norm``.
         """
         B, N = phone_ids.shape
         if phone_lengths is None:
@@ -293,7 +340,13 @@ class PhonemeEncoder(nn.Module):
         x = x * valid.unsqueeze(-1).to(x.dtype)
         if self.memory_norm == "temporal":
             x = self._temporal_norm(x, valid)
+        if self.film_gamma is not None and hint_vec is not None:
+            h = hint_vec.to(x.dtype)
+            x = (x * (1.0 + self.film_gamma(h).unsqueeze(1))
+                 + self.film_beta(h).unsqueeze(1))
+            x = x * valid.unsqueeze(-1).to(x.dtype)
         return x, valid
+
 
 
 class DelayCodebookDecoder(nn.Module):
@@ -332,6 +385,7 @@ class DelayCodebookDecoder(nn.Module):
         n_regions: int = 4,
         length_cond: bool = False,
         n_len_buckets: int = 9,
+        hint_postnorm: bool = False,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -390,7 +444,22 @@ class DelayCodebookDecoder(nn.Module):
         self.embeds = nn.ModuleList(
             [nn.Embedding(c, hidden_size) for c in self.num_classes]
         )
+        # Post-norm hint projection (``transformer.hint_decoder_proj``): the
+        # clip-level hints are added to the *output* of the final decoder norm
+        # instead of (only) to the input.  The input path runs the hint through
+        # twelve pre-LN residual blocks, where a constant is quickly washed out
+        # (measured: the semantic vector moved the logits by 2.6x their std and
+        # changed the CE by -0.002 nats, i.e. a direction the heads map to a
+        # near-uniform offset).  Rank-H, shared by all codebooks, zero-init ->
+        # identity at init.  See ``hint_film_memory`` for the encoder-side twin.
+        if hint_postnorm:
+            self.hint_out = nn.Linear(hidden_size, hidden_size)
+            nn.init.zeros_(self.hint_out.weight)
+            nn.init.zeros_(self.hint_out.bias)
+        else:
+            self.hint_out = None
         self.pos = SinusoidalPositionalEncoding(hidden_size, max_positions)
+
         layer = nn.TransformerDecoderLayer(
             d_model=hidden_size,
             nhead=n_heads,
@@ -507,7 +576,11 @@ class DelayCodebookDecoder(nn.Module):
             tgt_mask=tgt_mask,
             memory_key_padding_mask=mem_pad,
         )
+        # Post-norm hint injection (beyond the norm, so nothing can cancel it).
+        if self.hint_out is not None and hint_vec is not None:
+            out = out + self.hint_out(hint_vec.to(out.dtype)).unsqueeze(1)
         return [head(out) for head in self.heads]
+
 
     def forward(
         self,
@@ -573,6 +646,24 @@ class CodeTransformer(nn.Module):
         hints_json = _get_cfg(tcfg, "hints_json", None)
         decoder_hints = bool(_get_cfg(tcfg, "decoder_hints", True))
         semantic_dim = int(_get_cfg(tcfg, "semantic_dim", 384))
+        # *Where* the clip-level channels are injected (Phase 2).  The additive
+        # path above ``_temporal_norm`` cannot express a per-clip constant, so
+        # these two switches add a post-norm path on each side of the model:
+        #   hint_film_memory  -> PhonemeEncoder, ``mem*(1+gamma(h)) + beta(h)``
+        #                        applied *after* the temporal norm
+        #   hint_decoder_proj -> DelayCodebookDecoder, ``out + W h`` applied
+        #                        *after* the final decoder norm, before the heads
+        # Both zero-initialise (identity at init), so a ``--transfer_from`` model
+        # starts as an exact copy of its source.
+        hint_film = bool(_get_cfg(tcfg, "hint_film_memory", False))
+        hint_postnorm = bool(_get_cfg(tcfg, "hint_decoder_proj", False))
+        # Classifier-free guidance over the hint channels, at generation time
+        # only (see ``CodeTransformer.generate``).  ``None``/1.0 = off.
+        self.hint_guidance = self._parse_guidance(
+            _get_cfg(tcfg, "hint_guidance", None))
+        self.hint_guidance_books = self._parse_guidance_books(
+            _get_cfg(tcfg, "hint_guidance_books", None))
+
         pitch_edges = list(_get_cfg(tcfg, "hint_pitch_edges", None)
                            or DEFAULT_PITCH_EDGES)
         n_slot_buckets = int(_get_cfg(tcfg, "n_slot_buckets",
@@ -642,7 +733,9 @@ class CodeTransformer(nn.Module):
             max_positions=max_positions,
             memory_norm=memory_norm,
             residual_scale=residual_scale,
+            hint_film=hint_film,
         )
+
         self.decoder = DelayCodebookDecoder(
             vocab_sizes=self.vocab_sizes,
             hidden_size=hidden_size,
@@ -660,9 +753,13 @@ class CodeTransformer(nn.Module):
             n_regions=self.n_regions,
             length_cond=length_cond,
             n_len_buckets=self.n_len_buckets,
+            hint_postnorm=hint_postnorm,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
+        self.hint_film_memory = hint_film
+        self.hint_decoder_proj = hint_postnorm
+
 
         # ---- conditioning-hint tables (v0.8) ------------------------------- #
         # Every channel is a small ``(n_levels + 1, hidden)`` embedding indexed
@@ -789,6 +886,38 @@ class CodeTransformer(nn.Module):
             raise ValueError(
                 "transformer.codebook_weights must not sum to 0")
         return weights
+
+    @staticmethod
+    def _parse_guidance(raw) -> Optional[float]:
+        """``transformer.hint_guidance`` -> a float, or ``None`` (off).
+
+        ``None`` (the key absent) is *off*, not 1.0: 1.0 is the exact identity
+        and would still pay for the second (unconditional) decoder pass, so the
+        two are mapped together and the cost is skipped entirely.
+        """
+        if raw is None:
+            return None
+        value = float(raw)
+        if value < 0:
+            raise ValueError(
+                f"transformer.hint_guidance must be >= 0, got {value}")
+        return None if abs(value - 1.0) < 1e-9 else value
+
+    def _parse_guidance_books(self, raw) -> Optional[List[float]]:
+        """Per-codebook guidance weights (``transformer.hint_guidance_books``)."""
+        if raw is None:
+            return None
+        weights = [float(w) for w in raw]
+        if len(weights) != self.codebook_num:
+            raise ValueError(
+                f"transformer.hint_guidance_books has {len(weights)} entries "
+                f"but there are {self.codebook_num} codebooks "
+                f"({self.spec_codebook_num} spec + {self.pitch_codebook_num} "
+                f"pitch)")
+        if any(w < 0 for w in weights):
+            raise ValueError(
+                f"transformer.hint_guidance_books must be >= 0, got {weights}")
+        return None if all(abs(w - 1.0) < 1e-9 for w in weights) else weights
 
     def loss_weights(self, epoch: Optional[int] = None) -> torch.Tensor:
         """Effective ``(K,)`` loss weights for training epoch ``epoch``.
@@ -1095,10 +1224,13 @@ class CodeTransformer(nn.Module):
         Every hint table has a level-0 row and ``sem_null`` is its own learned
         vector, and ``train.hint_dropout`` / ``train.hint_null_all`` exercise
         exactly this state during training.  **Omitting the vectors instead**
-        is a *different* function: measured on ``transformer_v0.9``, dropping
-        every channel to level 0 costs +0.014 nats against real hints, while
-        passing no hints at all costs +0.051 and changes the encoder memory by
-        52 %.  So generation must send this dict, not ``None``.
+        is a *different* function: measured on the finished
+        ``transformer_v0.9`` (step 433 455) it costs +0.136 nats against the
+        real hints, of which the trained null state accounts for +0.023 -- i.e.
+        0.113 nats are pure out-of-distribution error -- and it changes the
+        encoder memory by 52 %.  So generation must send this dict, not
+        ``None``.
+
 
         Args:
             batch_size, n_phone: leading dimensions of the batch.
@@ -1130,20 +1262,23 @@ class CodeTransformer(nn.Module):
         Accepts ``None`` (or ``"null"`` / ``"zero"``) for the trained "not
         provided" state, ``"omit"`` for the pre-Phase-0 behaviour of passing no
         vectors at all (kept only for ablations -- it is *out of distribution*
-        for a hint-enabled model), or an already-shaped dict/batch.  A dict
-        with no ``hint_int`` (a batch from a hints-less dataset) also means
-        "no hints available", i.e. the null state, so a hint-enabled model
-        never silently falls back to the out-of-distribution path.
+        for a dict/batch.  A dict with no ``hint_int`` (a batch from a hints-less
+        dataset) also means "no hints available", i.e. the null state, so a
+        hint-enabled model never silently falls back to the out-of-distribution
+        path -- except for the explicit ``OMIT_HINTS`` marker, which is the
+        *deliberate* "no vectors at all".
         """
         if not self.hints:
             return None
+        if hints is OMIT_HINTS:
+            return hints
         if hints is None:
             return self.null_hints(batch_size, n_phone, device)
         if isinstance(hints, str):
             if hints in ("null", "zero"):
                 return self.null_hints(batch_size, n_phone, device)
             if hints == "omit":
-                return None
+                return OMIT_HINTS
             raise ValueError(
                 f"unknown hints mode {hints!r}; expected 'null'/'zero' (the "
                 f"trained null state), 'omit' (no vectors at all), or a hint "
@@ -1151,6 +1286,7 @@ class CodeTransformer(nn.Module):
         if isinstance(hints, dict) and hints.get("hint_int") is None:
             return self.null_hints(batch_size, n_phone, device)
         return hints
+
 
 
 
@@ -1229,6 +1365,73 @@ class CodeTransformer(nn.Module):
         if sem is not None:
             out = out + sem
         return out
+
+    @staticmethod
+    def _same_hints(a, b) -> bool:
+        """True when two hint dicts are the same state (bitwise per channel)."""
+        if a is None or b is None:
+            return a is b
+        if a is OMIT_HINTS or b is OMIT_HINTS:
+            return a is b
+        for key in ("hint_int", "hint_reg", "hint_sem", "hint_sem_valid",
+                    "hint_pitch", "hint_slot"):
+            va, vb = a.get(key), b.get(key)
+            if va is None:
+                continue
+            if vb is None or tuple(va.shape) != tuple(vb.shape):
+                return False
+            if not torch.equal(va, vb):
+                return False
+        return True
+
+    def _guidance_setup(self, hints, phone_ids, phone_lengths, sid,
+                        hint_guidance=None, hint_guidance_books=None):
+        """``(per-book weights, uncond memory, mask, uncond dec hint)``.
+
+        Classifier-free guidance over the hint channels:
+        ``logits = uncond + w * (cond - uncond)`` with ``uncond`` the trained
+        null state (level 0 / ``sem_null``) and ``cond`` the hints actually
+        passed in.  It exists because the hint channels are *style* inputs: the
+        teacher-forced CE gradient they get is tiny (measured 0.0000-0.011
+        nats), so a plain conditional model gives a weak knob even with a
+        working injection site, while the
+        ``cond - uncond`` direction is exactly what the channel changes.
+
+        Returns all ``None`` when it is off, when the conditional hints are
+        already the null state (the direction is zero -- no second pass is
+        paid for), or when every weight is 1.0 (the exact identity).
+
+        Args:
+            hint_guidance: scalar weight for every codebook; ``None`` -> the
+                model's ``transformer.hint_guidance``.
+            hint_guidance_books: per-codebook weights (overrides the scalar).
+        """
+        g = self.hint_guidance if hint_guidance is None else float(hint_guidance)
+        books = (self.hint_guidance_books if hint_guidance_books is None
+                 else [float(w) for w in hint_guidance_books])
+        if not self.hints or (g is None and books is None):
+            return None, None, None, None
+        K = self.codebook_num
+        weights = books if books is not None else [float(g)] * K
+        if len(weights) != K:
+            raise ValueError(
+                f"hint_guidance_books has {len(weights)} entries but the model "
+                f"has {K} codebooks")
+        if all(abs(w - 1.0) < 1e-9 for w in weights):
+            return None, None, None, None
+
+        null = self.null_hints(phone_ids.shape[0], phone_ids.shape[1],
+                               phone_ids.device)
+        if self._same_hints(hints, null):
+            return None, None, None, None
+        memory, mask = self.encode(phone_ids, phone_lengths, sid, hints=null)
+        return weights, memory, mask, self._dec_hint(null)
+
+    @staticmethod
+    def _combine_guidance(logits, logits_uncond, weights):
+        """``uncond + w_k * (cond - uncond)`` per codebook (list in, list out)."""
+        return [lu + w * (lc - lu)
+                for w, lc, lu in zip(weights, logits, logits_uncond)]
 
     def build_delay_pattern(
         self,
@@ -1341,6 +1544,11 @@ class CodeTransformer(nn.Module):
             the effective weights used for this batch, for logging.
         """
         B, K, T = codes.shape
+        # ``hints`` reaches here as a dict (resolved by ``forward``) or, for the
+        # diagnostic arms, as one of the ``resolve_hints`` strings; resolve once
+        # so ``_dec_hint`` never sees a string.
+        if not isinstance(hints, dict):
+            hints = self.resolve_hints(hints, B, memory.shape[1], memory.device)
         region = None
         len_bucket = None
         if self.fim and fim_mask is not None:
@@ -1550,7 +1758,15 @@ class CodeTransformer(nn.Module):
         :meth:`code_loss`.  ``fim_mask``/``fim_prefix_len``/``fim_mid_len``
         select the prefix-suffix-middle reorder (no-op unless
         ``transformer.fim``).
+
+        ``hints`` may be a collated batch *or* one of the ``resolve_hints``
+        strings (``"null"``/``"omit"``), which is what makes
+        :meth:`hint_channel_deltas` able to score the same batch in a different
+        state; it is resolved here, once, so ``encode`` and ``_dec_hint`` cannot
+        disagree.
         """
+        hints = self.resolve_hints(hints, phone_ids.shape[0],
+                                   phone_ids.shape[1], phone_ids.device)
         memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
                                           hints=hints)
         codes = torch.cat([spec_codes, pitch_codes], dim=1).long()
@@ -1560,9 +1776,13 @@ class CodeTransformer(nn.Module):
             fim_mask=fim_mask, fim_prefix_len=fim_prefix_len,
             fim_mid_len=fim_mid_len, hints=hints)
 
+    #: Sentinel for "no explicit hints argument" (see ``compute_batch_loss``).
+    _USE_BATCH_HINTS = object()
+
     def compute_batch_loss(self, batch: dict,
                            epoch: Optional[int] = None,
-                           diagnostics: bool = True) -> dict:
+                           diagnostics: bool = True,
+                           hints=_USE_BATCH_HINTS) -> dict:
         """Convenience wrapper used by the Lightning module.
 
         Expects ``phone_ids``, ``phone_lengths``, ``sid``, ``spec_codes``,
@@ -1570,7 +1790,13 @@ class CodeTransformer(nn.Module):
         ``epoch`` drives the codebook weight curriculum; ``diagnostics``
         enables the per-codebook accuracy/usage-entropy extras (see
         :meth:`code_loss`).
+
+        ``hints`` defaults to the batch itself; pass ``"omit"`` (or ``None``)
+        to score the same batch in a different hint state -- that is what
+        :meth:`hint_channel_deltas` does.
         """
+        if hints is self._USE_BATCH_HINTS:
+            hints = batch if self.hints else None
         return self.forward(
             phone_ids=batch["phone_ids"],
             phone_lengths=batch.get("phone_lengths"),
@@ -1584,8 +1810,65 @@ class CodeTransformer(nn.Module):
             fim_mask=batch.get("fim"),
             fim_prefix_len=batch.get("fim_prefix_len"),
             fim_mid_len=batch.get("fim_mid_len"),
-            hints=batch if self.hints else None,
+            hints=hints,
         )
+
+    #: Per-channel keys a probe can drop, in the order they are logged.
+    HINT_CHANNEL_KEYS = {
+        "int": ("hint_int",),
+        "reg": ("hint_reg",),
+        "sem": ("hint_sem", "hint_sem_valid"),
+        "pitch": ("hint_pitch",),
+        "slot": ("hint_slot",),
+    }
+
+    @torch.no_grad()
+    def hint_channel_deltas(self, batch: dict, epoch: Optional[int] = None,
+                            channels: Optional[Sequence[str]] = None) -> dict:
+        """Per-channel ``CE(channel dropped) - CE(all hints)``, in nats.
+
+        The question this answers is *"is this channel load-bearing?"*, which
+        neither ``val_loss`` nor ``val_hint_gap`` can: the latter drops every
+        channel at once, so one live channel hides four dead ones.  Each arm
+        re-scores the *same* batch with exactly one channel at its trained
+        "not provided" state (level 0 / ``hint_sem_valid=False``), plus:
+
+        * ``all``  - every channel dropped (the trained null state, i.e. what
+          generation runs in by default);
+        * ``omit`` - no hint vectors at all, the pre-Phase-0 inference path.
+          The difference between ``all`` and ``omit`` is that bug's cost.
+
+        Cost: ``len(channels) + 1`` teacher-forced forwards.  Run it on one or
+        two validation batches per epoch, not on the whole split.
+        """
+        if not self.hints or batch.get("hint_int") is None:
+            return {}
+        names = (list(channels) if channels
+                 else list(self.HINT_CHANNEL_KEYS) + ["all", "omit"])
+        base = float(self.compute_batch_loss(
+            batch, epoch=epoch, diagnostics=False)["loss"])
+        out = {"base": base}
+        all_keys = tuple(k for keys in self.HINT_CHANNEL_KEYS.values()
+                         for k in keys)
+        for name in names:
+            if name == "omit":
+                loss = self.compute_batch_loss(batch, epoch=epoch,
+                                               diagnostics=False, hints="omit")
+                out[name] = float(loss["loss"]) - base
+                continue
+            if name not in self.HINT_CHANNEL_KEYS and name != "all":
+                raise ValueError(
+                    f"unknown hint channel {name!r}; expected one of "
+                    f"{sorted(self.HINT_CHANNEL_KEYS)} or 'all'/'omit'")
+            keys = all_keys if name == "all" else self.HINT_CHANNEL_KEYS[name]
+            off = dict(batch)
+            for key in keys:
+                if off.get(key) is not None:
+                    off[key] = torch.zeros_like(off[key])
+            loss = self.compute_batch_loss(off, epoch=epoch, diagnostics=False)
+            out[name] = float(loss["loss"]) - base
+        return out
+
 
     # ------------------------------------------------------------------ #
     # Inference
@@ -1602,6 +1885,8 @@ class CodeTransformer(nn.Module):
         stop_on_eos: Optional[bool] = None,
         return_lengths: bool = False,
         hints: Optional[dict] = None,
+        hint_guidance: Optional[float] = None,
+        hint_guidance_books: Optional[Sequence[float]] = None,
     ):
         """Autoregressively sample ``(B, K, n)`` delayed codes.
 
@@ -1635,6 +1920,12 @@ class CodeTransformer(nn.Module):
                 for the semantic vector) -- not "no hints"; pass ``"omit"`` for
                 the historical behaviour of dropping the vectors entirely (see
                 :meth:`resolve_hints`).
+            hint_guidance, hint_guidance_books: classifier-free guidance over
+                the hint channels, ``logits = uncond + w*(cond - uncond)`` with
+                ``uncond`` = the null state.  ``None`` -> the model's configured
+                ``transformer.hint_guidance`` (off by default).  Costs a second
+                decoder pass per step, and is a no-op when ``hints`` already
+                *is* the null state.  See :meth:`_guidance_setup`.
 
         Returns:
             ``(B, K, n)`` codes, or ``(codes, lengths)`` if ``return_lengths``.
@@ -1652,9 +1943,13 @@ class CodeTransformer(nn.Module):
             memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
                                               hints=hints)
             dec_hint = self._dec_hint(hints)
+            g_weights, g_memory, g_mask, g_hint = self._guidance_setup(
+                hints, phone_ids, phone_lengths, sid,
+                hint_guidance, hint_guidance_books)
             B = phone_ids.shape[0]
             K = self.codebook_num
             L = max_frames + K - 1
+
             device = phone_ids.device
 
             seq = self._pad_column(B, device)
@@ -1665,7 +1960,14 @@ class CodeTransformer(nn.Module):
             for i in range(L):
                 logits = self.decoder(seq, memory, memory_mask, sid=sid,
                                       hint_vec=dec_hint)
+                if g_weights is not None:
+                    logits = self._combine_guidance(
+                        logits,
+                        self.decoder(seq, g_memory, g_mask, sid=sid,
+                                     hint_vec=g_hint),
+                        g_weights)
                 col = []
+
                 for k in range(K):
                     lg = logits[k][:, -1] / max(temperature, 1e-6)
                     # Never emit the pad/start class as a real token.
@@ -1752,6 +2054,8 @@ class CodeTransformer(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         hints: Optional[dict] = None,
+        hint_guidance: Optional[float] = None,
+        hint_guidance_books: Optional[Sequence[float]] = None,
     ) -> torch.Tensor:
         """Fixed-length span regeneration: ``(prefix, suffix) -> middle``.
 
@@ -1788,6 +2092,8 @@ class CodeTransformer(nn.Module):
             hints: optional collated batch / hint dict; ``None`` = the trained
                 null state, ``"omit"`` = the historical "no vectors" path (see
                 :meth:`resolve_hints`).
+            hint_guidance, hint_guidance_books: CFG over the hint channels, as
+                in :meth:`generate`; costs a second decoder pass per step.
 
         Returns:
             ``(B, K, middle_frames)`` freshly generated middle codes.
@@ -1804,9 +2110,13 @@ class CodeTransformer(nn.Module):
             memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
                                               hints=hints)
             dec_hint = self._dec_hint(hints)
+            g_weights, g_memory, g_mask, g_hint = self._guidance_setup(
+                hints, phone_ids, phone_lengths, sid,
+                hint_guidance, hint_guidance_books)
             B = phone_ids.shape[0]
             K = self.codebook_num
             device = phone_ids.device
+
             m = int(middle_frames)
             p = int(prefix_codes.shape[-1])
             s = int(suffix_codes.shape[-1])
@@ -1870,7 +2180,18 @@ class CodeTransformer(nn.Module):
                         region=region_cols[:, :n_cols],
                         length=None if len_cols is None else len_cols[:, :n_cols],
                         hint_vec=dec_hint)
+                    if g_weights is not None:
+                        logits = self._combine_guidance(
+                            logits,
+                            self.decoder(
+                                seq, g_memory, g_mask, sid=sid,
+                                region=region_cols[:, :n_cols],
+                                length=(None if len_cols is None
+                                        else len_cols[:, :n_cols]),
+                                hint_vec=g_hint),
+                            g_weights)
                     col = []
+
                     for k in range(K):
                         lg = logits[k][:, -1] / max(temperature, 1e-6)
                         lg = lg.clone()
@@ -1917,7 +2238,17 @@ class CodeTransformer(nn.Module):
             hints = (f", hints={self.n_intensity_levels} int/{self.n_pitch_levels}"
                      f" pitch/{self.n_register_levels} reg/{self.n_slot_buckets}"
                      f" slot+sem{self.semantic_dim}"
-                     + (" (decoder too)" if self.decoder_hints else " (encoder only)"))
+                     + (' (decoder too)' if self.decoder_hints
+                        else ' (encoder only)'))
+            if self.hint_film_memory or self.hint_decoder_proj:
+                where = "+".join([n for n, on in
+                                  (("film", self.hint_film_memory),
+                                   ("dec_proj", self.hint_decoder_proj)) if on])
+                hints += f" inject={where}"
+            if self.hint_guidance is not None or self.hint_guidance_books:
+                w = (self.hint_guidance_books if self.hint_guidance_books
+                     else round(float(self.hint_guidance), 3))
+                hints += f" cfg={w}"
         else:
             hints = ", hints=off"
         return (

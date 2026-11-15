@@ -161,6 +161,37 @@ transformer:
   # path is trained too (needed for hint-free inference and for the
   # `val_loss_nohint` probe to mean something).
   hint_null_all: 0.10
+  # ---- where the *clip-level* channels are injected (v1.0, Phase 2) --------
+  # The additive path above `PhonemeEncoder._temporal_norm` cannot express a
+  # per-clip constant: that norm standardises every dimension over *time*, so
+  # the mean subtraction cancels any position-independent offset (and any FiLM
+  # computed from one).  Measured on transformer_v0.9: intensity 0 -> 4 moved the
+  # pre-norm residual by 4.0 % and the CE by 0.0000 nats.  These two switches add
+  # a path *after* the norm on each side.  Both zero-initialise, so a
+  # `--transfer_from` model starts as an exact copy of its source and the new
+  # projections have to earn their effect.
+  #   hint_film_memory  -> encoder memory: mem * (1 + gamma(h)) + beta(h)
+  #   hint_decoder_proj -> decoder output: out + W h, after the final decoder
+  #                        norm and before the heads (shared by all codebooks)
+  # Phase 2's four arms are (false,false) = the v0.9 baseline, (true,false),
+  # (false,true) and (true,true).  Enabling either changes the parameter set, so
+  # it needs a fresh `exp_name` + `--transfer_from`.
+  hint_film_memory: false
+  hint_decoder_proj: false
+  # ---- classifier-free guidance over the hints (v1.0, Phase 3) -------------
+  # Generation only: `logits = uncond + w * (cond - uncond)`, where `uncond` is
+  # the trained null state (level 0 / sem_null) and `cond` the hints passed in.
+  # This is what turns "the channel is available" into "the channel is a knob":
+  # the teacher-forced CE gradient a style channel gets is tiny (0.0000-0.011
+  # nats measured), while the cond-uncond direction is exactly the channel's
+  # effect.  Costs a second decoder pass per step; skipped automatically when
+  # the hints already *are* the null state.  1.0 is the identity, `null`/absent
+  # is off.  `hint_guidance_books` overrides the scalar per codebook (order
+  # spec0..spec7, pitch8..9), e.g. guide the pitch books harder than the
+  # timbre books.  Sweep `w` against WER *and* repetition before believing it:
+  # v0.8's failure mode was a sharpening-induced repetition attractor.
+  hint_guidance: null
+  hint_guidance_books: null
   # Also feed `sid` to the decoder (its own embedding table), not just to the
   # phoneme encoder. Without this the voice can only reach the autoregressive
   # model through cross-attention to the encoder memory, which is a weak,
@@ -487,14 +518,29 @@ train:
   # model is using the oracle or leaning on it; `val_loss` alone cannot.
   # Costs one extra forward pass per probed batch. 0 disables the probe.
   hint_probe_batches: 2
+  # Per-channel hint liveness probe: re-score the first N validation batches
+  # with each hint channel dropped *separately* and log
+  # `val_hint_channel_delta/{int,reg,sem,pitch,slot,all,omit}` (CE with that
+  # channel at level 0 minus CE with all hints, in nats).  Costs N*7 extra
+  # forwards per epoch.  This is the number that distinguishes "the model uses
+  # this knob" from "the table is decorative" -- `val_hint_gap` drops every
+  # channel at once, so one live channel hides four dead ones.  `omit` is the
+  # pre-Phase-0 "no hint vectors" path, so `all - omit` is that bug's cost.
+  hint_channel_probe: 1
+  # Guidance weight for the TensorBoard *samples* (`null` = the model's
+  # transformer.hint_guidance).  Phase 3 sweeps it offline; a training run
+  # should leave it off so the logged audio stays the honest conditional one.
+  sample_hint_guidance: null
+
   # Which hint state *generation* runs in -- the TensorBoard samples (codes /
   # audio / mel / pitch), the FIM infill probe, the speaker probe, the OOD
   # probe and the REPL's default (it reads this key too).  This is not
   # cosmetic: `None` is not "no hints".  `hint_dropout` / `hint_null_all` train
   # **level 0** (`sem_null` for the semantic vector) as the "not provided"
   # state, and pre-Phase-0 every sampling path instead dropped the vectors
-  # entirely -- a different function, worth +0.051 nats and a 52 % encoder
-  # memory shift on transformer_v0.9.  So:
+  # entirely -- a different function, measured at +0.136 nats on the finished
+  # v0.9 (of which the trained null state is +0.023).  So:
+
   #   "cond" -> the item's real `.cond` hints (val batches carry them; the
   #             OOD probe has no target audio and falls back to null)
   #   "null" -> the trained null state (level 0 everywhere).  Default.

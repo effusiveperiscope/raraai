@@ -9,12 +9,16 @@ started.
 
 > **Phase 0 (2026-11-14):** the generation paths were passing `hints=None`,
 > which omits the hint vectors instead of using the trained level-0 "not
-> provided" state (measured: +0.051 nats and a 52 % encoder-memory shift on
-> `transformer_v0.9`). Fixed: `CodeTransformer.null_hints()` /
-> `resolve_hints()`, `train.sample_hints`, and the hint state is now part of
-> every sample log tag. Evidence, open design questions (injection site,
-> guidance, register vs the spec codes) and the phase plan live in
-> **`scratch/HINTS_V1_PLAN.md`**.
+> provided" state — measured on the finished v0.9 (step 433 455) that costs
+> **+0.136 nats** against +0.023 for the trained null state, i.e. 0.113 nats of
+> pure out-of-distribution error, and a 52 % encoder-memory shift. Fixed:
+> `CodeTransformer.null_hints()` / `resolve_hints()` (+ an explicit
+> `OMIT_HINTS` marker so `"omit"` stays a distinct state), `train.sample_hints`,
+> and the hint state is now part of every sample log tag. Evidence, the
+> per-channel liveness table, the code-space probe and the phase plan live in
+> **`scratch/HINTS_V1_PLAN.md`**; v1.0 also adds `hint_film_memory` /
+> `hint_decoder_proj` (post-norm injection) and `hint_guidance`.
+
 
 
 **Register objection — resolved in v0.9.** The absolute register channel was
