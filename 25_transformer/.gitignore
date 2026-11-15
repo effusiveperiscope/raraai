@@ -12,3 +12,6 @@ checkpoints_stage2/
 test_out
 test_in
 *.wav
+
+# scratch/run_hints_v1.py run directory (logs, generated configs)
+scratch/hints_v1_runs/

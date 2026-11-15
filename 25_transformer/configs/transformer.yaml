@@ -471,6 +471,15 @@ train:
   # epoch, no sampling.  0 disables the probe.
   fim_probe_batches: 2
   val_interval: 1
+  # Optional cap on the number of *training batches per epoch* (Lightning's
+  # `limit_train_batches`).  Absent/null = the natural epoch length.  Only
+  # needed for deliberately short runs: validation and the per-epoch
+  # checkpoints fire on epoch end, so a run that stops at `max_steps` inside
+  # its first epoch validates zero times and writes no `last.ckpt`.  Set this
+  # equal to `max_steps` for a "one short epoch" ablation (the 2 k-step wiring
+  # arms in scratch/HINTS_V1_PLAN.md Phase 2 do exactly that); it also makes
+  # `val_hint_channel_delta/*` observable on such a run.
+  # limit_train_batches: null
   # TensorBoard step logging. Also gates the per-codebook *diagnostics* in
   # training_step: code_loss only computes accuracy / usage entropy (a second
   # full softmax over every codebook, plus a device sync each) on the steps

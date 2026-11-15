@@ -2015,13 +2015,18 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                     f"training-time hints.json.")
         # The register table is the one hint channel whose *meaning* can change
         # without changing its width (absolute -> relative, v0.9): row counts
-        # cannot catch it.  Every checkpoint that has hint tables today predates
-        # the relative parameterisation, so warn on any warm start into it.
+        # cannot catch it, and no checkpoint stores which parameterisation it
+        # was trained with.  v0.9 is the *relative* run, so only a pre-v0.9
+        # hints checkpoint (v0.8) is affected; there is no way to tell them
+        # apart from the file, so this stays a conditional note rather than a
+        # statement about the checkpoint.
         if net.relative_register:
-            print(f"NOTE: {source} carries hint tables trained with *absolute* "
-                  f"register levels, but this model buckets register on the "
-                  f"deviation from the speaker median. reg_emb transfers as a "
-                  f"warm start and has to be relearned.")
+            print(f"NOTE: if {source} predates v0.9 it carries hint tables "
+                  f"trained with *absolute* register levels, while this model "
+                  f"buckets register on the deviation from the speaker median. "
+                  f"reg_emb then transfers as a warm start and has to be "
+                  f"relearned. (v0.9+ checkpoints are already relative; the "
+                  f"file does not record which, so this cannot be checked.)")
 
 
 def train(config, resume_from=None, transfer_from=None):
@@ -2203,6 +2208,15 @@ def train(config, resume_from=None, transfer_from=None):
         callbacks=callbacks,
         check_val_every_n_epoch=config.train.get("val_interval", 1),
         log_every_n_steps=config.train.get("log_interval", 50),
+        # Optional cap on the *epoch* length (Lightning `limit_train_batches`).
+        # Validation and the per-epoch checkpoints (`last.ckpt`,
+        # `best-checkpoint.ckpt`) fire on epoch end, so a short run that stops
+        # at `max_steps` inside its first epoch would never validate and would
+        # write no checkpoint. Setting this equal to `max_steps` makes the run
+        # exactly one (shorter) epoch, which is what the HINTS_V1_PLAN Phase 2
+        # 2 k-step wiring arms need to be inspectable. `null`/absent keeps the
+        # natural epoch length.
+        limit_train_batches=config.train.get("limit_train_batches", None),
     )
     trainer.fit(training_module, train_dataloader, val_dataloader,
                 ckpt_path=resume_from, weights_only=False)

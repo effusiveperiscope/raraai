@@ -93,6 +93,17 @@ from modeling.transformer import CodeTransformer  # noqa: E402
 
 # Preprocessed tensors are named by the source basename plus one of these.
 TENSOR_SUFFIXES = (".phone_ids", ".spec_codes", ".pitch_codes")
+
+#: User-facing channel names -> ``CodeTransformer.HINT_CHANNEL_KEYS``.  The
+#: mapping itself is *not* duplicated here: the model owns which batch keys
+#: carry a channel, so a new channel cannot drift out of sync with the ablation.
+HINT_CHANNEL_ALIASES = {"intensity": "int", "register": "reg",
+                        "semantic": "sem", "pitch": "pitch", "slot": "slot"}
+
+
+def hint_channel_keys(name: str):
+    """Batch keys of a channel (``KeyError`` for an unknown name)."""
+    return CodeTransformer.HINT_CHANNEL_KEYS[HINT_CHANNEL_ALIASES[name]]
 _WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)*")
 
 
@@ -268,6 +279,13 @@ def synthesize_from_generated(net, net_g, items, args, device, pad_id,
         hint_arg = None
         if collator is not None:
             batch = collator(chunk)
+            for name in getattr(args, "drop_hints", None) or ():
+                for key in hint_channel_keys(name):
+                    if batch.get(key) is not None:
+                        # zeros_like is the trained "not provided" state: level
+                        # 0 for the level tables, hint_sem_valid=False (which
+                        # routes the vector through sem_null).
+                        batch[key] = torch.zeros_like(batch[key])
             hint_arg = {k: (v.to(device) if torch.is_tensor(v) else v)
                         for k, v in batch.items()}
         gen, glen = net.generate(phone, plen, sid, max_frames=max(lens),
@@ -410,9 +428,21 @@ def main():
                          "pre-Phase-0 'send no vectors' path; use "
                          "CodeTransformer's hints='omit' yourself if you need "
                          "that).  Run both ways to see whether a model depends "
-                         "on the hints at inference -- v0.8 was identical either "
-                         "way, i.e. the channels were inert (HINTS_PLAN.md 9).")
+                         "on the hints at inference.  NOTE: before 2026-11-15 "
+                         "this flag did not reach the dataset, so it was a "
+                         "silent no-op and both arms were the null state (see "
+                         "HINTS_V1_PLAN.md 1.2).")
 
+    ap.add_argument("--drop_hints", "--drop-hints", default=None,
+                    dest="drop_hints",
+                    help="comma separated hint channels to force to their "
+                         "trained 'not provided' state while generating "
+                         "(intensity,register,semantic,pitch,slot), on top of "
+                         "--hints.  This is the per-channel ablation: it "
+                         "separates a gain that comes from a text-derived "
+                         "channel (semantic -- available at inference) from one "
+                         "that comes from an audio-derived oracle (intensity/"
+                         "register/pitch/slot).")
     ap.add_argument("--hint_guidance", "--hint-guidance", type=float,
                     default=None, dest="hint_guidance",
                     help="classifier-free guidance weight over the hint "
@@ -444,6 +474,16 @@ def main():
         args.hint_guidance_books = [float(w) for w in
                                     str(args.hint_guidance_books).split(",")
                                     if w.strip()]
+    if args.drop_hints:
+        args.drop_hints = [c.strip() for c in str(args.drop_hints).split(",")
+                           if c.strip()]
+        unknown = [c for c in args.drop_hints if c not in HINT_CHANNEL_ALIASES]
+        if unknown:
+            raise SystemExit(f"--drop_hints: unknown channel(s) {unknown}; "
+                             f"choose from {sorted(HINT_CHANNEL_ALIASES)}")
+        if not args.hints:
+            raise SystemExit("--drop_hints only means something with --hints "
+                             "(otherwise every channel is already absent).")
 
 
     config = OmegaConf.load(args.config)
@@ -470,10 +510,35 @@ def main():
           f"({', '.join(sources[:3])}{', ...' if len(sources) > 3 else ''})")
 
     # max_frames=None: score whole utterances, not the training window.
+    # `--hints` must build the *dataset* with the hint channels, not just the
+    # collator: a hints-less `CodeDataset` emits no `hint_*` keys, the collator
+    # then has nothing to pad, and `generate` resolves the resulting empty dict
+    # to the trained null state.  Before this was wired, `--hints` was a silent
+    # no-op -- both arms were the null state, so "hints do not change WER" was
+    # measured on the same arm twice (and Phase 3's guidance sweep ran with
+    # `cond == uncond`, i.e. guidance switched off).
+    hint_kwargs: dict = {}
+    if args.hints:
+        tc = config.transformer
+        if not bool(tc.get("hints", False)):
+            raise SystemExit(
+                "--hints needs transformer.hints: true (and the hint tables in "
+                "the checkpoint); this config has hints disabled.")
+        hint_kwargs = dict(
+            hints=True,
+            hints_json=tc.get("hints_json", None),
+            hint_dropout={},          # never drop on a val item
+            hint_null_all=0.0,
+            hint_pitch_edges=tc.get("hint_pitch_edges", None),
+            n_slot_buckets=int(tc.get("n_slot_buckets", 8) or 8),
+        )
     dataset = CodeDataset(
         val_filelist, is_train=False, max_frames=None, max_phone_length=None,
-        speaker_map=config.train.get("speaker_map", None),
+        speaker_map=config.train.get("speaker_map", None), **hint_kwargs,
     )
+    if args.hints and not dataset.hints:
+        raise SystemExit("--hints was requested but the dataset built without "
+                         "hint channels; check transformer.hints_json.")
     avail = [i for i in range(len(dataset))
              if item_basename(dataset.items[i]["spec_codes"]) in refs]
     if not avail:

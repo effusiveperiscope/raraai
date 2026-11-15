@@ -1,0 +1,19 @@
+reference filelists: 8
+  197091 transcripts (filelists_2/25_stage2_base1.txt, filelists_2/expresso_read_linux.txt, filelists_2/genshin_full_eng_text.txt, ...)
+val: data/genshin_plus_extras/val_stage2.txt (5140 items, 5140 with a reference) -> scoring 200 items
+
+generator: checkpoints_stage1/base_v0.7/last.ckpt
+asr: Qwen/Qwen3-ASR-0.6B  device=cuda:0  temperature=0.9 top_k=20  code frame 40 ms
+
+WER floor (ground-truth codes, same vocoder): 9.89%  [289/2923 words]
+
+=== 5090_v0.7_fim2/best-checkpoint.ckpt  (epoch 69, step 213710)
+    WER 21.45%   S242 D313 I72 [627/2923 words, 200 utts]   floor 9.89%
+
+=== transformer_v0.9/best-checkpoint.ckpt  (epoch 58, step 360195)
+    WER 21.59%   S226 D351 I54 [631/2923 words, 200 utts]   floor 9.89%
+
+=== transformer_v0.9/last.ckpt  (epoch 70, step 433455)
+    WER 20.22%   S192 D335 I64 [591/2923 words, 200 utts]   floor 9.89%
+
+lowest WER: transformer_v0.9@433455 (20.22%)

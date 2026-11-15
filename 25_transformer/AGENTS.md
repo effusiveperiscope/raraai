@@ -904,6 +904,14 @@ optimization`), so `TrainModule.__init__` sets
 - `Trainer(accumulate_grad_batches > 1)` is rejected by Lightning under manual
   optimization, so `TrainModule.__init__` raises if
   `train.accumulate_grad_batches > 1`.
+- `train.limit_train_batches` (absent/`null` by default) is passed straight to
+  `pl.Trainer` and caps the number of training batches per *epoch*. It exists
+  for deliberately short ablations: validation and the per-epoch
+  `last.ckpt`/`best-checkpoint.ckpt` fire on epoch end, so a run that stops at
+  `max_steps` inside its first epoch validates zero times and writes no
+  checkpoint at all. Set it equal to `max_steps` for a "one short epoch" run
+  (the 2 k-step wiring arms in `scratch/HINTS_V1_PLAN.md` do exactly that).
+  It changes no parameter, so it needs no fresh `exp_name` on its own.
 - `self.optimizers()` order is `[AdamW, Muon]` and `lr_schedulers()` is
   `[sched_adamw, sched_muon]`; `training_step` unpacks them by position, so
   keep `configure_optimizers` in that order.
