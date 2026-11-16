@@ -64,9 +64,11 @@ Notes
   g2pen tokenizer only, no ASR / aligner / RMVPE weights and no audio input.
   Same path as ``2_preprocess.py --phones_from transcript``.
 * ``{...}`` in the text is ARPAbet you supply yourself: ``hello {W ER1 L D}``
-  phonemizes "hello" normally and splices the braces' phones in verbatim
-  (spaces optional, case-insensitive). The whole result is tokenized once, so
-  the ids are the same shape a whole-sentence phonemization produces.
+  phonemizes "hello" normally and splices ``WER1LD`` in its place (spaces
+  optional, case-insensitive). One group = one word (its symbols are
+  concatenated, exactly like g2p writes a pronunciation); use several groups
+  for several words. The whole result is tokenized once, so the ids are the
+  same shape a whole-sentence phonemization produces.
 * ``transformer.eos_token`` / ``fim`` / ``region_cond`` change the codebook
   embedding/head shapes, so a config that disagrees with its checkpoint would
   silently re-initialise them (``load_state_dict_mismatch`` skips whole
@@ -185,7 +187,12 @@ def split_arpabet_braces(text: str):
     """Split ``text`` into ``("text", chunk)`` / ``("arpabet", phones)`` parts.
 
     A ``{...}`` group is ARPAbet the user supplied by hand; everything else is
-    ordinary text that still goes through g2p.  The braces are not kept.
+    ordinary text that still goes through g2p.  The braces are not kept, and
+    the group's symbols are concatenated into **one word** exactly like g2p
+    writes a pronunciation (``{F AO1 R}`` -> ``FAO1R``, not ``F AO1 R``);
+    write one group per word.  This matters: the tokenizer merges phones
+    inside a word but not across spaces (measured ``FAO1R`` -> 2 ids vs
+    ``F AO1 R`` -> 6).
 
     Raises:
         ValueError: unbalanced ``{`` / ``}``, an empty group, or a token that
@@ -210,7 +217,7 @@ def split_arpabet_braces(text: str):
                     or match_token.group(1) not in _ARPABET_SYMBOLS):
                 raise ValueError(f"{token!r} is not an ARPAbet symbol "
                                  f"(expected e.g. HH, AH0, L, OW1)")
-        segments.append(("arpabet", " ".join(t.upper() for t in tokens)))
+        segments.append(("arpabet", "".join(t.upper() for t in tokens)))
         pos = match.end()
     tail = text[pos:]
     if "{" in tail or "}" in tail:
