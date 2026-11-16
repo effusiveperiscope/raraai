@@ -160,16 +160,53 @@ with a batched array — `write_cond` clones and refuses that (see §5).
 
 ## 7. Remaining work
 
-Only two items from the original milestone list are genuinely undone. Both are
-ergonomics, not model work.
-
-1. **M5 — REPL controls.** `scratch/stage2_repl.py` runs generation in the
-   configured hint state (`--hints null|omit`, `train.sample_hints`) but has no
-   per-channel sliders and no one-shot `--hint_intensity 7`-style overrides.
-2. **The register control arm.** The per-channel probe drops each channel; the
+1. **The register control arm** — the per-channel probe drops each channel; the
    register-specific control (replace it with the *speaker's mean bin* rather
    than dropping it) is not implemented. It is the probe that distinguishes "the
    model reads prosody" from "the model reads a second, coarser speaker id".
+
+M5 (REPL ergonomics) is **done**: `scratch/stage2_repl.py` has per-channel
+controls (`e` intensity, `r` register, `j` word pitch, `u` word slot,
+`d` semantic), one-shot `--hint_*` overrides, reads a loaded val item's `.cond`
+as the `cond` base, and derives the hint/monotone/FiLM layout from the
+checkpoint. It also has `--seed` so paired A/B draws are comparable.
+
+### Semantic-only on OOD text (measured 2026-11-15)
+
+The one channel flagged "untested" in `scratch/HINTS_V1_PLAN.md` §5.8.
+`hints_v1_p4_final_mono1/last.ckpt`, every other channel at level 0, semantic
+from the current sentence (bge-small CLS), `temperature 0.9 / top_k 20`:
+
+| pair | first 5 frames | first 10 | first 20 | first 40 | full |
+|---|---|---|---|---|---|
+| own vs null | 59.1 % | 46.9 % | 36.4 % | 30.0 % | 24.4 % |
+| swapped vs null | 65.6 % | 55.5 % | 42.9 % | 32.5 % | 27.0 % |
+| **own vs swapped** | **59.9 %** | **49.3 %** | **36.3 %** | **27.0 %** | **23.0 %** |
+
+8 OOD sentences × 2 seeds; "swapped" injects the *next sentence's* vector.
+The channel is **live**: against the null state only ~59 % of the first five
+frames agree, i.e. supplying a vector changes the generation immediately. But
+**the vector's content is not discriminative at this scale** — swapping in
+another sentence's vector is as far from "own" as the null state is (59.9 % vs
+59.1 % in the first five frames), and slightly *closer* to the null arm than
+own is.
+
+The acoustic arm (4 sentences, decoded through `base_v0.7`) agrees: a semantic
+vector raises f0 spread (2.97 → 3.65 st) and leaves duration essentially
+unchanged (2.94 → 2.95 s), but own and swapped are indistinguishable
+(f0 spread 3.65 vs 3.60 st, median f0 132 vs 136 Hz, 74.2 vs 73.8 frames).
+So on OOD text the channel behaves as a trained *"semantic state present"* flag
+rather than a sentence-specific conditioner. Caveat: free-running agreement
+compounds sampling noise and 8×2 items give a wide interval, so this bounds the
+effect rather than proving it zero — the 4-text / 1-seed subset of the same
+probe reads the other way round (own-vs-swapped 49.5 % vs own-vs-null 53.5 % in
+the first five frames), which is exactly the noise level involved. It is
+consistent with §5.5's "semantic alone = the null state" on WER.
+
+Reproduce with `python scratch/hint_semantic_probe.py --checkpoint
+checkpoints_stage2/hints_v1_p4_final_mono1/last.ckpt` (`--no_audio` for the
+codes-only table, `--num_texts` / `--seeds` to size it).
+
 
 ---
 

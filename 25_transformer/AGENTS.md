@@ -1947,6 +1947,11 @@ python scratch/hint_channel_probe.py --checkpoint checkpoints_stage2/<exp>/last.
 # GroupKFold by speaker vs a speaker-mean control.  R2(codes) >> R2(speaker)
 # means a dead channel is a wiring problem, not missing information.
 python scratch/hint_codespace_probe.py --n 4000
+# Semantic-only probe on OOD text (null vs own vector vs another sentence's):
+# code agreement per prefix window, plus decoded duration/f0/energy when audio
+# is on.  The safe default is --no_audio (codes only, seconds per draw).
+python scratch/hint_semantic_probe.py \
+    --checkpoint checkpoints_stage2/hints_v1_p4_final_mono1/last.ckpt --no_audio
 
 # Stage-2 step-time benchmark: parts + totals, no Trainer, real code tensors
 # (see §4 "Stage-2 step cost"). Add --ns_steps 5 --muon_all for the pre-v0.6
@@ -1981,12 +1986,26 @@ python -c "import torch; sd = torch.load('checkpoints_stage2/<exp>/last.ckpt', m
 # The eos_token/fim/region_cond layout is read back from the checkpoint on every
 # load, so a config newer than its checkpoint (or several runs with different
 # layouts in one session) still loads the right thing.
+#
+# Hint controls (hint-enabled checkpoints; `p` shows the state): `e` intensity
+# level, `r` register level, `j` word-pitch shift (semitones, 2 st/bucket),
+# `u` word-slot shift (log2 duration), `d` semantic source (`cond|text|null` or
+# a literal sentence = inject *its* vector).  `cond` uses the loaded val item's
+# own `.cond`; arbitrary text has none, so it falls back to the trained null
+# state.  One-shot equivalents: `--hint_intensity/--hint_register/--hint_pitch/
+# --hint_slot/--hint_semantic/--hint_semantic_text`, plus `--seed` for paired
+# A/B draws.  `--hint_semantic text` with the other channels at level 0 is the
+# semantic-only OOD probe (result: HINTS_PLAN.md §7).  The hint/monotone/FiLM
+# layout is also re-derived from the checkpoint, so a v1.1 (monotone) run loads
+# correctly against the shipped table-model config.
 python scratch/stage2_repl.py
-python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_fim.ckpt
+python scratch/stage2_repl.py --checkpoint checkpoints_stage2/hints_v1_p4_final_mono1/last.ckpt
 python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_v0.5a/last.ckpt --no_audio
 python scratch/stage2_repl.py --list_checkpoints            # just list the runs
 python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \
     --frames 200 --out scratch/repl_out/hello.wav      # one-shot
+python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \
+    --no_audio --hints null --hint_semantic text --seed 7   # semantic-only OOD
 
 # Ad-hoc smoke tests (many modules have an `if __name__ == "__main__"` block)
 python modeling/transformer.py    # constructs a CodeTransformer, runs fwd + generate

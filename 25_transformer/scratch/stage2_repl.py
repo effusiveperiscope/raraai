@@ -113,6 +113,10 @@ LINE_ALIASES = {
     "switch": "s", "load": "s", "open": "s", "ckpt": "s",
     "checkpoint": "s", "checkpoints": "s",
     "fill": "n", "infill": "n", "in_fill": "n", "middle": "n", "fim": "n",
+    "intensity": "e", "effort": "e", "register": "r",
+    "pitch": "j", "word_pitch": "j",
+    "slot": "u", "timing": "u", "duration": "u",
+    "semantic": "d", "sem": "d",
     "quit": "q", "exit": "q",
 }
 
@@ -498,22 +502,38 @@ class Stage2REPL:
         # Live playback (`b`) + the `--play` auto-play toggle.
         self.auto_play = bool(auto_play)
         self.player = AudioPlayer()
-        # Hint state for generation.  There is no `.cond` for arbitrary text
-        # here, so `cond` is not available in the REPL: `null` (the trained
-        # "not provided" state) or `omit` (no vectors at all, the pre-Phase-0
-        # behaviour, out of distribution for a hint model).
+        # Hint state for generation.  ``cond`` uses the loaded val item's
+        # ``.cond`` hints when there is one (arbitrary text has none, so it
+        # degrades to the trained null state); ``null`` ignores the item's
+        # hints; ``omit`` sends no vectors at all (pre-Phase-0 behaviour, out
+        # of distribution for a hint model).
         mode = str(hint_mode or config.train.get("sample_hints", "null")
                    or "null").lower()
         if mode == "zero":
             mode = "null"
-        if mode not in ("null", "omit"):
-            if mode == "cond":
-                print("NOTE: the REPL has no .cond for arbitrary text; "
-                      "using the trained null hint state instead.")
-                mode = "null"
-            else:
-                raise SystemExit(f"--hints must be null | omit (got {mode!r})")
+        if mode not in ("cond", "null", "omit"):
+            raise SystemExit(
+                f"--hints must be cond | null | omit (got {mode!r})")
         self.hint_mode = mode
+
+        # ---- per-channel hint controls (M5) -------------------------------- #
+        # Applied on top of the base state at every generate/infill:
+        #   hint_intensity / hint_register   absolute level (None = base value)
+        #   hint_pitch_st                    per-word shift in semitones
+        #                                    (2 st per bucket, rounded)
+        #   hint_slot_shift                  per-word log2 duration shift
+        #                                    (+1 = twice as long)
+        #   hint_semantic                    null | text | cond
+        #   hint_semantic_text               sentence whose vector is injected
+        #                                    instead of the current text's
+        self.hint_intensity: Optional[int] = None
+        self.hint_register: Optional[int] = None
+        self.hint_pitch_st: float = 0.0
+        self.hint_slot_shift: int = 0
+        self.hint_semantic: str = "cond"
+        self.hint_semantic_text: Optional[str] = None
+        self._base_hints: Optional[dict] = None   # last val item's levels
+        self._sem_cache: dict = {}
 
 
         self.frame_rate = (int(config.data.sampling_rate)
@@ -536,7 +556,9 @@ class Stage2REPL:
         # (`s`) always starts from the same place instead of compounding.
         self._layout_originals = {
             k: config.transformer.get(k, None)
-            for k in ("eos_token", "fim", "region_cond", "length_cond")}
+            for k in ("eos_token", "fim", "region_cond", "length_cond",
+                      "hints", "decoder_hints", "hint_monotone",
+                      "hint_film_memory", "hint_decoder_proj")}
         self._fe = None            # FeatureExtractor (lazy: g2p + tokenizer)
         self._net_g = None         # stage-1 Generator (lazy)
         self._net_g_failed = False
@@ -581,10 +603,7 @@ class Stage2REPL:
               + (f"; {n_bad} skipped, {n_missing} missing"
                  if n_bad or n_missing else ""))
         if getattr(self.net, "hints", False):
-            desc = ("trained null state (level 0 / sem_null)"
-                    if self.hint_mode == "null"
-                    else "OMITTED -- out of distribution for this model")
-            print(f"Hints: {desc}")
+            print(f"Hints: {self.hint_state()}")
         else:
             print("Hints: n/a (this checkpoint has no hint tables)")
         self.net.eval()
@@ -654,6 +673,36 @@ class Stage2REPL:
         if bool(tcfg.get("length_cond")) != length:
             print(f"NOTE: length_cond={length} in {source}; using that.")
             tcfg.length_cond = length
+        # Conditioning-hint layout.  These are *not* shape-compatible: a hint
+        # model loaded into a non-hint config silently drops every hint tensor,
+        # and a monotone/FiLM checkpoint loaded into the table model loses the
+        # trained direction (which reads as "the channel does nothing").
+        keys = set(state)
+
+        def has(suffix: str) -> bool:
+            return any(k == suffix or k.endswith("." + suffix) for k in keys)
+
+        hints = has("sem_proj.weight") or has("sem_null")
+        if bool(tcfg.get("hints", False)) != hints:
+            print(f"NOTE: hints={hints} in {source}; using that.")
+            tcfg.hints = hints
+        if hints:
+            dec_hints = has("dec_int_emb.weight") or has("dec_int_dir")
+            if bool(tcfg.get("decoder_hints", False)) != dec_hints:
+                print(f"NOTE: decoder_hints={dec_hints} in {source}; using that.")
+                tcfg.decoder_hints = dec_hints
+            monotone = has("int_dir")
+            if bool(tcfg.get("hint_monotone", False)) != monotone:
+                print(f"NOTE: hint_monotone={monotone} in {source}; using that.")
+                tcfg.hint_monotone = monotone
+            film = has("film_gamma.weight")
+            if bool(tcfg.get("hint_film_memory", False)) != film:
+                print(f"NOTE: hint_film_memory={film} in {source}; using that.")
+                tcfg.hint_film_memory = film
+            proj = has("hint_out.weight")
+            if bool(tcfg.get("hint_decoder_proj", False)) != proj:
+                print(f"NOTE: hint_decoder_proj={proj} in {source}; using that.")
+                tcfg.hint_decoder_proj = proj
 
     def _generator(self):
         """The frozen stage-1 Generator, or ``None`` when audio is off."""
@@ -764,6 +813,7 @@ class Stage2REPL:
         # than letting `w`/`a`/`c` silently serve stale results.
         self.last_codes = self.last_sid = None
         self.last_audio = self.last_f0 = None
+        self._base_hints = None
         self.clear_fill()
         self.frames = self._clamp_frames(self.frames)
         print("Last codes/audio cleared (they came from the old checkpoint).")
@@ -793,6 +843,9 @@ class Stage2REPL:
             print(f"{text!r} produced no phonemes; text left unchanged.")
             return False
         self.text, self.phone_ids = text, ids
+        # A new sentence has no `.cond` (and no word timings), so the item's
+        # captured levels must not leak into it.
+        self._base_hints = None
         print(f"text: {text}")
         print(f"phones: {fe.tokenizer_g2p.decode(ids)!r}  ({len(ids)} ids)")
         return True
@@ -812,11 +865,227 @@ class Stage2REPL:
             return limit
         return frames
 
-    def _hint_arg(self):
-        """Hints argument for ``generate``/``infill`` (see ``self.hint_mode``)."""
+    # ------------------------------------------------------------------ #
+    # Hint controls (v0.8+ checkpoints, M5)
+    # ------------------------------------------------------------------ #
+    def _hint_widths(self):
+        """``(n_intensity, n_register, n_pitch, n_slot)`` level counts."""
+        net = self.net
+        return (int(getattr(net, "n_intensity_levels", 0) or 0),
+                int(getattr(net, "n_register_levels", 0) or 0),
+                int(getattr(net, "n_pitch_levels", 0) or 0),
+                int(getattr(net, "n_slot_buckets", 0) or 0))
+
+    def _null_base_hints(self, n_phone: int) -> dict:
+        """The trained null state as a 1-D (B=1 squeezed) dict."""
+        batch = self.net.null_hints(1, n_phone, dtype=torch.long)
+        return {k: (v[0].detach().cpu() if torch.is_tensor(v) else v)
+                for k, v in batch.items()}
+
+    def _semantic_vector(self):
+        """The sentence vector this generation should carry, or ``None``.
+
+        ``hint_semantic`` decides: ``text`` embeds the current text,
+        ``hint_semantic_text`` overrides the source (the swap test), ``cond``
+        keeps the val item's own vector (``None`` for arbitrary text), and
+        ``null`` always returns ``None`` so ``sem_null`` is used.
+        """
+        if self.hint_semantic == "null":
+            return None
+        # `text` embeds the current sentence; `cond` only embeds an explicit
+        # override sentence, otherwise it keeps whatever the item's .cond
+        # carried (None here -> the base vector stays untouched / sem_null).
+        if self.hint_semantic_text:
+            src = self.hint_semantic_text
+        elif self.hint_semantic == "text":
+            src = self.text
+        else:
+            src = None
+        if not src or not str(src).strip():
+            return None
+        key = str(src)
+        if key not in self._sem_cache:
+            try:
+                self._sem_cache[key] = self._extractor().hint_semantic(key)
+            except Exception as exc:
+                print(f"  semantic hint unavailable: {exc}")
+                self._sem_cache[key] = None
+        return self._sem_cache[key]
+
+    @staticmethod
+    def _shift_levels(levels, delta: int, n_levels: int):
+        """Shift the *present* per-phone buckets; fill uniformly when all absent.
+
+        Absent (0) stays absent when the base has any present bucket, so a
+        val item's unvoiced/undocumented words keep their state.  On arbitrary
+        text (no per-word hints at all) a non-zero shift sets every phone to
+        the middle bucket + ``delta`` so the control still does something.
+        """
+        out = levels.clone().long()
+        present = (out >= 1) & (out <= int(n_levels))
+        if bool(present.any()):
+            out[present] = (out[present] + int(delta)).clamp(1, int(n_levels))
+        else:
+            mid = int(n_levels) // 2 + 1
+            out[:] = max(1, min(int(n_levels), mid + int(delta)))
+        return out
+
+    def _hints_for(self, n_phone: int):
+        """Hints argument for ``generate``/``infill`` with the controls applied."""
         if not getattr(self.net, "hints", False):
             return None
-        return self.hint_mode
+        if self.hint_mode == "omit":
+            return "omit"
+        if self.hint_mode == "cond" and self._base_hints is not None:
+            base = {k: (v.clone() if torch.is_tensor(v) else v)
+                    for k, v in self._base_hints.items()}
+        else:
+            base = self._null_base_hints(n_phone)
+
+        n_int, n_reg, n_pitch, n_slot = self._hint_widths()
+        # Per-phone arrays must match this generation's phone sequence.
+        for key in ("hint_pitch", "hint_slot"):
+            v = base.get(key)
+            out = torch.zeros(n_phone, dtype=torch.long)
+            if v is not None and int(v.numel()):
+                m = min(n_phone, int(v.numel()))
+                out[:m] = v[:m].long()
+            base[key] = out
+        if base.get("hint_int") is None:
+            base["hint_int"] = torch.zeros((), dtype=torch.long)
+        if base.get("hint_reg") is None:
+            base["hint_reg"] = torch.zeros((), dtype=torch.long)
+        if base.get("hint_sem") is None:
+            base["hint_sem"] = torch.zeros(int(self.net.semantic_dim))
+        if base.get("hint_sem_valid") is None:
+            base["hint_sem_valid"] = torch.tensor(False)
+
+        # Absolute level overrides.
+        if self.hint_intensity is not None and n_int:
+            base["hint_int"] = torch.tensor(
+                max(0, min(n_int, int(self.hint_intensity))), dtype=torch.long)
+        if self.hint_register is not None and n_reg:
+            base["hint_reg"] = torch.tensor(
+                max(0, min(n_reg, int(self.hint_register))), dtype=torch.long)
+
+        # Per-word shifts (pitch is bucketed at 2 st/bin).
+        dp = int(round(float(self.hint_pitch_st) / 2.0))
+        if dp and n_pitch:
+            base["hint_pitch"] = self._shift_levels(
+                base["hint_pitch"], dp, n_pitch)
+        if self.hint_slot_shift and n_slot:
+            base["hint_slot"] = self._shift_levels(
+                base["hint_slot"], int(self.hint_slot_shift), n_slot)
+
+        # Semantic channel: replace, keep, or null it out explicitly.
+        vec = self._semantic_vector()
+        if vec is not None:
+            v = torch.as_tensor(vec, dtype=torch.float32).reshape(-1)
+            if v.numel() != int(self.net.semantic_dim):
+                raise ValueError(
+                    f"semantic vector has {v.numel()} dims, model wants "
+                    f"{self.net.semantic_dim}")
+            base["hint_sem"] = v
+            base["hint_sem_valid"] = torch.tensor(True)
+        elif self.hint_semantic == "null":
+            base["hint_sem"] = torch.zeros(int(self.net.semantic_dim))
+            base["hint_sem_valid"] = torch.tensor(False)
+
+        return {k: (v.unsqueeze(0) if torch.is_tensor(v) else v)
+                for k, v in base.items()}
+
+    def hint_state(self) -> str:
+        """One-line description of the current hint controls."""
+        if self.net is not None and not getattr(self.net, "hints", False):
+            return "n/a (checkpoint has no hint tables)"
+        n_int, n_reg, n_pitch, n_slot = self._hint_widths()
+        inten = ("base" if self.hint_intensity is None
+                 else str(self.hint_intensity))
+        reg = ("base" if self.hint_register is None else str(self.hint_register))
+        sem = self.hint_semantic
+        if self.hint_semantic_text:
+            sem = f"text({self.hint_semantic_text!r})"
+        return (f"base={self.hint_mode}, intensity={inten}/{n_int}, "
+                f"register={reg}/{n_reg}, pitch={self.hint_pitch_st:+.1f}st, "
+                f"slot={self.hint_slot_shift:+d}, semantic={sem}")
+
+    def _hint_arg(self):
+        """Kept for call sites that only need the base mode (no controls)."""
+        return self._hints_for(len(self.phone_ids))
+
+    def set_hint_intensity(self, raw) -> None:
+        text = str(raw or "").strip().lower()
+        if not text:
+            return
+        if text in ("base", "item", "none", "off"):
+            self.hint_intensity = None
+        else:
+            n_int = self._hint_widths()[0]
+            try:
+                value = int(text, 0)
+            except ValueError:
+                print(f"not a level: {raw!r}")
+                return
+            self.hint_intensity = max(0, min(n_int, value))
+        print(f"intensity: {self.hint_state()}")
+
+    def set_hint_register(self, raw) -> None:
+        text = str(raw or "").strip().lower()
+        if not text:
+            return
+        if text in ("base", "item", "none", "off"):
+            self.hint_register = None
+        else:
+            n_reg = self._hint_widths()[1]
+            try:
+                value = int(text, 0)
+            except ValueError:
+                print(f"not a level: {raw!r}")
+                return
+            self.hint_register = max(0, min(n_reg, value))
+        print(f"register: {self.hint_state()}")
+
+    def set_hint_pitch(self, raw) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        try:
+            self.hint_pitch_st = float(text)
+        except ValueError:
+            print(f"not a number: {raw!r}")
+            return
+        print(f"word pitch shift: {self.hint_pitch_st:+.1f} st "
+              f"(= {int(round(self.hint_pitch_st / 2.0)):+d} bucket(s))")
+
+    def set_hint_slot(self, raw) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        value = _parse_int(text)
+        if value is None:
+            return
+        self.hint_slot_shift = int(value)
+        print(f"word slot shift: {self.hint_slot_shift:+d} "
+              f"(x{2.0 ** self.hint_slot_shift:.2f} duration)")
+
+    def set_hint_semantic(self, raw) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        low = text.lower()
+        if low in ("cond", "item"):
+            self.hint_semantic, self.hint_semantic_text = "cond", None
+        elif low in ("text", "current"):
+            self.hint_semantic, self.hint_semantic_text = "text", None
+        elif low in ("null", "off", "none"):
+            self.hint_semantic, self.hint_semantic_text = "null", None
+        elif low in ("clear", "-"):
+            self.hint_semantic, self.hint_semantic_text = "cond", None
+        else:
+            # A literal sentence: inject *its* vector instead of the current
+            # text's (the semantic swap test).
+            self.hint_semantic, self.hint_semantic_text = "text", text
+        print(f"semantic: {self.hint_state()}")
 
     def generate(self, frames: Optional[int] = None) -> bool:
         """Sample codes for the current text and decode them to audio."""
@@ -1028,6 +1297,22 @@ class Stage2REPL:
     # ------------------------------------------------------------------ #
     # Validation-item comparison
     # ------------------------------------------------------------------ #
+    def _val_hint_kwargs(self) -> dict:
+        """CodeDataset kwargs so val batches carry their ``.cond`` hints.
+
+        Training-only dropout/null-augmentation is deliberately *not* passed:
+        a val item must show the hints it actually has.
+        """
+        tcfg = self.config.transformer
+        if not bool(tcfg.get("hints", False)):
+            return {}
+        return {
+            "hints": True,
+            "hints_json": tcfg.get("hints_json"),
+            "hint_pitch_edges": tcfg.get("hint_pitch_edges", None),
+            "n_slot_buckets": int(tcfg.get("n_slot_buckets", 8)),
+        }
+
     def _val_dataset(self):
         if self._val_ds is None:
             from dataset_codes import CodeDataset
@@ -1039,7 +1324,8 @@ class Stage2REPL:
             self._val_ds = CodeDataset(
                 path, is_train=False, max_frames=None,
                 max_phone_length=self.config.train.get("max_phone_length"),
-                speaker_map=self.config.train.get("speaker_map"))
+                speaker_map=self.config.train.get("speaker_map"),
+                **self._val_hint_kwargs())
             print(f"{len(self._val_ds)} validation item(s) from {path}")
         return self._val_ds
 
@@ -1062,6 +1348,8 @@ class Stage2REPL:
             [int(i) for i in batch["phone_ids"][0][
                 :int(batch["phone_lengths"][0])]])
         self.sid = int(batch["sid"][0])
+        # Keep this item's own levels so `cond` (and the sliders) can use them.
+        self._base_hints = self._capture_base_hints(batch)
         code_len = int(batch["code_lengths"][0])
         frames = self._clamp_frames(min(self.frames, code_len))
 
@@ -1074,7 +1362,7 @@ class Stage2REPL:
             batch["phone_ids"], batch["phone_lengths"], batch["sid"],
             max_frames=frames, temperature=self.temperature,
             top_k=self.top_k, return_lengths=True,
-            hints=self._hint_arg())
+            hints=self._hints_for(int(batch["phone_ids"].shape[1])))
 
         pred = codes[0]
         n = int(pred.shape[-1])
@@ -1089,6 +1377,23 @@ class Stage2REPL:
         self._report_match(gt, pred)
         self._decode_audio(pred, self.sid)
         return True
+
+    def _capture_base_hints(self, batch) -> Optional[dict]:
+        """The val item's hint levels as a 1-D dict (``None`` if it has none)."""
+        if not getattr(self.net, "hints", False) or "hint_int" not in batch:
+            return None
+        n_phone = int(batch["phone_lengths"][0])
+        keep = ("hint_int", "hint_reg", "hint_sem", "hint_sem_valid")
+        out = {}
+        for key in keep:
+            v = batch.get(key)
+            if v is not None:
+                out[key] = v[0].detach().cpu()
+        for key in ("hint_pitch", "hint_slot"):
+            v = batch.get(key)
+            if v is not None:
+                out[key] = v[0, :n_phone].detach().cpu()
+        return out or None
 
     def set_phone_ids(self, ids) -> None:
         """Set the conditioning *without* phonemizing (val items carry ids)."""
@@ -1207,6 +1512,7 @@ class Stage2REPL:
               f"(~{self.frames / self.frame_rate:.2f} s at "
               f"{self.frame_rate:g} Hz)")
         print(f"temperature: {self.temperature:g}   top_k: {self.top_k}")
+        print(f"hints      : {self.hint_state()}")
         print(f"audio      : {audio}")
         print(f"playback   : {self.player.describe()}"
               f"   auto-play: {'on' if self.auto_play else 'off (press b)'}")
@@ -1242,6 +1548,21 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
   s  switch stage-2 checkpoint (prompt: run name or path; `?` lists them)
   b  play the last audio (pydub; space does the same)
   n  fill a random span of the last sample (prompt: frames or start:frames)
+
+  Hint controls (hint-enabled checkpoints; p shows the current state):
+  e  intensity level  (prompt: 0-8, blank = keep; `base` = the item's value)
+  r  register level   (prompt: 0-5, blank = keep)
+  j  word pitch shift (prompt: semitones, e.g. +2 / -4; 2 st per bucket)
+  u  word slot shift  (prompt: log2 duration, +1 = twice as long)
+  d  semantic source  (prompt: cond | text | null | `<a sentence>`)
+
+  `cond` uses the loaded val item's own `.cond` hints; arbitrary text has no
+  `.cond`, so it falls back to the trained null state.  `d <sentence>` embeds
+  that sentence instead of the current text (the semantic swap test), and
+  `d text` embeds the current text -- with every other channel at level 0 this
+  is the "semantic only, OOD text" probe (`--hint_semantic text`).  Word-pitch
+  and slot shifts act on the present per-word buckets; on OOD text they fill
+  every phone uniformly.
 
   Blank at a prompt keeps the current value; blank at a wav/codes prompt
   writes into the output directory with a generated name.  `s` rebuilds the
@@ -1321,6 +1642,8 @@ def banner(repl: "Stage2REPL") -> None:
           f"frames={repl.frames}  temp={repl.temperature:g}  "
           f"top_k={repl.top_k}  "
           f"audio={'on' if repl.audio and not repl._net_g_failed else 'off'}")
+    if repl.net is not None and getattr(repl.net, "hints", False):
+        print(f"  hints={repl.hint_state()}")
     print("  press m for help, q to quit.")
 
 
@@ -1400,6 +1723,29 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
                     if value is not None:
                         repl.top_k = value if value > 0 else None
                 print(f"top_k = {repl.top_k}")
+        elif key == "e":
+            raw = rest or repl.reader.read_line(
+                "Intensity level (0-8; blank = keep, `base` = the item's "
+                f"value) [{repl.hint_intensity if repl.hint_intensity is not None else 'base'}]: ")
+            repl.set_hint_intensity(raw)
+        elif key == "r":
+            raw = rest or repl.reader.read_line(
+                "Register level (0-5; blank = keep, `base` = the item's "
+                f"value) [{repl.hint_register if repl.hint_register is not None else 'base'}]: ")
+            repl.set_hint_register(raw)
+        elif key == "j":
+            raw = rest or repl.reader.read_line(
+                f"Word-pitch shift in semitones [{repl.hint_pitch_st:+.1f}]: ")
+            repl.set_hint_pitch(raw)
+        elif key == "u":
+            raw = rest or repl.reader.read_line(
+                f"Word-slot shift (log2 duration) [{repl.hint_slot_shift:+d}]: ")
+            repl.set_hint_slot(raw)
+        elif key == "d":
+            raw = rest or repl.reader.read_line(
+                "Semantic source: cond | text | null | <a sentence> "
+                f"[{repl.hint_semantic}]: ")
+            repl.set_hint_semantic(raw)
         elif key == "a":
             if repl.current_codes is None:
                 print("Nothing sampled yet -- press g (generate).")
@@ -1503,13 +1849,33 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="one-shot mode: write the decoded audio here")
     parser.add_argument("--dump_codes", default=None,
                         help="one-shot mode: torch.save the sampled codes here")
-    parser.add_argument("--hints", default=None, choices=("null", "omit"),
-                        help="hint state for generation: 'null' = the trained "
-                             "'not provided' state (level 0 / sem_null, what "
-                             "training used for dropped hints), 'omit' = send "
-                             "no hint vectors at all (pre-Phase-0 behaviour, "
-                             "out of distribution). Default: "
-                             "train.sample_hints from the config.")
+    parser.add_argument("--hints", default=None,
+                        choices=("cond", "null", "omit"),
+                        help="base hint state: 'cond' = the loaded val item's "
+                             "own .cond hints (arbitrary text has none and "
+                             "falls back to null), 'null' = the trained "
+                             "'not provided' state (level 0 / sem_null), "
+                             "'omit' = send no vectors at all (pre-Phase-0, "
+                             "out of distribution). Default: train.sample_hints.")
+    parser.add_argument("--hint_intensity", type=int, default=None,
+                        help="intensity level override (0-8; 0 = absent)")
+    parser.add_argument("--hint_register", type=int, default=None,
+                        help="register level override (0-5; 0 = absent)")
+    parser.add_argument("--hint_pitch", type=float, default=None,
+                        help="per-word pitch shift in semitones (2 st per "
+                             "bucket; applied to present word hints)")
+    parser.add_argument("--hint_slot", type=int, default=None,
+                        help="per-word log2 duration shift (+1 = twice as long)")
+    parser.add_argument("--hint_semantic", default=None,
+                        choices=("cond", "text", "null"),
+                        help="semantic channel: 'cond' = the item's own vector, "
+                             "'text' = embed the current text (the "
+                             "semantic-only OOD probe), 'null' = sem_null")
+    parser.add_argument("--hint_semantic_text", default=None,
+                        help="inject this sentence's vector instead of the "
+                             "current text's (the semantic swap test)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="torch seed, so paired A/B draws are comparable")
     return parser.parse_args(argv)
 
 
@@ -1550,6 +1916,23 @@ def main(argv=None) -> int:
         repl.frames = int(args.frames)
     if args.temp is not None:
         repl.temperature = float(args.temp)
+    if args.hint_intensity is not None:
+        repl.hint_intensity = int(args.hint_intensity)
+    if args.hint_register is not None:
+        repl.hint_register = int(args.hint_register)
+    if args.hint_pitch is not None:
+        repl.hint_pitch_st = float(args.hint_pitch)
+    if args.hint_slot is not None:
+        repl.hint_slot_shift = int(args.hint_slot)
+    if args.hint_semantic is not None:
+        repl.hint_semantic = str(args.hint_semantic)
+    if args.hint_semantic_text is not None:
+        repl.hint_semantic = "text"
+        repl.hint_semantic_text = str(args.hint_semantic_text)
+    if args.seed is not None:
+        torch.manual_seed(int(args.seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(args.seed))
     if args.topk is not None:
         text = str(args.topk).strip().lower()
         if text in ("none", "off", "0"):

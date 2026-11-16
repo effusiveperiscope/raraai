@@ -1007,8 +1007,12 @@ the triggers below fires.
    monotone run with an explicit "current level" target — not a config edit.
 
 Also unmeasured, and cheap whenever a reason appears: `semantic` on OOD text
-(§5.5), and the knob re-run on `best-checkpoint.ckpt` (val 2.2707 vs 2.2743, i.e.
-irrelevant unless something else is being decided at the same time).
+(§5.5) — **measured 2026-11-15, see `HINTS_PLAN.md` §7**: the channel is live
+(presence moves the codes and raises decoded f0 spread) but not content-
+discriminative, since another sentence's vector is as far from the true one as
+the null state is. And the knob re-run on `best-checkpoint.ckpt` (val 2.2707 vs
+2.2743, i.e. irrelevant unless something else is being decided at the same
+time).
 
 ## 6. Commands
 
