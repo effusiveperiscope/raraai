@@ -26,6 +26,9 @@ Usage
     python scratch/stage2_repl.py \\
         --checkpoint checkpoints_stage2/transformer_v0.5a/last.ckpt --no_audio
 
+    # bf16 weights + sampling (transformer only); press z for the memory report
+    python scratch/stage2_repl.py --precision bf16
+
     # one-shot: phonemize, sample, decode, write a wav, exit
     python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \\
         --frames 200 --out scratch/repl_out/hello.wav
@@ -44,6 +47,7 @@ Keys (press ``m`` inside the REPL for the same list)
     a  decode the last codes again w  write the last audio to a wav (prompt)
     x  dump the last codes tensor  q  quit (^C / ^D also work)
     b  play the last audio (pydub; space does the same)
+    z  report GPU / CPU memory usage (models, peaks, allocator cache)
 
     n  fill a random span of the last sample -- re-generate it from its own
        kept prefix/suffix without touching the sample (prompt: frames, or
@@ -69,6 +73,7 @@ Notes
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import logging
 import os
@@ -79,6 +84,11 @@ import threading
 import time
 import traceback
 from typing import Optional, Tuple
+
+try:  # POSIX only; the REPL still works without it (no RSS line)
+    import resource
+except ImportError:  # pragma: no cover - Windows
+    resource = None  # type: ignore[assignment]
 
 # Claim the root logger's handler slot before anything can import the stage-1
 # Generator (`load_generator` below, i.e. the first `g`): `modeling/generator.py`
@@ -118,7 +128,38 @@ LINE_ALIASES = {
     "slot": "u", "timing": "u", "duration": "u",
     "semantic": "d", "sem": "d",
     "quit": "q", "exit": "q",
+    "memory": "z", "mem": "z", "vram": "z", "gpu": "z", "usage": "z",
 }
+
+# Sampling precision (`--precision`).  Stage 2 trains in 32-true (see
+# AGENTS.md §5), so fp32 is the default and the reference; bf16/fp16 wrap the
+# transformer's generate/infill in autocast, which halves the activation
+# traffic and is what the memory report (`z`) exists to compare.
+PRECISION_ALIASES = {
+    "fp32": "fp32", "float32": "fp32", "f32": "fp32", "32": "fp32",
+    "bf16": "bf16", "bfloat16": "bf16", "b16": "bf16",
+    "fp16": "fp16", "float16": "fp16", "half": "fp16", "f16": "fp16",
+}
+PRECISION_DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def resolve_precision(name, device: str) -> str:
+    """Normalise ``--precision`` and reject what the device cannot do.
+
+    autocast needs a device type with a narrower fast path; CPU bf16 is a
+    pessimisation in practice (and fp16 essentially unimplemented), so a
+    non-CUDA device silently stays fp32 rather than surprising on speed.
+    """
+    raw = str(name or "fp32").strip().lower()
+    precision = PRECISION_ALIASES.get(raw)
+    if precision is None:
+        raise SystemExit(f"--precision must be one of "
+                         f"{sorted(PRECISION_DTYPES) + ['fp32']} (got {name!r})")
+    if precision != "fp32" and not str(device).startswith("cuda"):
+        print(f"note: --precision {precision} needs CUDA; using fp32 on "
+              f"{device}")
+        return "fp32"
+    return precision
 
 
 class KeyReader:
@@ -490,10 +531,12 @@ class Stage2REPL:
                  out_dir: str = "scratch/repl_out",
                  auto_play: bool = False,
                  reader: Optional[KeyReader] = None,
-                 hint_mode: Optional[str] = None):
+                 hint_mode: Optional[str] = None,
+                 precision: str = "fp32"):
         self.config = config
         self.checkpoint = checkpoint
         self.device = device
+        self.precision = resolve_precision(precision, device)
         self.generator_checkpoint = generator_checkpoint
         self.audio = bool(audio) and generator_checkpoint is not None
         self._audio_disabled = not audio
@@ -588,16 +631,47 @@ class Stage2REPL:
         self.last_fill = None
         self.fill_codes = None
 
+    @contextlib.contextmanager
+    def _autocast(self):
+        """Autocast the sampling path according to ``--precision``.
+
+        The transformer's weights are already cast to this dtype at build time
+        (see ``_module_dtype``); autocast additionally keeps numerically
+        sensitive ops (softmax / layer norm / CE) in fp32, which is what makes
+        fp16 weights safe.  The stage-1 vocoder is *not* run under this (see
+        ``_decode_audio``): its pitch path deliberately runs in an
+        ``autocast(enabled=False)`` fp32 block, so it stays fp32 end to end.
+        ``fp32`` is a plain no-op context, so the default is unchanged.
+        """
+        dtype = PRECISION_DTYPES.get(self.precision)
+        if dtype is None:
+            yield
+            return
+        with torch.autocast(device_type=torch.device(self.device).type,
+                            dtype=dtype):
+            yield
+
     # ------------------------------------------------------------------ #
     # Models
     # ------------------------------------------------------------------ #
+    def _module_dtype(self) -> torch.dtype:
+        """dtype the transformer's weights are built in (fp32 by default)."""
+        return PRECISION_DTYPES.get(self.precision, torch.float32)
+
     def load_models(self) -> None:
         """Build the transformer (+ stage-1 Generator) and report the load."""
         print(f"Stage-2 checkpoint: {self.checkpoint}")
         state = read_state_dict(self.checkpoint)
         self._align_special_layout(state)
-        self.net = CodeTransformer(self.config).to(self.device)
+        # Built directly in `--precision`'s dtype: the checkpoint's fp32 tensors
+        # are cast by `load_state_dict`, so the fp32 model never exists on the
+        # GPU (and the memory report measures halved weight storage).
+        self.net = CodeTransformer(self.config).to(
+            device=self.device, dtype=self._module_dtype())
         print(self.net.describe())
+        if self.precision != "fp32":
+            print(f"Precision: {self.precision} weights "
+                  f"({self._module_dtype()}), fp32 autocast for softmax/norm")
         n_loaded, n_ckpt, n_bad, n_missing = load_weights(self.net, state)
         print(f"Loaded {n_loaded}/{n_ckpt} checkpoint tensor(s)"
               + (f"; {n_bad} skipped, {n_missing} missing"
@@ -795,7 +869,8 @@ class Stage2REPL:
         # Re-derive eos/fim/region_cond for *this* checkpoint (the config is
         # reset to its configured values first, see `_align_special_layout`).
         self._align_special_layout(state, source=target)
-        net = CodeTransformer(self.config).to(self.device)
+        net = CodeTransformer(self.config).to(
+            device=self.device, dtype=self._module_dtype())
         print(net.describe())
         n_loaded, n_ckpt, n_bad, n_missing = load_weights(net, state)
         print(f"Loaded {n_loaded}/{n_ckpt} checkpoint tensor(s)"
@@ -1100,10 +1175,11 @@ class Stage2REPL:
         sid = torch.tensor([int(self.sid)], dtype=torch.long,
                            device=self.device)
         t0 = time.perf_counter()
-        codes, lens = self.net.generate(
-            phone, plen, sid, max_frames=frames,
-            temperature=self.temperature, top_k=self.top_k,
-            return_lengths=True, hints=self._hint_arg())
+        with self._autocast():
+            codes, lens = self.net.generate(
+                phone, plen, sid, max_frames=frames,
+                temperature=self.temperature, top_k=self.top_k,
+                return_lengths=True, hints=self._hint_arg())
 
         dt = time.perf_counter() - t0
         codes = codes[0]
@@ -1265,10 +1341,11 @@ class Stage2REPL:
                              device=self.device)
         t0 = time.perf_counter()
         try:
-            middle = self.net.infill(
-                phone, plen, sid_t, prefix, suffix, span,
-                temperature=self.temperature, top_k=self.top_k,
-                hints=self._hint_arg())
+            with self._autocast():
+                middle = self.net.infill(
+                    phone, plen, sid_t, prefix, suffix, span,
+                    temperature=self.temperature, top_k=self.top_k,
+                    hints=self._hint_arg())
 
         except Exception as exc:
             print(f"  infill failed: {exc}")
@@ -1358,11 +1435,12 @@ class Stage2REPL:
               f"{len(self.phone_ids)} phone ids")
         print(f"  phones: {self._phones_text()!r}")
 
-        codes, lens = self.net.generate(
-            batch["phone_ids"], batch["phone_lengths"], batch["sid"],
-            max_frames=frames, temperature=self.temperature,
-            top_k=self.top_k, return_lengths=True,
-            hints=self._hints_for(int(batch["phone_ids"].shape[1])))
+        with self._autocast():
+            codes, lens = self.net.generate(
+                batch["phone_ids"], batch["phone_lengths"], batch["sid"],
+                max_frames=frames, temperature=self.temperature,
+                top_k=self.top_k, return_lengths=True,
+                hints=self._hints_for(int(batch["phone_ids"].shape[1])))
 
         pred = codes[0]
         n = int(pred.shape[-1])
@@ -1502,7 +1580,8 @@ class Stage2REPL:
         else:
             audio = f"on -> {self.generator_checkpoint}"
         print(f"checkpoint : {self.checkpoint}")
-        print(f"device     : {self.device}   input: {self.reader.describe()}")
+        print(f"device     : {self.device}   precision: {self.precision}   "
+              f"input: {self.reader.describe()}")
         print(f"layout     : {layout}")
         print(f"text       : {self.text or '<none>'}"
               + (f"  ({len(self.phone_ids)} phone ids)" if self.phone_ids
@@ -1533,6 +1612,70 @@ class Stage2REPL:
     def print_help(self) -> None:
         print(HELP_TEXT)
 
+    def report_memory(self) -> None:
+        """``z``: GPU/CPU footprint of the loaded models and the last result."""
+        def mb(nbytes: int) -> str:
+            return f"{nbytes / 1024 ** 2:.1f} MB"
+
+        def gib(nbytes: int) -> str:
+            return f"{nbytes / 1024 ** 3:.2f} GiB"
+
+        cuda = str(self.device).startswith("cuda")
+        print(f"memory @ {self.device} (sampling precision {self.precision})")
+        if cuda and torch.cuda.is_available():
+            dev = torch.device(self.device)
+            alloc = torch.cuda.memory_allocated(dev)
+            reserved = torch.cuda.memory_reserved(dev)
+            peak_alloc = torch.cuda.max_memory_allocated(dev)
+            peak_res = torch.cuda.max_memory_reserved(dev)
+            free, total = torch.cuda.mem_get_info(dev)
+            print(f"  gpu      : {gib(alloc)} allocated / {gib(reserved)} "
+                  f"reserved of {gib(total)} total, {gib(free)} free")
+            print(f"  peak     : {gib(peak_alloc)} allocated / "
+                  f"{gib(peak_res)} reserved (since process start)")
+            print(f"  cache    : {gib(reserved - alloc)} in the allocator's "
+                  f"free blocks (reused before asking the driver)")
+        elif cuda:
+            print("  gpu      : n/a (CUDA requested but unavailable)")
+        else:
+            print("  gpu      : n/a (CPU device)")
+
+        def model_line(name, module):
+            if module is None:
+                return
+            n = sum(p.numel() for p in module.parameters())
+            b = sum(p.numel() * p.element_size() for p in module.parameters())
+            print(f"  {name:<9}: {mb(b)} ({n / 1e6:.1f} M parameters, "
+                  f"{next(module.parameters()).dtype})")
+
+        model_line("transform", self.net)
+        # `_net_g` is created lazily, so this line only appears once decoded.
+        model_line("generator", self._net_g)
+        if self.net is not None:
+            top = sorted(
+                ((n, t.numel() * t.element_size())
+                 for n, t in self.net.named_parameters()),
+                key=lambda kv: kv[1], reverse=True)[:3]
+            print("  largest  : " + ", ".join(f"{n} {mb(b)}" for n, b in top))
+        print("  note     : --precision casts the transformer's weights; the "
+              "stage-1 vocoder stays fp32")
+
+        codes = self.current_codes
+        if codes is not None:
+            print(f"  codes    : {tuple(codes.shape)} {codes.dtype} "
+                  f"{mb(codes.numel() * codes.element_size())} "
+                  f"on {codes.device}")
+        if self.last_audio is not None:
+            sr = int(self.config.data.sampling_rate)
+            print(f"  audio    : {self.last_audio.numel() / sr:.2f} s, "
+                  f"{mb(self.last_audio.numel() * self.last_audio.element_size())}"
+                  f" on {self.last_audio.device}")
+        if resource is not None:
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # Linux reports KiB, macOS bytes.
+            peak = peak * (1 if sys.platform == "darwin" else 1024)
+            print(f"  cpu      : peak RSS {gib(peak)} (whole process)")
+
 
 HELP_TEXT = """
 Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
@@ -1545,8 +1688,8 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
   h  temperature (prompt)         k  top-k (prompt, `none` disables)
   a  decode the last codes again  w  write the last audio to a wav (prompt)
   x  dump the last codes tensor   q  quit (^C / ^D also work)
+  z  GPU/CPU memory report        b  play the last audio (space too)
   s  switch stage-2 checkpoint (prompt: run name or path; `?` lists them)
-  b  play the last audio (pydub; space does the same)
   n  fill a random span of the last sample (prompt: frames or start:frames)
 
   Hint controls (hint-enabled checkpoints; p shows the current state):
@@ -1569,6 +1712,11 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
   model in place, re-deriving eos_token/fim/region_cond from the new
   checkpoint, and clears the last codes/audio (they came from the old one).
   `--play` plays every clip as soon as it is decoded (`b` replays it).
+  `--precision bf16|fp16` builds the transformer in that dtype (weights *and*
+  activations; fp32 is the default, matching stage 2's 32-true convention,
+  while the stage-1 vocoder always decodes fp32 -- its pitch path hard-codes
+  fp32).  `z` prints the GPU allocator/peak numbers and the model footprint,
+  so the two precisions can be compared directly.
   `n` needs a FIM checkpoint (checkpoints_stage2/transformer_fim.ckpt) and a
   sample to work on: it drops a span of the last codes and re-generates it
   from the kept prefix + suffix, printing a `#`/`.` map of where the span sat.
@@ -1640,7 +1788,7 @@ def banner(repl: "Stage2REPL") -> None:
           f"{repl.reader.describe()} input")
     print(f"  text={repl.text or '<none>'}  sid={repl.sid}  "
           f"frames={repl.frames}  temp={repl.temperature:g}  "
-          f"top_k={repl.top_k}  "
+          f"top_k={repl.top_k}  precision={repl.precision}  "
           f"audio={'on' if repl.audio and not repl._net_g_failed else 'off'}")
     if repl.net is not None and getattr(repl.net, "hints", False):
         print(f"  hints={repl.hint_state()}")
@@ -1753,6 +1901,8 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
                 repl._decode_audio(repl.current_codes, repl.last_sid)
         elif key == "b":
             repl.play()
+        elif key == "z":
+            repl.report_memory()
         elif key == "n":
             raw = rest or repl.reader.read_line(
                 "Fill span (frames, or start:frames; blank = random): ")
@@ -1822,6 +1972,13 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "`b` replays it, space works too)")
     parser.add_argument("--device", default=None,
                         help="cuda/cpu (default: cuda when available)")
+    parser.add_argument("--precision", default="fp32",
+                        choices=("fp32", "bf16", "fp16"),
+                        help="dtype for the transformer's weights and sampling "
+                             "path (default: %(default)s, matching stage 2's "
+                             "32-true convention). fp16/bf16 need CUDA; the "
+                             "stage-1 vocoder always decodes fp32. `z` in the "
+                             "REPL reports the resulting memory use.")
     parser.add_argument("--line_mode", action="store_true",
                         help="read whole lines instead of single keystrokes "
                              "(automatic when stdin is not a TTY)")
@@ -1905,7 +2062,8 @@ def main(argv=None) -> int:
         out_dir=args.out_dir,
         auto_play=args.play,
         reader=KeyReader(force_line_mode=args.line_mode),
-        hint_mode=args.hints)
+        hint_mode=args.hints,
+        precision=args.precision)
 
 
     # Initial state, before the (slow) model build, so --list_speakers stays
@@ -1944,7 +2102,8 @@ def main(argv=None) -> int:
                 raise SystemExit(f"ERROR: --topk expects an integer or "
                                  f"'none', got {args.topk!r}")
 
-    print(f"device: {device}   input: {repl.reader.describe()}")
+    print(f"device: {device}   precision: {repl.precision}   "
+          f"input: {repl.reader.describe()}")
     if args.list_speakers:
         repl.list_speakers()   # cheap: only the val filelist, no model
         return 0
