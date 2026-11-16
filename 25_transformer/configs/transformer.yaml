@@ -195,6 +195,11 @@ transformer:
   # Changes the parameter set (drops 3 tables, adds 6 vectors), so it needs a
   # fresh `exp_name` + `--transfer_from`.  `2_training.py:check_special_layout`
   # refuses both mismatched directions in the dangerous order.
+  # Validated: `true` is what made intensity a monotone dial (+0.086/level over
+  # 0.94 span, `||Delta h||` 0.61 -> 2.41) in HINTS_V1_PLAN.md §5.8.  It stays
+  # `false` here so every pre-v1.1 checkpoint remains resumable; copy
+  # `scratch/hints_v1_runs/20261115-v11/configs/hints_v1_p4_final_mono1.yaml`
+  # for a new hints run.
   hint_monotone: false
   # ---- classifier-free guidance over the hints (v1.0, Phase 3) -------------
   # Generation only: `logits = uncond + w * (cond - uncond)`, where `uncond` is

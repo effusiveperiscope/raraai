@@ -1380,6 +1380,10 @@ Wiring:
 
 ### Monotone hint encoding + counterfactual margin (stage 2, v1.1)
 
+Measured result and the recommended checkpoint/recipe: `scratch/HINTS_V1_PLAN.md`
+§5.8; that plan is **closed for v1.x** (§5.9) — reopen it only for the two
+triggers it lists.
+
 Two switches that target the *clip-level* channels (intensity, register) after
 `scratch/HINTS_V1_PLAN.md` §5.6 measured why they do not work as knobs:
 `||int_emb[8] - int_emb[0]|| = 0.61` in a 768-d space whose post-norm memory norm

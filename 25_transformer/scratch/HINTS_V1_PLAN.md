@@ -1,6 +1,7 @@
 # Conditioning hints v1.0 — plan, evidence and phases
 
-Status: **v1.1 run done — the clip-level knob works** (2026-11-15).  Phase 0 fixed two
+Status: **closed for v1.x — the clip-level knob works** (2026-11-15, §5.9).
+Phase 0 fixed two
 generation-path bugs (§1, §1.2); Phase 1 has 200-utterance WER for the null and
 hint arms plus the channel/code-space probes; Phase 2's four wiring arms are run
 but not decisive (both new sites are neutral-to-harmful); Phase 3's guidance
@@ -941,6 +942,73 @@ the encoding makes it usable.  Worth knowing: the hinge bounds nothing above.
    "lower / same / higher" around the clip's own level, the level-0 vector and
    the corpus's level distribution need to agree.
 4. Still untested: `semantic`'s value on OOD text (unchanged from §5.5).
+
+### 5.9 Cap — scope closed for v1.x (2026-11-15)
+
+Deliberate stop.  The enable/capability question this plan was written to answer
+is settled, the run that settles it is in the books, and everything left is
+either a *measurement* refinement or a different project.  No v1.2 unless one of
+the triggers below fires.
+
+**What the plan set out to do, and where it landed**
+
+| question (§0) | answer |
+|---|---|
+| Is v0.9 worse than the v0.7 base? | No.  Both Phase-0 generation bugs fixed (§1, §1.2); WER 20.22 % -> 18.82 % null / 19.02 % -> 18.58 % with hints (v0.7 base is 21.45 %). |
+| Are the channels inert? | Four of five are live as controls: `slot` (pace, +0.088 s/level), `register` (+0.897 st/level), `intensity` (monotone, +0.086/level) and `pitch` (word-level f0).  Only the *clip-level CE deltas* read ~0, which is expected — CE was never the metric. |
+| Can the clip-level channels work at their old site? | Not there (§3, §5.6): the temporal norm cancels a per-clip constant.  The two post-norm sites fix the algebra and still do not improve the knob, so they ship **off**. |
+| What actually blocked intensity? | The *representation*, not the site or the step count: a free per-level row trained for 433 k steps stayed 0.61 in a 768-d memory of norm ~27.7 (§5.6).  Monotone encoding took it to 2.41 (§5.8). |
+
+**Shipped state**
+
+* Code: `transformer.hint_monotone` and `train.counterfactual_*` in
+  `modeling/transformer.py` / `2_training.py` / `configs/transformer.yaml`, with
+  both-direction guards in `check_special_layout` and
+  `eval_stage2_wer.load_transformer_weights` (a dropped direction reads as
+  "intensity does nothing").  `test_hints.py` covers the encoding;
+  `test_fim.py` is green.
+* Model: `checkpoints_stage2/hints_v1_p4_final_mono1/{last,best-checkpoint}.ckpt`
+  — this is the stage-2 model to use for hint-capable inference.
+* Recipe: `scratch/hints_v1_runs/20261115-v11/configs/hints_v1_p4_final_mono1.yaml`
+  (hints + monotone, film/proj off, margin 0.05 @ weight 0.2 @ rate 0.25).  The
+  shipped `configs/transformer.yaml` keeps `hint_monotone: false` on purpose: the
+  flag changes the parameter set, so leaving it false keeps every older
+  checkpoint resumable.  Copy the run config for a new hints run.
+* Diagnostics that answered the question: `scratch/hint_injection_probe.py`
+  (where the signal dies), `scratch/hint_knob_report.py` (does the dial move),
+  `scratch/hint_channel_probe.py` (per-channel CE liveness).  All read-only.
+
+**Explicitly not doing (and why), so they are not re-litigated**
+
+* **Hint augmentation** — wrong objective.  Targets fixed, so a perturbed hint is
+  best ignored; it trains invariance.  The margin (§5.7) is the correct form and
+  is already in.
+* **Classifier-free guidance over hints** — measured negative (§5.5 item 3):
+  `w=1` best at 11.40 %, every guided weight worse (12.7-14.0 %), and it shifts
+  errors into substitutions and kills repetition.
+* **FiLM / decoder-projection as the fix** — they carry the signal (+30 % memory,
+  +25 % logit motion, 95 % class-dependent) but the level was 2 % of the memory
+  norm.  Neutral on val_loss once each arm was evaluated with its own config
+  (§5.5's gate correction).  Requires a fresh run each time; not worth it.
+* **A duration predictor** — out of scope: hints are user controls, not a
+  reconstruction aid.  `slot` already gives the pacing knob a user would want.
+* **Re-preprocessing** — nothing here touches the codes; the codes stay valid.
+
+**If it is ever reopened, these are the two triggers and the first step**
+
+1. *"Is the 0.94-level span actually perceptible?"* — the open question in §5.8
+   is measurement, not model: paired A/B at L2 vs L7, or an independent proxy
+   (f0 range, energy variance, spectral flux), scored against the DSP model's
+   0.59 MAE.  Only this turns the knob into a quotable magnitude.
+2. *"Should the UI offer lower/same/higher around the clip's own level?"* — a
+   calibration change: the level-0 ("absent") vector currently sits at 4.374,
+   between L7 and L8, so the dial is asymmetric about absent.  Fixing it needs
+   the level-0 vector to agree with the corpus level distribution, i.e. a
+   monotone run with an explicit "current level" target — not a config edit.
+
+Also unmeasured, and cheap whenever a reason appears: `semantic` on OOD text
+(§5.5), and the knob re-run on `best-checkpoint.ckpt` (val 2.2707 vs 2.2743, i.e.
+irrelevant unless something else is being decided at the same time).
 
 ## 6. Commands
 
