@@ -701,6 +701,73 @@ def test_injection_and_guidance(batch, hints_json):
         check("wrong-length guidance books raise", True)
 
 
+def test_monotone(batch, hints_json):
+    """v1.1 monotone encoding: one ordered direction, not a row per level."""
+    import torch.nn.functional as F
+    from omegaconf import OmegaConf
+
+    from modeling.transformer import CodeTransformer
+
+    tcfg = {
+        "hidden_size": 32, "n_heads": 2, "encoder_layers": 1,
+        "decoder_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
+        "max_positions": 512, "phone_vocab_size": 1024, "n_speakers": 4096,
+        "eos_token": True, "fim": True, "region_cond": True,
+        "length_cond": True, "hints": True, "hints_json": hints_json,
+        "semantic_dim": 384, "decoder_hints": True, "hint_monotone": True,
+    }
+    cfg = OmegaConf.create({
+        "codec": {"codebook_num": 2, "codebook_size": 32},
+        "pitch_codec": {"codebook_num": 1, "codebook_size": 32},
+        "transformer": tcfg,
+    })
+    torch.manual_seed(0)
+    net = CodeTransformer(cfg).eval()
+    check("monotone replaces the level tables",
+          net.int_emb is None and net.reg_emb is None
+          and net.dec_int_emb is None
+          and net.int_dir is not None and net.reg_dir is not None,
+          f"int_dir={net.int_dir is not None} int_emb={net.int_emb is not None}")
+    check("describe reports the monotone encoding",
+          "monotone(int,reg)" in net.describe())
+
+    H, n = 32, 5
+    dirv = torch.arange(1.0, H + 1.0)
+    nullv = torch.full((H,), 100.0)
+    vec = CodeTransformer.monotone_level_vec(
+        torch.arange(0, n + 1), dirv, nullv, n)
+    proj = (vec * F.normalize(dirv, dim=0)).sum(-1)
+    check("level 0 is the trained 'absent' vector",
+          torch.allclose(vec[0], nullv))
+    check("level 1 is -direction and level n is +direction",
+          torch.allclose(vec[1], -dirv) and torch.allclose(vec[n], dirv))
+    check("the encoding is monotone in the level (excluding 'absent')",
+          bool(torch.all(proj[1:][1:] > proj[1:][:-1])),
+          " ".join(f"{v:.2f}" for v in proj[1:].tolist()))
+
+    # Assert on the *clip vector*, not on the encoder memory: `_temporal_norm`
+    # standardises every dimension over time, so a per-clip constant cancels at
+    # the memory boundary (measured rel. diff ~0 -- that is HINTS_V1_PLAN §3, and
+    # the reason the post-norm injection sites exist).  The clip vector is where
+    # the level lives, and with a unit direction the difference between level 1
+    # and level n is exactly 2 (z goes -1 -> +1).
+    n_lv = int(net.n_intensity_levels)
+    if n_lv >= 2:
+        with torch.no_grad():
+            net.int_dir.fill_(1.0)
+            net.int_null.zero_()
+
+            def clip_vec(level):
+                h = dict(batch)
+                h["hint_int"] = torch.full_like(batch["hint_int"], level)
+                return net._enc_hints(h, torch.device("cpu"))[0]
+
+            diff = clip_vec(n_lv) - clip_vec(1)
+        check("level n - level 1 == 2 * direction on the clip vector",
+              torch.allclose(diff, torch.full_like(diff, 2.0), atol=1e-5),
+              f"mean {float(diff.mean()):.4f}, want 2.0")
+
+
 def main() -> int:
     from omegaconf import OmegaConf
 
@@ -722,6 +789,7 @@ def main() -> int:
         test_word_hints_in_dataset(ds, filelist, hints_json)
         test_model(batch, hints_json)
         test_injection_and_guidance(batch, hints_json)
+        test_monotone(batch, hints_json)
 
     print()
     if _failures:

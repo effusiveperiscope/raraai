@@ -211,10 +211,61 @@ def build_transformer(config, device):
     return net
 
 
+def sd_own(sd, prefix):
+    """Checkpoint keys without their module prefix (small helper)."""
+    return {k[len(prefix):] for k in sd if k.startswith(prefix)}
+
+
 def load_transformer_weights(net, path):
+    """Load the checkpoint, refusing to silently drop an injection module.
+
+    ``load_submodule_prefix`` is quiet, so a checkpoint trained with
+    ``transformer.hint_film_memory`` / ``hint_decoder_proj`` loaded into a model
+    built without them loses exactly those tensors with no message.  That is not
+    a hypothetical: the Phase 2 gates used the base config for every arm and so
+    measured the *baseline* wiring on each arm's weights (HINTS_V1_PLAN §5.6).
+    Every caller that can see such a checkpoint must pass that arm's config.
+    """
     ck = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     sd = ck.get("state_dict", ck)
     prefix = "net." if any(k.startswith("net.") for k in sd) else ""
+    own = set(net.state_dict())
+    dropped = sorted(k for k in sd
+                     if k.startswith(prefix) and k[len(prefix):] not in own)
+    layout = [k for k in dropped
+              if any(t in k for t in ("film_gamma", "film_beta", "hint_out"))]
+    if layout:
+        raise SystemExit(
+            f"{path} carries a post-norm hint module this config does not build "
+            f"({', '.join(layout[:3])}...). Pass that arm's own config "
+            f"(--config scratch/hints_v1_runs/<run>/configs/<exp>.yaml); loading "
+            f"it here would silently measure the baseline architecture.")
+    # Same trap for the v1.1 monotone encoding: a checkpoint trained with
+    # `transformer.hint_monotone` has int_dir/reg_dir/dec_int_dir instead of
+    # per-level tables.  Dropping them leaves the clip-level channels *inert*
+    # (the level tables would be freshly zero-initialised), so the evaluation
+    # would quietly report "intensity does nothing" for a model that was trained
+    # to use it.  Refuse in both directions.
+    mono_keys = [k for k in sd if k.startswith(prefix)
+                 and k[len(prefix):] in ("int_dir", "reg_dir", "dec_int_dir")]
+    if mono_keys and not getattr(net, "hint_monotone", False):
+        raise SystemExit(
+            f"{path} was trained with transformer.hint_monotone (it has "
+            f"{', '.join(k[len(prefix):] for k in mono_keys[:3])}) but this "
+            f"config builds per-level tables: the trained directions would be "
+            f"dropped and the level tables are zero, so the clip-level channels "
+            f"would read as inert. Pass that run's config with --config.")
+    if getattr(net, "hint_monotone", False) and "int_emb.weight" in sd_own(sd,
+                                                                          prefix):
+        raise SystemExit(
+            f"{path} stores per-level hint tables, but this config sets "
+            f"transformer.hint_monotone=true: the tables would be dropped and "
+            f"int_dir/reg_dir are fresh, so the clip-level channels would be "
+            f"zero. Point --config at a config with hint_monotone: false, or "
+            f"evaluate the monotone checkpoint instead.")
+    if dropped:
+        print(f"NOTE: {len(dropped)} checkpoint tensor(s) not used by this "
+              f"model (e.g. {dropped[:3]})")
     load_submodule_prefix(net, prefix, sd, quiet=True)
     return ck.get("epoch"), ck.get("global_step")
 

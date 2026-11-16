@@ -322,38 +322,46 @@ def phase2(args, cfg, out_dir: str) -> List[Task]:
                  f"{os.path.basename(transfer)} -> {exp}",
             kind="train", produces=(last,), config_path=path,
             config_overrides=overrides))
-        arms.append((slug, exp, last))
+        arms.append((slug, exp, last, path))
 
-    # Gates: offline equivalents of `val_hint_channel_delta/*` (the 2 k-step
-    # arm cannot rely on the in-training probe alone, and these are the same
-    # numbers on the finished weights), plus the audio knob sweep.
-    lasts = [last for _, _, last in arms]
-    tasks.append(repetition_task(
-        "p2/gate_repetition", lasts, config=args.config,
-        num_items=max(args.sample_items, 4), hints=True))
-    tasks[-1].requires = lasts
-    for slug, exp, last in arms:
+    # Gates: offline equivalents of `val_hint_channel_delta/*`, plus the audio
+    # knob sweep.  **Each gate uses its arm's own config**: the four arms differ
+    # in *architecture* (`hint_film_memory` / `hint_decoder_proj`), and loading a
+    # film checkpoint into a baseline model silently drops those tensors -- the
+    # 2026-11-15 gates did exactly that, with the base config, and so measured
+    # the baseline wiring for all four arms.  One gate per arm also means the
+    # val_loss comparison has to be read across logs, not from one invocation.
+    for slug, exp, last, path in arms:
+        tasks.append(repetition_task(
+            f"p2/gate_repetition_{slug}", [last], config=path,
+            num_items=max(args.sample_items, 4), hints=True))
         tasks.append(eval_script_task(
             f"p2/gate_channel_probe_{slug}",
-            ["scratch/hint_channel_probe.py", "--config", args.config,
+            ["scratch/hint_channel_probe.py", "--config", path,
              "--checkpoint", last, "--batches", "2",
              "--sweep", "intensity,register"],
-            note=f"channel liveness / level sweep ({exp})", requires=[last]))
+            note=f"channel liveness / level sweep ({exp}, own config)",
+            requires=[last]))
         knob = knob_task(
-            f"p2/gate_knob_{slug}", last, config=args.config,
+            f"p2/gate_knob_{slug}", last, config=path,
             generator=cfg.train.get("generator_checkpoint", None),
             channels="intensity,register", levels="all",
             num_items=args.knob_items, wer=False)
         knob.requires = [last]
         tasks.append(knob)
-    tasks.append(eval_script_task(
-        "p2/gate_val_loss",
-        ["scratch/eval_stage2_checkpoints.py", "--config", args.config,
-         "--batches", str(args.batches),
-         "--sample_items", str(args.sample_items),
-         "--checkpoints", *lasts],
-        note="teacher-forced val_loss of the four arms (sanity: the recipe "
-             "must not move it far)", requires=lasts))
+        tasks.append(eval_script_task(
+            f"p2/gate_val_loss_{slug}",
+            ["scratch/eval_stage2_checkpoints.py", "--config", path,
+             "--batches", str(args.batches),
+             "--sample_items", str(args.sample_items),
+             "--checkpoints", last],
+            note=f"teacher-forced val_loss ({exp}, own config)", requires=[last]))
+        tasks.append(eval_script_task(
+            f"p2/gate_injection_{slug}",
+            ["scratch/hint_injection_probe.py", "--config", path,
+             "--checkpoint", last, "--channel", "intensity"],
+            note=f"where the level signal dies: memory / logits / CE ({exp})",
+            requires=[last]))
     return tasks
 
 
@@ -441,6 +449,16 @@ def phase4(args, cfg, out_dir: str) -> List[Task]:
             "train.sample_interval": 1,
             "train.keep_ckpts": 2,
             "train.sample_hints": "cond",
+            # --- v1.1 recipe (HINTS_V1_PLAN.md §5.6) ---------------------
+            # Ordered-dial encoding for the two clip-level channels, plus the
+            # counterfactual margin that makes CE depend on the level at all.
+            # FiLM/proj stay off: they carry the signal (+30 % memory motion)
+            # but the level itself was ~2 % of the memory norm.
+            "transformer.hint_monotone": bool(hints),
+            "train.counterfactual_margin": 0.05 if hints else 0.0,
+            "train.counterfactual_weight": 0.2,
+            "train.counterfactual_rate": 0.25 if hints else 0.0,
+            "train.counterfactual_channels": "intensity,register",
         }
         path = write_arm_config(out_dir, args.config, exp, overrides)
         last = f"checkpoints_stage2/{exp}/last.ckpt"
@@ -454,40 +472,74 @@ def phase4(args, cfg, out_dir: str) -> List[Task]:
                  f"{os.path.basename(transfer)} -> {exp}"),
             kind="train", produces=(last,), config_path=path,
             config_overrides=overrides))
-        lasts.append((slug, hints, exp, last))
+        lasts.append((slug, hints, exp, last, path))
 
     gen = cfg.train.get("generator_checkpoint", None)
-    final = lasts[0][3]
-    control = lasts[1][3]
+    final, final_cfg = lasts[0][3], lasts[0][4]
+    control, control_cfg = lasts[1][3], lasts[1][4]
     # Acceptance (HINTS_V1_PLAN.md §5 Phase 4): hint-free WER >= v0.7's, the
     # live-channel probes non-zero, the register knob moves f0, the intensity
     # levels move the DSP readout, and the control reproduces v0.7's coherency.
-    tasks.append(wer_task(
-        "p4/gate_wer_nohint", [final, control], hints=False, ignore_eos=False,
-        num_items=args.num_items, config=args.config, generator=gen))
-    tasks.append(wer_task(
-        "p4/gate_wer_hints", [final], hints=True, ignore_eos=False,
-        num_items=args.num_items, config=args.config, generator=gen))
+    # Every gate uses its own arm's config: the two arms have different
+    # architectures (`hints` on/off, and the injection switches) and a mismatch
+    # silently drops tensors (see phase2's note).
+    tasks.append(eval_script_task(
+        "p4/gate_wer_nohint",
+        ["scratch/eval_stage2_wer.py", "--config", final_cfg,
+         "--num_items", str(args.num_items),
+         *(("--generator_checkpoint", gen) if gen else ()),
+         "--checkpoints", final],
+        note="hint-free WER of the hints arm", requires=[final]))
+    tasks.append(eval_script_task(
+        "p4/gate_wer_nohint_control",
+        ["scratch/eval_stage2_wer.py", "--config", control_cfg,
+         "--num_items", str(args.num_items),
+         *(("--generator_checkpoint", gen) if gen else ()),
+         "--checkpoints", control],
+        note="hint-free WER of the control arm", requires=[control]))
+    tasks.append(eval_script_task(
+        "p4/gate_wer_hints",
+        ["scratch/eval_stage2_wer.py", "--config", final_cfg,
+         "--num_items", str(args.num_items), "--hints",
+         *(("--generator_checkpoint", gen) if gen else ()),
+         "--checkpoints", final],
+        note="conditional WER of the hints arm", requires=[final]))
     tasks.append(repetition_task(
-        "p4/gate_repetition", [final, control], config=args.config,
+        "p4/gate_repetition", [final], config=final_cfg,
         num_items=max(args.sample_items, 4), hints=True))
     tasks.append(eval_script_task(
         "p4/gate_channel_probe",
-        ["scratch/hint_channel_probe.py", "--config", args.config,
+        ["scratch/hint_channel_probe.py", "--config", final_cfg,
          "--checkpoint", final, "--batches", "2",
          "--sweep", "intensity,register"],
-        note="the three live-channel probes must be non-zero", requires=[final]))
-    tasks.append(knob_task(
-        "p4/gate_knob", final, config=args.config, generator=gen,
-        channels="intensity,register", levels="all",
-        num_items=args.knob_items, wer=True))
+        note="the live-channel probes, on the arm's own config",
+        requires=[final]))
+    tasks.append(eval_script_task(
+        "p4/gate_injection",
+        ["scratch/hint_injection_probe.py", "--config", final_cfg,
+         "--checkpoint", final, "--channel", "intensity"],
+        note="does the level reach the memory / logits (and how big is it)",
+        requires=[final]))
+    knob = knob_task(
+        "p4/gate_knob", final, config=final_cfg, generator=gen,
+        channels="intensity,register,slot", levels="all",
+        num_items=args.knob_items, wer=True)
+    knob.requires = [final]
+    tasks.append(knob)
     tasks.append(eval_script_task(
         "p4/gate_val_loss",
-        ["scratch/eval_stage2_checkpoints.py", "--config", args.config,
+        ["scratch/eval_stage2_checkpoints.py", "--config", final_cfg,
          "--batches", str(args.batches),
          "--sample_items", str(args.sample_items),
-         "--checkpoints", final, control],
-        note="teacher-forced val_loss, hints vs control", requires=[final, control]))
+         "--checkpoints", final],
+        note="teacher-forced val_loss of the hints arm", requires=[final]))
+    tasks.append(eval_script_task(
+        "p4/gate_val_loss_control",
+        ["scratch/eval_stage2_checkpoints.py", "--config", control_cfg,
+         "--batches", str(args.batches),
+         "--sample_items", str(args.sample_items),
+         "--checkpoints", control],
+        note="teacher-forced val_loss of the control arm", requires=[control]))
     return tasks
 
 
@@ -634,9 +686,13 @@ def main(argv=None) -> int:
     ap.add_argument("--phase4_steps", type=int, default=80000)
     ap.add_argument("--lr", type=float, default=None,
                     help="override train.lr in the training arms")
-    ap.add_argument("--injection", default="both",
-                    choices=("film", "proj", "both"),
-                    help="winning Phase-2 injection for the Phase-4 run")
+    ap.add_argument("--injection", default="none",
+                    choices=("none", "film", "proj", "both"),
+                    help="post-norm injection for the Phase-4 run.  Default "
+                         "'none': Phase 2 measured the sites as carrying the "
+                         "signal but not improving the knob (HINTS_V1_PLAN §5.6), "
+                         "so the v1.1 recipe is the monotone encoding + the "
+                         "counterfactual margin, without them.")
     ap.add_argument("--transfer", default=None,
                     help="checkpoint the training arms warm-start from "
                          "(default: v0.9 last for Phase 2, v0.7 best for Phase 4)")

@@ -762,9 +762,23 @@ class CodeTransformer(nn.Module):
 
 
         # ---- conditioning-hint tables (v0.8) ------------------------------- #
-        # Every channel is a small ``(n_levels + 1, hidden)`` embedding indexed
-        # by a level id, row 0 being the trained "not provided" state (the
-        # dataset applies per-channel dropout, so that row is always exercised).
+        # ``hint_monotone`` (v1.1) replaces the two *clip-level* level tables
+        # with an ordered dial: ``direction * z(level)`` where ``z`` is the level
+        # mapped linearly onto [-1, 1], plus a trained "absent" vector for level
+        # 0.  The free per-level rows it replaces were measured to stay small and
+        # mutually arbitrary (``||int_emb[8] - int_emb[0]|| = 0.61`` in a 768-d
+        # space whose memory norm is ~27.7, *unchanged* after 433 k steps), so
+        # the "level" was a tiny random perturbation rather than a dial.  An
+        # ordered direction is monotone by construction and shares one gradient
+        # across the whole range instead of splitting it n ways.  The per-phone
+        # channels (pitch/slot) keep their tables -- they are categorical
+        # (bins/unvoiced) and they already work.  See HINTS_V1_PLAN.md §5.6.
+        self.hint_monotone = bool(_get_cfg(tcfg, "hint_monotone", False))
+
+        # Every remaining channel is a small ``(n_levels + 1, hidden)``
+        # embedding indexed by a level id, row 0 being the trained "not
+        # provided" state (the dataset applies per-channel dropout, so that row
+        # is always exercised).
         # They live here rather than on the encoder/decoder so the checkpoint
         # has one obvious place for every hint parameter, and so the semantic
         # projection can feed both halves without being registered twice.
@@ -824,15 +838,33 @@ class CodeTransformer(nn.Module):
                     f"ids would mean different things.  Set "
                     f"transformer.relative_register: true, or point "
                     f"hints_json at an absolute corpus.")
-            self.int_emb = nn.Embedding(self.n_intensity_levels + 1, hidden_size)
-            self.reg_emb = nn.Embedding(self.n_register_levels + 1, hidden_size)
             self.pitch_emb = nn.Embedding(self.n_pitch_levels + 2, hidden_size)
             self.slot_emb = nn.Embedding(self.n_slot_buckets + 1, hidden_size)
             self.sem_proj = nn.Linear(self.semantic_dim, hidden_size)
             self.sem_null = nn.Parameter(torch.zeros(hidden_size))
-            self.dec_int_emb = (nn.Embedding(self.n_intensity_levels + 1,
-                                             hidden_size)
-                                if self.decoder_hints else None)
+            if self.hint_monotone:
+                self.int_emb = None
+                self.reg_emb = None
+                self.dec_int_emb = None
+                self.int_dir = nn.Parameter(torch.zeros(hidden_size))
+                self.int_null = nn.Parameter(torch.zeros(hidden_size))
+                self.reg_dir = nn.Parameter(torch.zeros(hidden_size))
+                self.reg_null = nn.Parameter(torch.zeros(hidden_size))
+                self.dec_int_dir = (nn.Parameter(torch.zeros(hidden_size))
+                                    if self.decoder_hints else None)
+                self.dec_int_null = (nn.Parameter(torch.zeros(hidden_size))
+                                     if self.decoder_hints else None)
+            else:
+                self.int_dir = self.int_null = None
+                self.reg_dir = self.reg_null = None
+                self.dec_int_dir = self.dec_int_null = None
+                self.int_emb = nn.Embedding(self.n_intensity_levels + 1,
+                                            hidden_size)
+                self.reg_emb = nn.Embedding(self.n_register_levels + 1,
+                                            hidden_size)
+                self.dec_int_emb = (nn.Embedding(self.n_intensity_levels + 1,
+                                                 hidden_size)
+                                    if self.decoder_hints else None)
             # Zero-initialise every hint table.  ``encode`` adds
             # ``int_emb(int) + reg_emb(reg) + sem_proj(sem)`` to *every*
             # phoneme, so a randomly-initialised table is a large random
@@ -856,6 +888,9 @@ class CodeTransformer(nn.Module):
             self.sem_proj = None
             self.sem_null = None
             self.dec_int_emb = None
+            self.int_dir = self.int_null = None
+            self.reg_dir = self.reg_null = None
+            self.dec_int_dir = self.dec_int_null = None
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -1242,7 +1277,10 @@ class CodeTransformer(nn.Module):
         """
         if not self.hints:
             return None
-        dev = self.int_emb.weight.device if device is None else device
+        if device is None:
+            device = (self.pitch_emb.weight.device if self.pitch_emb is not None
+                      else self.sem_proj.weight.device)
+        dev = device
 
         def zeros(*shape, dt=dtype):
             return torch.zeros(*shape, dtype=dt, device=dev)
@@ -1316,6 +1354,29 @@ class CodeTransformer(nn.Module):
             x = torch.where(keep, x, self.sem_null.to(x.dtype).expand_as(x))
         return x
 
+    @staticmethod
+    def monotone_level_vec(levels, direction, null, n_levels):
+        """``(B, H)`` ordered-dial encoding of a clip-level hint.
+
+        ``level`` 1..``n_levels`` maps linearly onto ``z`` in [-1, 1] and is
+        scaled by one learned ``direction``; level 0 (absent) is the learned
+        ``null`` vector and contributes no direction term.  This is the
+        difference from the free ``(n_levels + 1, H)`` table it replaces: a
+        *single* direction is trained by every level, so the channel is monotone
+        by construction and the gradient is not split across mutually arbitrary
+        rows (see HINTS_V1_PLAN.md §5.6 for the measurement that motivated it).
+        """
+        lv = levels.long()
+        present = lv > 0
+        denom = max(int(n_levels) - 1, 1)
+        z = (lv.float() - 1.0) / denom * 2.0 - 1.0        # 1..n -> [-1, 1]
+        z = torch.where(present, z, torch.zeros_like(z))
+        dt = direction.dtype
+        out = z.unsqueeze(-1).to(dt) * direction
+        if null is not None:
+            out = out + (~present).unsqueeze(-1).to(dt) * null
+        return out
+
     def _enc_hints(self, hints, device):
         """``(clip_vec (B,H) | None, per_phone (B,N,H) | None)`` for the encoder.
 
@@ -1329,10 +1390,20 @@ class CodeTransformer(nn.Module):
         int_ids = hints.get("hint_int")
         if int_ids is None:
             return None, None
-        clip = self.int_emb(int_ids.to(device).long())
+        int_ids = int_ids.to(device).long()
+        if self.hint_monotone:
+            clip = self.monotone_level_vec(int_ids, self.int_dir, self.int_null,
+                                           self.n_intensity_levels)
+        else:
+            clip = self.int_emb(int_ids)
         reg = hints.get("hint_reg")
         if reg is not None:
-            clip = clip + self.reg_emb(reg.to(device).long())
+            reg = reg.to(device).long()
+            if self.hint_monotone:
+                clip = clip + self.monotone_level_vec(
+                    reg, self.reg_dir, self.reg_null, self.n_register_levels)
+            else:
+                clip = clip + self.reg_emb(reg)
         sem = self._semantic_hint(hints)
         if sem is not None:
             clip = clip + sem
@@ -1360,7 +1431,16 @@ class CodeTransformer(nn.Module):
         int_ids = hints.get("hint_int")
         if int_ids is None:
             return None
-        out = self.dec_int_emb(int_ids.to(self.dec_int_emb.weight.device).long())
+        if self.hint_monotone:
+            if self.dec_int_dir is None:
+                return None
+            int_ids = int_ids.to(self.dec_int_dir.device).long()
+            out = self.monotone_level_vec(int_ids, self.dec_int_dir,
+                                          self.dec_int_null,
+                                          self.n_intensity_levels)
+        else:
+            out = self.dec_int_emb(
+                int_ids.to(self.dec_int_emb.weight.device).long())
         sem = self._semantic_hint(hints)
         if sem is not None:
             out = out + sem
@@ -2240,6 +2320,8 @@ class CodeTransformer(nn.Module):
                      f" slot+sem{self.semantic_dim}"
                      + (' (decoder too)' if self.decoder_hints
                         else ' (encoder only)'))
+            if self.hint_monotone:
+                hints += " monotone(int,reg)"
             if self.hint_film_memory or self.hint_decoder_proj:
                 where = "+".join([n for n, on in
                                   (("film", self.hint_film_memory),

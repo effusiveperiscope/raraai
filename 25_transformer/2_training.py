@@ -336,6 +336,46 @@ class TrainModule(pl.LightningModule):
             print(f"Gradient clipping: {self.grad_clip_algorithm} "
                   f"max={self.grad_clip_val}")
 
+        # Counterfactual hint margin (v1.1).  The clip-level channels are almost
+        # loss-irrelevant under plain CE (their level moves the memory by ~2 % of
+        # its norm and the table never grows -- HINTS_V1_PLAN.md §5.6), so CE
+        # alone trains neither the *encoding* nor the model's *sensitivity* to
+        # it.  On `counterfactual_rate` of the steps this scores the same batch
+        # twice, once with every sample's level replaced by a different one, and
+        # adds
+        #     relu(margin - (CE_shifted - CE_true))
+        # i.e. "changing the level must hurt by at least `margin` nats".  That is
+        # the cheapest objective that rewards *dependence* on the hint; it is the
+        # plan's §4.1 fallback, and it is what plain augmentation cannot do (with
+        # a fixed target a perturbed hint is best ignored, so augmenting alone
+        # would train invariance instead of control).
+        self.cf_margin = float(
+            config.train.get("counterfactual_margin", 0.0) or 0.0)
+        self.cf_weight = float(
+            config.train.get("counterfactual_weight", 1.0) or 1.0)
+        self.cf_rate = float(
+            config.train.get("counterfactual_rate", 0.0) or 0.0)
+        self.cf_channels = [c.strip() for c in str(
+            config.train.get("counterfactual_channels", "intensity,register")
+            or "").split(",") if c.strip()]
+        for name in self.cf_channels:
+            if name not in ("intensity", "register"):
+                raise ValueError(
+                    f"train.counterfactual_channels: unknown channel {name!r}; "
+                    f"only the clip-level ones (intensity, register) have a "
+                    f"level to shift")
+        if (self.cf_margin > 0) != (self.cf_rate > 0):
+            raise ValueError(
+                "train.counterfactual_margin and train.counterfactual_rate must "
+                f"both be > 0 (got margin={self.cf_margin}, rate={self.cf_rate})")
+        if self.cf_margin > 0:
+            if not net.hints:
+                raise ValueError(
+                    "train.counterfactual_margin needs transformer.hints: true")
+            print(f"Counterfactual hint margin: {self.cf_margin} nats on "
+                  f"{100 * self.cf_rate:.0f}% of steps, channels "
+                  f"{self.cf_channels} (weight {self.cf_weight})")
+
         # Learning-rate schedule end.  ``CosineAnnealingLR`` is *periodic* with
         # period ``2 * T_max``: past ``cosine_anneal_end`` the LR does not stay
         # at ``eta_min``, it climbs back towards its base value (reaching it at
@@ -1486,6 +1526,28 @@ class TrainModule(pl.LightningModule):
         return self.net.compute_batch_loss(batch, epoch=epoch,
                                            diagnostics=diagnostics)
 
+    def _counterfactual_batch(self, batch):
+        """Same batch, every sample's clip-level level replaced by a *different*
+        one (uniform over the remaining levels, wrapping).
+
+        The shift is chosen in ``1..n-1``, so the new level always differs from
+        the true one -- a no-op draw would make the margin free.
+        """
+        out = dict(batch)
+        for name in self.cf_channels:
+            key = {"intensity": "hint_int", "register": "hint_reg"}[name]
+            cur = batch.get(key)
+            if cur is None:
+                continue
+            n = (self.net.n_intensity_levels if key == "hint_int"
+                 else self.net.n_register_levels)
+            if n < 2:
+                continue
+            cur = cur.long()
+            shift = torch.randint(1, n, cur.shape, device=cur.device)
+            out[key] = 1 + torch.remainder(cur - 1 + shift, n)
+        return out
+
     def on_train_epoch_start(self):
         """Log the effective per-codebook loss weights once per epoch.
 
@@ -1671,6 +1733,34 @@ class TrainModule(pl.LightningModule):
         # `manual_backward` (not `loss.backward()`) so Lightning keeps control
         # of AMP scaling / DDP grad sync should the precision ever change.
         self.manual_backward(loss)
+        if self.cf_margin > 0 and torch.rand(()).item() < self.cf_rate:
+            # Counterfactual arm: same targets, shifted clip-level hints.
+            #
+            # This runs *after* the main backward on purpose.  Building both
+            # graphs before either backward doubles the peak activation memory
+            # and OOMs at the shipped batch size (fp32, batch 24 x 256 frames,
+            # ~13 GB of a 15.5 GB card -- measured).  A second backward
+            # accumulates into the same .grad buffers, which is equivalent to
+            # summing the two losses, at the cost of one extra backward rather
+            # than one extra live graph.
+            out_cf = self._forward_loss(self._counterfactual_batch(batch),
+                                        epoch=self.current_epoch,
+                                        diagnostics=False)
+            gap = (out_cf["loss"] - loss.detach())
+            # relu(margin - (CE_shift - CE_true)); gradient through the shifted
+            # arm only (the true arm already got its own CE above).
+            penalty = torch.relu(self.cf_margin - gap)
+            self.manual_backward(self.cf_weight * penalty)
+            # Logged on every counterfactual step, not only on the gated
+            # diagnostics ones: at rate 0.25 and log_interval 50 that would be
+            # ~1 sample in 200 steps, too sparse to see the margin engage.
+            # `on_epoch=True` as well: Lightning writes only one step scalar per
+            # log_interval, so the per-epoch mean is the readable trace of
+            # whether the margin is being met.
+            self.log("train_cf_gap", gap.detach(), on_step=True,
+                     on_epoch=True, prog_bar=False)
+            self.log("train_cf_penalty", penalty.detach(), on_step=True,
+                     on_epoch=True, prog_bar=False)
         self._clip_and_log_grads(optim_adamw, optim_muon)
         # Step AdamW through its LightningOptimizer wrapper: that is what
         # advances Trainer.global_step (and hence max_steps,
@@ -1983,7 +2073,9 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
     # needs the same treatment -- plus one extra check that length_cond does not
     # need: the *widths* come from hints_json, so a different hints.json would
     # silently reinterpret every stored level id.
-    has_hints = "net.int_emb.weight" in state_dict
+    has_hints = any(k in state_dict for k in ("net.int_emb.weight",
+                                              "net.pitch_emb.weight"))
+    has_mono = "net.int_dir" in state_dict
     if has_hints and not net.hints:
         raise SystemExit(
             f"ERROR: {source} has net.int_emb.weight (trained conditioning-hint "
@@ -1999,11 +2091,41 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                 f"ERROR: {message}  Use --transfer_from {source} instead of "
                 f"--resume_from, or start a fresh exp_name.")
         print(f"NOTE: {message}")
+    # ``transformer.hint_monotone`` replaces the intensity/register level
+    # tables with an ordered direction, i.e. it changes the parameter *set* the
+    # same way hints does.  Both directions are fatal for the trained weights:
+    #   * monotone checkpoint -> table model: the trained directions are dropped
+    #     and the level tables start at zero (silently no level signal at all);
+    #   * table checkpoint -> monotone model: the trained tables are dropped and
+    #     the directions start at zero.
+    # The second is the intended warm-start only if the caller asks for it, so
+    # it is a NOTE under --transfer_from and an error under --resume_from.
+    if has_mono and not net.hint_monotone:
+        raise SystemExit(
+            f"ERROR: {source} has {sorted(k for k in state_dict if '_dir' in k)[:3]} "
+            f"(a monotone hint encoding), but this model was built with "
+            f"transformer.hint_monotone=False.  Set it to true, or use a "
+            f"checkpoint with per-level tables.")
+    if net.hint_monotone and has_hints and not has_mono:
+        message = (f"{source} stores per-level hint tables, but this model uses "
+                   f"the monotone (ordered) encoding: int_emb/reg_emb are "
+                   f"dropped and int_dir/reg_dir start at zero, so the two "
+                   f"clip-level channels have no effect until they are trained.")
+        if strict:
+            raise SystemExit(
+                f"ERROR: {message}  Use --transfer_from {source} instead of "
+                f"--resume_from, or start a fresh exp_name.")
+        print(f"NOTE: {message}")
+
     if has_hints and net.hints:
-        for key, rows in (("net.int_emb.weight", net.int_emb.num_embeddings),
-                          ("net.reg_emb.weight", net.reg_emb.num_embeddings),
-                          ("net.pitch_emb.weight", net.pitch_emb.num_embeddings),
-                          ("net.slot_emb.weight", net.slot_emb.num_embeddings)):
+        tables = [("net.int_emb.weight", net.int_emb),
+                  ("net.reg_emb.weight", net.reg_emb),
+                  ("net.pitch_emb.weight", net.pitch_emb),
+                  ("net.slot_emb.weight", net.slot_emb)]
+        for key, module in tables:
+            if module is None or key not in state_dict:
+                continue
+            rows = module.num_embeddings
             have = int(state_dict[key].shape[0])
             if have != rows:
                 raise SystemExit(

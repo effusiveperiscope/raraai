@@ -1378,6 +1378,46 @@ Wiring:
   rejection, collator shapes, and that the model's loss actually changes when the
   hints are dropped).
 
+### Monotone hint encoding + counterfactual margin (stage 2, v1.1)
+
+Two switches that target the *clip-level* channels (intensity, register) after
+`scratch/HINTS_V1_PLAN.md` §5.6 measured why they do not work as knobs:
+`||int_emb[8] - int_emb[0]|| = 0.61` in a 768-d space whose post-norm memory norm
+is ~27.7 (~2 %), *identical* after 433 k steps -- i.e. the level is a tiny
+random perturbation, not a dial, because CE barely depends on it.
+
+- **`transformer.hint_monotone`** replaces `int_emb`/`reg_emb`/`dec_int_emb`
+  (a free `(n_levels+1, H)` row per level) with one learned direction per
+  channel times the level mapped linearly onto [-1, 1], plus a trained "absent"
+  vector for level 0: `x += int_dir*z(level) + int_null*(level==0)`. Monotone by
+  construction, one gradient shared across the range. `pitch_emb`/`slot_emb` keep
+  their tables (categorical, and already live). It changes the parameter set
+  (three tables out, six vectors in), so a fresh `exp_name`; `check_special_layout`
+  refuses a monotone checkpoint loaded into a table model (and vice versa) --
+  the table->monotone direction is a NOTE under `--transfer_from` (the directions
+  start at zero, so the clip-level channels are inert until trained).
+- **`train.counterfactual_margin`/`_weight`/`_rate`/`_channels`**: on `rate` of
+  the steps, score the same batch again with every sample's level replaced by a
+  *different* one (shift drawn from `1..n-1`, so never a no-op) and add
+  `relu(margin - (CE_shifted - CE_true))`. This is the only cheap objective that
+  rewards *dependence* on the level; plain hint augmentation teaches the
+  opposite (with the target codes fixed, a perturbed hint is best ignored, so
+  the model learns invariance). The penalty runs as a **second backward after
+  the main one**, not a second live graph: two graphs OOM at the shipped batch
+  size. `counterfactual_weight` must stay well below 1 (its gradient is a
+  full-strength ascent on the shifted arm); 0.2 at rate 0.25 is ~5 % averaged.
+  Watch `train_cf_gap` (should climb from ~0 towards `margin`) and `val_loss`
+  (must stay near the source). Measured: at init the gap is ~0 and the penalty
+  is at full margin; the first ~50 steps are a normal LR-re-warm transient.
+- Diagnostics that localise a dead channel: `scratch/hint_injection_probe.py`
+  (memory shift / logit shift / how much of it is class-dependent / CE, per
+  level, per checkpoint) and `scratch/hint_knob_report.py` (decoded audio per
+  level, `--shift` for a pacing test). Both need the arm's **own config**:
+  `load_submodule_prefix` is quiet, so a checkpoint trained with
+  `hint_film_memory`/`hint_decoder_proj`/`hint_monotone` loaded into a model
+  without it silently loses those tensors; `eval_stage2_wer.load_transformer_weights`
+  now raises instead.
+
 
 ---
 

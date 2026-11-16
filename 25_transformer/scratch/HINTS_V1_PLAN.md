@@ -1,15 +1,16 @@
 # Conditioning hints v1.0 — plan, evidence and phases
 
-Status: **Phase 1-3 measured; Phase 4 blocked** (2026-11-15).  Phase 0 fixed two
+Status: **v1.1 run done — the clip-level knob works** (2026-11-15).  Phase 0 fixed two
 generation-path bugs (§1, §1.2); Phase 1 has 200-utterance WER for the null and
 hint arms plus the channel/code-space probes; Phase 2's four wiring arms are run
 but not decisive (both new sites are neutral-to-harmful); Phase 3's guidance
 sweep is complete and **negative** (w=1 is best).  The channel ablations locate
 the whole WER effect in one channel: **word timing (`slot`)** — not the
-clip-level ones the plan was built around.  Judged as *controls* instead, two
-knobs work: **register** (already, through the existing wiring) and **word
-timing as a pace control** (0.8×-1.9× duration); both are usable only near the
-corpus distribution, which is the next thing to fix.  §5.5 is the decision log
+clip-level ones the plan was built around.  Judged as *controls* instead, the
+register knob already worked, word timing is a pace control (0.8×-1.9×
+duration), and **intensity is now a monotone dial too** after the v1.1
+representation change (§5.8) — the level signal was the bottleneck, not the
+injection site or the step count.  §5.5 is the decision log
 and supersedes the phase text where they disagree.  `HINTS_PLAN.md` remains the spec
 and status file for the *existing* (v0.8/v0.9) design; this file is the plan for
 the revision, with the measurements that motivate it.
@@ -418,6 +419,12 @@ that stops at `max_steps` inside its first epoch never validates and writes no
 checkpoint.  `2_training.py` now reads that key (see the comment next to
 `train.val_interval` in `configs/transformer.yaml`).
 
+> **The gates below are invalid for the three `film`/`proj` arms** — they were
+> run with the base config, which dropped the new modules (see **§5.6**).  The
+> *training* is valid; the offline numbers are "baseline architecture, arm's
+> weights".  Re-run with `run_hints_v1.py phase2 --tag w1 --only gate`, which now
+> passes each arm's own config.
+
 **First run** (`--tag w1`, four arms × 2 000 steps from
 `transformer_v0.9/last.ckpt`, `lr 5e-5` cosine to `1e-6`, one epoch):
 
@@ -433,7 +440,9 @@ Decoded-audio slopes (4 val items, levels 0..8/0..5): intensity +0.081 baseline
 / +1.06 st per level.  Codebook-0 repetition stayed at or below the
 ground-truth control in every arm (0.22–0.27 vs 0.266), so nothing degenerated.
 
-What the run does and does not say:
+What the run does and does not say (only the `baseline` row of the table above
+is valid — its architecture is the base config; every other row is the arm's
+weights in the baseline model):
 
 * **The CE gate is blind here.** `int` sits at ~0.001 nats in all four arms,
   exactly as §4.1 predicts for a style channel — `val_hint_channel_delta/int`
@@ -613,9 +622,11 @@ struck.
    `slot` carries a cue on its own (11.27 %); `pitch`/`intensity`/`semantic`
    alone are the null state, so their single-drop cost is redundancy with
    `slot`, not an independent contribution.
-5. **FiLM is not free**: +0.06 nats of val_loss after 2 k steps from zero init,
-   with ‖γ‖ 9.0 / ‖β‖ 5.3 — a big perturbation of a converged model.  It showed
-   no benefit over the baseline in the 2 k screen.
+5. ~~**FiLM is not free**: +0.06 nats of val_loss...~~ **Wrong — superseded by
+   §5.6.**  That measurement dropped the module from weights trained with it; with
+   the module enabled, teacher-forced CE is 2.3150 (film) vs 2.3178 (baseline),
+   i.e. no cost.  The weights do move a long way (‖γ‖ 8.98), but they are not
+   hurting the fit.
 6. **Classifier-free guidance is rejected** (Phase 3, 100 utterances, paired):
    `w = 1` is best at 11.40 %, and every guided weight is worse (12.72 / 14.04 /
    13.79 % at w = 1.5/2/3; 13.22 % for the pitch-books-only arm).  The damage is
@@ -694,6 +705,242 @@ measurement limit.  A defensible acceptance test needs paired per-item deltas
 over ≥16 items plus a second, independent proxy (e.g. F0 range, energy variance,
 spectral flux), or a different target (per-word emphasis rather than a
 clip-level offset).
+
+### 5.6 Diagnostic A — where the clip-level signal actually dies (2026-11-15)
+
+**First, a measurement bug that invalidates the Phase 2 gates.**  The four
+wiring arms trained correctly (each with its own generated config), but every
+*offline* gate ran with `configs/transformer.yaml`, where
+`hint_film_memory`/`hint_decoder_proj` are both `false`.
+`load_submodule_prefix(..., quiet=True)` then silently dropped the FiLM and
+decoder-projection tensors, so the gate scripts measured the **baseline
+architecture on each arm's weights**.  Everything in the Phase-2 table above for
+`film`/`proj`/`film+proj` is therefore "the arm's non-FiLM weights", not the arm.
+In particular "no arm beats the baseline on the audio knob" was true by
+construction, and the "+0.06 nats of val_loss for FiLM" never measured FiLM.
+
+Fixed: each arm's gates now use that arm's config, `load_transformer_weights`
+**raises** rather than dropping a post-norm module, and
+`hint_injection_probe.py --configs` takes one config per checkpoint.
+
+**The diagnostic itself.**  `scratch/hint_injection_probe.py`, 2 batches of 8,
+intensity 0→8 with the other channels real (per-arm configs):
+
+| arm | ‖γ‖ | ‖W_proj‖ | memory Δ | logit Δ | class-dependent | ΔCE |
+|---|---|---|---|---|---|---|
+| baseline | — | — | 3.8 % | 1.6 % | 95 % | +0.0024 |
+| film | 8.98 | — | **5.0 %** | 1.7 % | 96 % | +0.0030 |
+| proj | — | 6.80 | 4.4 % | **2.0 %** | 94 % | +0.0042 |
+| film+proj | 8.81 | 6.73 | **5.2 %** | 1.9 % | 95 % | +0.0038 |
+
+A fourth correction falls out of the same table: teacher-forced CE at level 0 is
+2.3178 / 2.3150 / 2.3160 / 2.3147 for baseline / film / proj / film+proj, i.e.
+**enabling the modules costs no CE at all**.  The arms' own training logs agree
+(final `val_loss` 2.328 / 2.326 / 2.328 / 2.326), so this is not a probe
+artifact.  The "+0.06 nats of val_loss" in the
+Phase-2 table was the artifact of *dropping* them from weights that had adapted
+to their presence, not a real penalty.  §5.5 item 5 ("FiLM is not free") is
+wrong and is superseded by this.
+
+Three things are now settled:
+
+1. **The site works.**  FiLM enlarges the post-norm memory movement by ~30 %
+   (3.8 → 5.0-5.2 %) and the decoder projection enlarges the logit movement by
+   ~25 % (1.6 → 2.0 %).  Neither is a no-op.
+2. **Nothing cancels.**  94-96 % of the logit shift is *class-dependent*, i.e.
+   softmax can see it.  §3's "the heads map it to a near-uniform offset" is not
+   what happens on the post-norm path.
+3. **The signal is simply tiny, and it does not grow with training.**  The whole
+   intensity range moves the clip-level hint vector by ‖Δh(L8−L0)‖ = **0.61** in
+   a 768-d space whose post-norm memory has norm ≈ 27.7 (~2 %), and FiLM's
+   contribution is ‖W·Δh‖ ≈ 0.18.  Decisively: **v0.9 after 433 k steps has the
+   same 0.61** as the 2 k arms (0.56-0.62).  Compare `register`, whose
+   ‖Δh(L5−L0)‖ is 1.18 and which *does* have an audio knob (+0.95 st/level), and
+   the per-phone tables (`pitch_emb` row norms 0.84-1.95), which are the channels
+   with a measured effect.
+
+The **audio** end of the chain, with each arm's own config (8 items, levels
+0/4/8, so only the slope is meaningful):
+
+| arm | intensity slope | reg slope |
+|---|---|---|
+| baseline | +0.021 /level | +0.096 |
+| film | +0.028 /level | +0.177 |
+| proj | +0.035 /level | +0.135 |
+| film+proj | +0.013 /level | +0.186 |
+
+That does **not** rank the arms: the same baseline checkpoint measured +0.081 on
+a 4-item 9-level sweep and +0.021 here, and `film+proj` (largest memory shift)
+has the smallest slope — all four per-level curves are non-monotone.  The readout
+is too noisy at 8 items to adjudicate anything, which is the point: the internal
+metric is the usable gate, the audio readout is not.  What the audio numbers *do*
+say is that the knob is weak (~0.15-0.3 over the whole range) in every arm.
+
+So **the answer to "was 2 k enough?" is that the step count was never the
+limiting factor.**  With CE as the objective the level is almost
+loss-irrelevant, so the free 9-row lookup never has to grow: the rows end up
+small, mutually arbitrary and unordered, i.e. the "level" is a tiny random
+perturbation rather than a monotone dial.  More steps at the same objective
+leave it exactly where it is.
+
+What follows from that (and it is a representation change, not another site):
+
+* encode the level as a **monotone direction** — one learned vector times the
+  normalised **continuous** value that `.cond` already stores, instead of a free
+  per-level row.  A dial is then monotone by construction, and the gradient is
+  shared across the range instead of split 9 ways.
+* and/or **counterfactual hint augmentation** (§5.5 item 4), which removes the
+  "level is loss-irrelevant" property that keeps the table small.
+
+Neither needs a new injection site; both are compatible with keeping
+intensity/register.
+
+### 5.7 v1.1: monotone encoding + counterfactual margin — implemented, run in flight
+
+Two changes, both aimed at the *representation* bottleneck §5.6 identified (no
+new injection site, no re-preprocessing, no dataset change):
+
+1. **`transformer.hint_monotone`** — the intensity/register level is
+   `direction * z(level)` with `z` linear on [-1, 1], plus a trained "absent"
+   vector, replacing the free `(n_levels+1, H)` lookup.  Monotone by
+   construction, one gradient for the whole range.  `pitch_emb`/`slot_emb` keep
+   their tables (categorical, and already live).
+2. **`train.counterfactual_margin`** (`_weight`, `_rate`, `_channels`) — on 25 %
+   of steps, score the same batch with every sample's level replaced by a
+   *different* one and add `relu(margin - (CE_shift - CE_true))`.
+
+**Correction to §5.5 item 4 / the earlier "hint augmentation" idea.**  Plain
+augmentation is *wrong* here and I am not implementing it: with the target codes
+fixed, a perturbed hint is best *ignored*, so augmenting the hint alone trains
+**invariance** — the exact opposite of a knob.  The margin is what turns the same
+perturbation into a dependence objective (it is §4.1's fallback, not a new
+mechanism).
+
+Implementation notes that cost real time to find:
+
+* The counterfactual arm runs as a **second backward after the main one**.  With
+  both graphs live it OOMs immediately (fp32, batch 24 x 256 frames, ~13 GB of
+  15.5 GB — measured at the first counterfactual step).  Two backwards accumulate
+  into the same `.grad` buffers, so the objective is unchanged.
+* `counterfactual_weight` must be well below 1: the penalty's gradient is a
+  full-strength *ascent* on the shifted arm regardless of the margin (it is
+  `-dCE_shift/dθ`, not scaled by how far the gap is from the margin).  0.2 at
+  rate 0.25 ≈ 5 % average.
+* `check_special_layout` and `eval_stage2_wer.load_transformer_weights` now refuse
+  **both** monotone directions (a trained direction dropped into a table config
+  leaves the clip-level channels *inert*, which would read as "intensity does
+  nothing").
+
+**Hyperparameter check** (400 steps, monotone with and without the margin,
+identical otherwise, transfer from v0.9 last):
+
+| arm | val@199 | val@399 |
+|---|---|---|
+| monotone only | 2.4423 | 2.3866 |
+| monotone + margin | 2.4457 | 2.3885 |
+
+So the margin costs **0.002 nats** and does not cause the early transient — that
+is the ordinary `--transfer_from` LR re-warm (fresh Adam state on a model that
+had annealed to 1e-6; the no-margin arm shows the same +0.13 rise and the same
+decay, ending at 2.39 and still falling towards the 2.3284 the 2 k arms reach).
+
+**Run in flight** (`scratch/hints_v1_runs/20261115-v11/`, detached):
+
+```
+exp_name hints_v1_p4_final_mono1   80 000 steps, cosine 80 k, lr 5e-5
+hints=true, hint_monotone=true, film/dec_proj=false
+cf margin 0.05, weight 0.2, rate 0.25, channels intensity,register
+limit_train_batches 8000 (10 epochs), transfer_from transformer_v0.9/last.ckpt
+~12 h; last.ckpt every epoch, best-checkpoint by val_loss
+```
+
+Read, in order, when it lands:
+
+1. `train_cf_gap_step` / `train_cf_gap_epoch` — it must **climb from ~0 towards
+   0.05**.  A flat 0 means the margin gradient is losing and nothing will have
+   changed.
+2. `val_loss` — the yardstick is the source's 2.3138 (and 2.3284 for a 2 k
+   fine-tune).  A permanent +0.05 means the counterfactual arm is costing fit.
+3. `scratch/hint_injection_probe.py --config <run config> --checkpoint ...` —
+   `||Δh(L8-L0)||` is the acceptance metric: **0.61 today, want ≳2** (≥8 % of the
+   memory norm), with the memory/logit shifts up in proportion.
+4. `scratch/hint_knob_report.py` (intensity + register, ≥16 items) — the knob
+   must be monotone and clearly larger than +0.045/level.  This is the *costly*
+   number; do not use it to adjudicate until Δh has moved.
+5. WER (`--ignore_eos`, 100-200 utts) — must not regress from the 11.40 % / 14.36 %
+   null reference; the hint-arm gain should survive.
+
+If `Δh` grows but the audio does not, the remaining gap is the decoder ignoring
+the channel, and the next lever is the (measured CE-neutral) `hint_decoder_proj`
+on top of the monotone encoding — not another representation change.
+
+### 5.8 v1.1 result — the representation was the bottleneck (2026-11-15)
+
+`hints_v1_p4_final_mono1`, 80 k steps from `transformer_v0.9/last.ckpt`, monotone
+encoding + counterfactual margin (margin 0.05, weight 0.2, rate 0.25), no
+post-norm injection sites.  Gates: `scratch/hints_v1_runs/20261115-v11/`.
+
+**The level signal grew, as designed.**  `||Delta h||` between the two ends of the
+dial (L1 -> L8) is **2.41** (one direction, `||int_dir||` = 1.21), against **0.61**
+for the free table on v0.9 — and that 0.61 was *unchanged* after 433 k steps.
+`||Delta h||(L8 - L0)` is 0.84 because level 0 is its own trained "absent" vector,
+so the number to quote for a user moving the dial is the 2.41.
+
+**The intensity knob works now, and it is monotone:**
+
+| level | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| DSP intensity | 4.374 | **3.708** | 3.846 | 4.122 | 4.252 | 4.329 | 4.456 | 4.588 | **4.645** |
+| WER (8 utts/level) | 7.8 | 14.8 | 12.2 | 8.7 | 9.6 | 12.2 | 7.8 | 12.2 | 6.1 |
+
+Monotone over the whole present range (3.71 -> 4.65, **+0.94** on the 1-9 scale)
+versus v0.9's non-monotone 0.25 total; slope +0.086/level (was +0.045).  The
+per-level WER has no trend (8 utterances per level = ±several pp), so the dial
+does not buy its span with intelligibility at these extremes.
+
+Two calibration notes, not defects: the dial is **asymmetric about "absent"**
+(L0 = 4.374 sits between L7 and L8), so most of the travel is at the low end; and
+the teacher-forced CE profile is strongly one-sided (L1 +1.09 nats, L2 +0.65, L3
++0.25, L4-L8 <= 0.005) because the val items' true levels cluster around L5 —
+it is distance from the truth, not an anomaly at any level.  (My first read of
+this as an "L2 spike" was an artefact of a probe that skipped L1.)
+
+**Everything else held or improved:**
+
+| metric | v0.9 last | v1.1 mono1 |
+|---|---|---|
+| teacher-forced val_loss | 2.3138 | **2.2631** |
+| WER, null state (200 utts) | 20.22 % | **18.82 %** |
+| WER, `.cond` hints (200 utts) | 19.02 % | **18.58 %** |
+| register knob | +0.955 st/level | +0.897 st/level |
+| slot / pacing knob | +0.064 s/level | +0.088 s/level |
+| per-channel CE delta: int / reg / pitch / slot | +0.0004 / +0.0020 / +0.0125 / +0.0062 | +0.0002 / +0.0015 / +0.0138 / +0.0074 |
+
+So the counterfactual margin cost nothing (val_loss *fell* 0.05, WER fell ~1.4 pp
+in both arms) and the CE liveness numbers are unchanged at ~0 for the clip-level
+channels — which is the point: **CE was never the metric; the dial is.**  The hint
+*arm gap* shrank (1.20 -> 0.24 pp), consistent with the model no longer needing
+the oracle channels as much; at 200 utts that is ~1 pp of noise, so read it as
+"the hint-free model improved", not as a loss of hint value.
+
+`train_cf_gap` overshot the margin by ~8x (0.05 -> 0.43 nats by step 80 k, with
+the penalty itself -> 0.0007, i.e. the hinge is satisfied).  The extra sensitivity
+is not the hinge doing it — it is the model using the level on its own now that
+the encoding makes it usable.  Worth knowing: the hinge bounds nothing above.
+
+**Open, in priority order**
+
+1. The intensity *readout* is still coarse: a 0.94-level span against the DSP
+   model's 0.59 MAE.  The dial is now monotone, which is the property a user
+   perceives, but a paired A/B discrimination at L2 vs L7 (or an independent
+   proxy: f0 range, energy variance, spectral flux) is the right KPI before
+   quoting a magnitude.
+2. `best-checkpoint.ckpt` is step ~73 k (val 2.2707 vs last 2.2743) — re-run the
+   knob on it if the 0.004 matters.
+3. The asymmetry about "absent" is a calibration question: if a UI should offer
+   "lower / same / higher" around the clip's own level, the level-0 vector and
+   the corpus's level distribution need to agree.
+4. Still untested: `semantic`'s value on OOD text (unchanged from §5.5).
 
 ## 6. Commands
 

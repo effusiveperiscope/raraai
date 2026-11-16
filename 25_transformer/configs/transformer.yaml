@@ -178,6 +178,24 @@ transformer:
   # it needs a fresh `exp_name` + `--transfer_from`.
   hint_film_memory: false
   hint_decoder_proj: false
+  # ---- monotone (ordered) encoding of the two clip-level channels (v1.1) ---
+  # `true` replaces `int_emb`/`reg_emb`/`dec_int_emb` (a free `(n_levels+1, H)`
+  # row per level) with ONE learned direction per channel times the level mapped
+  # linearly onto [-1, 1], plus a trained "absent" vector for level 0:
+  #     x += int_dir * z(level) + int_null * (level == 0)
+  # Why: the free tables were measured to stay small and mutually arbitrary --
+  # ||int_emb[8] - int_emb[0]|| = 0.61 in a 768-d space whose post-norm memory
+  # norm is ~27.7 (~2 %), and *identical* after 433 k steps on v0.9.  With CE as
+  # the only objective the level is almost loss-irrelevant, so nothing grows the
+  # rows; the "level" ends up a tiny random perturbation instead of a dial.
+  # An ordered direction is monotone by construction and shares one gradient
+  # across the whole range (see HINTS_V1_PLAN.md §5.6).  `register` gets the same
+  # treatment; the per-phone channels (pitch/slot) keep their tables because they
+  # are categorical and already work.
+  # Changes the parameter set (drops 3 tables, adds 6 vectors), so it needs a
+  # fresh `exp_name` + `--transfer_from`.  `2_training.py:check_special_layout`
+  # refuses both mismatched directions in the dangerous order.
+  hint_monotone: false
   # ---- classifier-free guidance over the hints (v1.0, Phase 3) -------------
   # Generation only: `logits = uncond + w * (cond - uncond)`, where `uncond` is
   # the trained null state (level 0 / sem_null) and `cond` the hints passed in.
@@ -540,6 +558,39 @@ train:
   # transformer.hint_guidance).  Phase 3 sweeps it offline; a training run
   # should leave it off so the logged audio stays the honest conditional one.
   sample_hint_guidance: null
+
+  # ---- counterfactual hint margin (v1.1) -----------------------------------
+  # The clip-level levels are almost loss-irrelevant under plain CE (their level
+  # moves the memory by ~2 % of its norm and the level table never grows --
+  # HINTS_V1_PLAN.md §5.6), so CE trains neither the encoding nor the model's
+  # *sensitivity* to the level.  On `counterfactual_rate` of the steps this
+  # scores the same batch twice -- once with every sample's level replaced by a
+  # different one -- and adds
+  #     relu(margin - (CE_shifted - CE_true))
+  # i.e. "changing the level must cost at least `margin` nats".  That is the
+  # cheapest objective that rewards *dependence* on the hint (the plan's §4.1
+  # fallback).  Plain augmentation cannot do this: with the target codes fixed,
+  # a perturbed hint is best ignored, so augmenting alone trains invariance.
+  # `counterfactual_weight` scales the penalty.  Keep it well below 1: the
+  # penalty's gradient is `-d CE_shifted/dθ` (an *ascent* on the shifted arm),
+  # which is O(1) per nat regardless of the margin, so a weight of 1.0 is a
+  # full-strength anti-training signal on every counterfactual step.  0.2 is
+  # 20 % of the main gradient on 25 % of the steps, i.e. ~5 % averaged, and
+  # still gives the direction a direct route (scaling `int_dir` up makes the
+  # level matter, which is what the margin asks for).
+  # Cost: an extra encode+decode+backward on `rate` of the steps (~25 % slower
+  # at rate 0.25).  It runs *after* the main backward on purpose: building both
+  # graphs before either backward doubles the peak activation memory and OOMs at
+  # the shipped batch size (fp32, batch 24 x 256 frames, ~13 GB of 15.5 GB --
+  # measured).  Requires hints; needs a fresh `exp_name` only if
+  # `transformer.hint_monotone` also changes.
+  # Watch `train_cf_gap` (CE_shifted - CE_true) in TensorBoard: it should rise
+  # from ~0 towards `margin`, and `train_loss` should not blow up.
+  counterfactual_margin: 0.0
+  counterfactual_weight: 0.2
+  counterfactual_rate: 0.0
+  # Which clip-level channels to shift (they have a level to move).
+  counterfactual_channels: "intensity,register"
 
   # Which hint state *generation* runs in -- the TensorBoard samples (codes /
   # audio / mel / pitch), the FIM infill probe, the speaker probe, the OOD
