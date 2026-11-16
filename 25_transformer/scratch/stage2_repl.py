@@ -63,6 +63,10 @@ Notes
 * The phonemizer is ``FeatureExtractor(..., load_qwen=False)`` -- g2p_en + the
   g2pen tokenizer only, no ASR / aligner / RMVPE weights and no audio input.
   Same path as ``2_preprocess.py --phones_from transcript``.
+* ``{...}`` in the text is ARPAbet you supply yourself: ``hello {W ER1 L D}``
+  phonemizes "hello" normally and splices the braces' phones in verbatim
+  (spaces optional, case-insensitive). The whole result is tokenized once, so
+  the ids are the same shape a whole-sentence phonemization produces.
 * ``transformer.eos_token`` / ``fim`` / ``region_cond`` change the codebook
   embedding/head shapes, so a config that disagrees with its checkpoint would
   silently re-initialise them (``load_state_dict_mismatch`` skips whole
@@ -78,6 +82,7 @@ import importlib.util
 import logging
 import os
 import random
+import re
 import shutil
 import sys
 import threading
@@ -160,6 +165,106 @@ def resolve_precision(name, device: str) -> str:
               f"{device}")
         return "fp32"
     return precision
+
+
+# ---------------------------------------------------------------------- #
+# Phonemization with manual ARPAbet ({...})
+# ---------------------------------------------------------------------- #
+# One symbol: consonants (HH, L, ...) or a stressed/unstressed vowel (AH0,
+# OW1, ...).  The base is checked against the real ARPAbet inventory, so a typo
+# like "{hello}" / "{XXQ}" is caught here instead of reaching the tokenizer
+# (which would turn it into [UNK]).
+_ARPABET_TOKEN = re.compile(r"^([A-Z]+)([0-2]?)$")
+_ARPABET_SYMBOLS = frozenset(
+    "AA AE AH AO AW AY B CH D DH EH ER EY F G HH IH IY JH K L M N NG OW OY "
+    "P R S SH T TH UH UW V W Y Z ZH".split())
+_BRACE_GROUP = re.compile(r"\{([^{}]*)\}")
+
+
+def split_arpabet_braces(text: str):
+    """Split ``text`` into ``("text", chunk)`` / ``("arpabet", phones)`` parts.
+
+    A ``{...}`` group is ARPAbet the user supplied by hand; everything else is
+    ordinary text that still goes through g2p.  The braces are not kept.
+
+    Raises:
+        ValueError: unbalanced ``{`` / ``}``, an empty group, or a token that
+            does not look like an ARPAbet symbol.
+    """
+    text = str(text)
+    segments = []
+    pos = 0
+    for match in _BRACE_GROUP.finditer(text):
+        gap = text[pos:match.start()]
+        if "{" in gap or "}" in gap:
+            raise ValueError("unbalanced '{' or '}' (write ARPAbet as "
+                             "{HH AH0 L OW1})")
+        segments.append(("text", gap))
+        tokens = match.group(1).split()
+        if not tokens:
+            raise ValueError("empty {...} group; put ARPAbet in it "
+                             "(e.g. {W ER1 L D})")
+        for token in tokens:
+            match_token = _ARPABET_TOKEN.match(token.upper())
+            if (match_token is None
+                    or match_token.group(1) not in _ARPABET_SYMBOLS):
+                raise ValueError(f"{token!r} is not an ARPAbet symbol "
+                                 f"(expected e.g. HH, AH0, L, OW1)")
+        segments.append(("arpabet", " ".join(t.upper() for t in tokens)))
+        pos = match.end()
+    tail = text[pos:]
+    if "{" in tail or "}" in tail:
+        raise ValueError("unbalanced '{' or '}' (write ARPAbet as "
+                         "{HH AH0 L OW1})")
+    segments.append(("text", tail))
+    return segments
+
+
+def phonemize_with_arpabet(fe, text: str):
+    """``(phones, ids)`` for ``text``, with ``{...}`` ARPAbet spliced in.
+
+    Ordinary text is phonemized with the same sentence-level POS tagging
+    `FeatureExtractor.phonemize_text` uses (so heteronyms still resolve from
+    context across the whole sentence), and each ``{...}`` group replaces its
+    part with the ARPAbet exactly as written.  The combined phone string is
+    then tokenized **once**, which is what keeps the result compatible with
+    ids produced by phonemizing the same sentence normally.
+
+    Args:
+        fe: A `FeatureExtractor` (only ``hphzr`` / ``tokenizer_g2p`` used).
+        text: Transcript, optionally containing ``{HH AH0 L OW1}`` groups.
+
+    Returns:
+        ``(phones, ids)``; both empty when the text has no phonemes.
+
+    Raises:
+        ValueError: malformed braces (see `split_arpabet_braces`).
+    """
+    segments = split_arpabet_braces(text)
+    words = [w for kind, chunk in segments if kind == "text"
+             for w in chunk.split()]
+    tags = fe.hphzr.tag_words(words)
+    chunks = []
+    cursor = 0
+    for kind, chunk in segments:
+        if kind == "arpabet":
+            chunks.append(chunk)
+            continue
+        n_words = len(chunk.split())
+        phones = fe.hphzr.phonemize_sentence(chunk,
+                                             tags=tags[cursor:cursor + n_words])
+        cursor += n_words
+        if phones:
+            chunks.append(phones)
+    phones = " ".join(chunks)
+    if not phones:
+        return "", []
+    tokenizer = fe.tokenizer_g2p
+    ids = tokenizer(phones)["input_ids"]
+    if tokenizer.unk_token_id in ids:
+        print("warning: the tokenizer mapped part of the input to [UNK]; "
+              "check the symbols in your {...} groups")
+    return phones, ids
 
 
 class KeyReader:
@@ -910,10 +1015,11 @@ class Stage2REPL:
             return False
         fe = self._extractor()
         try:
-            ids = [int(i) for i in fe.phonemize_text(text)]
+            phones, ids = phonemize_with_arpabet(fe, text)
         except Exception as exc:
             print(f"Phonemization failed: {exc}")
             return False
+        ids = [int(i) for i in ids]
         if not ids:
             print(f"{text!r} produced no phonemes; text left unchanged.")
             return False
@@ -922,7 +1028,7 @@ class Stage2REPL:
         # captured levels must not leak into it.
         self._base_hints = None
         print(f"text: {text}")
-        print(f"phones: {fe.tokenizer_g2p.decode(ids)!r}  ({len(ids)} ids)")
+        print(f"phones: {phones!r}  ({len(ids)} ids)")
         return True
 
     def _clamp_frames(self, frames: int) -> int:
@@ -1822,7 +1928,8 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
             else:
                 repl._report_codes(repl.current_codes)
         elif key == "t":
-            text = rest or repl.reader.read_line("Text: ")
+            text = rest or repl.reader.read_line(
+                "Text ({...} = manual ARPAbet): ")
             if text is not None:
                 repl.set_text(text)
         elif key == "y":
@@ -1987,7 +2094,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "(default: %(default)s)")
     # Initial state / one-shot mode.
     parser.add_argument("--text", default=None,
-                        help="phonemize this and sample once, then exit")
+                        help="phonemize this and sample once, then exit "
+                             "(use {HH AH0 L OW1} for manual ARPAbet)")
     parser.add_argument("--val", type=int, default=None,
                         help="free-run val item N, then exit")
     parser.add_argument("--list_speakers", action="store_true",
