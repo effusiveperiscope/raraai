@@ -8,69 +8,12 @@
 #   data/base/train_stage2.txt
 #   data/base/val_stage2.txt
 
-# v0.2 - improved pitch encoder, expanded params
-# v0.2.1 - codebook weighting, grad clipping (numerically dead: see precision)
-# v0.3 - fp32/TF32 instead of bf16 autocast (see train.precision)
-# v0.4 - genshin dataset, stronger regularization
-# v0.4.1 - fix the collapsed phoneme encoder: per-dimension (temporal) memory
-#          normalisation + GPT-2-style residual scaling, so cross-attention can
-#          actually align to the current phoneme (see transformer.memory_norm).
-#          Adds the val_text_delta diagnostic (train.text_delta_batches) and
-#          drops stage-2 clips whose alignment produced no phonemes.
-#          v0.4 checkpoints have no memory_gain/memory_bias keys: use
-#          --transfer_from (partial load), NOT --resume_from, to warm-start.
-# - bump batch size to 24
-# v0.4.2 - transcription heteronym fix
-# v0.5   - end-of-utterance token: the model learns to STOP instead of always
-#          emitting exactly train.sample_frames frames (transformer.eos_token).
-#          Changes the embedding/head shapes (v + 1 -> v + 2 per codebook), so
-#          v0.4.x checkpoints cannot be resumed into it -- warm-start with
-#          --transfer_from (modeling.transformer.expand_state_dict_with_eos
-#          pads the old rows in) or start fresh.
-# v0.5a  - adapt from new stage1
-# v0.6-fim - fill-in-the-middle: SUF/MID sentinels + prefix/suffix/middle region
-#          tag, mixed with AR training (train.fim_rate).  Enables fixed-length
-#          span regeneration (CodeTransformer.infill).  Shape change (+2 rows per
-#          codebook): new exp_name + --transfer_from, no re-preprocessing.
-# v0.7-fim2 - span-length conditioning (transformer.length_cond): the decoder now
-#          sees how many frames are left in the span it is filling, which is the
-#          only way it can pace content into a requested length (before this,
-#          nothing in the model's input depended on middle_frames at all).
-#          Also fixes CodeTransformer.infill's region tag, which lagged one
-#          column behind the training alignment (so the model was asked to emit
-#          SUF/MID under the wrong region), and adds the FIM diagnostics probe
-#          (train.fim_probe_batches).  One new parameter table: new exp_name +
-#          --transfer_from, still no re-preprocessing.
-#          - Also using expanded corpus.
-# v0.8 - conditioning hints: five optional side channels (intensity, register,
-#          sentence semantic, per-word pitch, per-word timing) built by
-#          hints/build.py into <base>.cond files, each bucketed with the edges in
-#          transformer.hints_json.  New parameters (+0.24 %), so a fresh
-#          exp_name + --transfer_from (see HINTS_PLAN.md).  No re-preprocessing:
-#          the codes are unchanged.  Watch `val_hint_gap` / `val_loss_nohint`.
-# v0.9 - fixes the three problems v0.8 exposed (HINTS_PLAN.md §8.5, §9):
-#          * **relative register**: the register channel is bucketed on its
-#            deviation from the speaker's own median (`--relative-register`
-#            fits the per-speaker offsets and the residual edges into
-#            hints.json), instead of the absolute level.  Measured on the
-#            Genshin train split the absolute value is 79 % between-speaker
-#            variance (ICC(1) = 0.794), i.e. mostly a second, coarser speaker
-#            id -- redundant with spk_emb and, as an oracle, confounded with
-#            it.  Same table width, so --transfer_from still works, but the
-#            level *ids* change meaning: hence the new exp_name.
-#          * **zero-initialised hint tables**: a randomly-initialised
-#            int_emb/reg_emb/sem_proj is added to every phoneme, which perturbs
-#            a warm-started encoder exactly when its text alignment is most
-#            fragile.  Zeros make the warm start reproduce the source model.
-#          * **fim_rate 0.5 -> 0.2**: half the v0.8 gradient went to
-#            prefix<SUF>suffix<MID>middle, which teaches "continue from a given
-#            context" rather than "advance through the text".  v0.8's failure
-#            mode was a repetition attractor (WER 42 % vs 15 % for the run it
-#            was warm-started from, same 24 utterances) -- v0.9 gives plain AR
-#            most of the gradient.
-#          Warm-start from checkpoints_stage2/5090_v0.7_fim2/best-checkpoint.ckpt
-#          (15.0 % WER), NOT .../last.ckpt (the post-anneal checkpoint v0.8
-#          started from).
+# Release history lives in git log and AGENTS.md §4; each switch below points at
+# its own section there.  Summary by version: v0.4.1 memory norm + residual
+# scaling, v0.5 EOS token, v0.6-fim / v0.7-fim2 span regeneration + length cond,
+# v0.8 conditioning hints, v0.9 relative register + zero-init tables,
+# v1.0 post-norm hint injection + guidance (ablations, off), v1.1 monotone
+# hint encoding + counterfactual margin (recipe: scratch/hints_v1_runs/).
 exp_name: transformer_v0.9
 tensorboard_version: 0
 
@@ -90,129 +33,62 @@ transformer:
   # (see speaker_map.py and train.speaker_map).
   n_speakers: 4096
   # ---- coarse conditioning hints (v0.8) -----------------------------------
-  # Optional *side channels* built by hints/build.py (see hints/README.md):
-  # intensity (1-9), register, a 384-d sentence vector, and (after the alignment
-  # pass) per-word pitch/duration.  The dataset turns each continuous value into
-  # a level id with the edges in `hints_json`; the model adds one small
-  # embedding per channel.  `hints: false` reproduces every earlier version
-  # exactly (no new parameters).
-  #
-  # `intensity` is **perceptual intensity** -- emotional / phonation effort
-  # (tension, breathiness, projection) on a 1-9 scale, regressed by the DSP
-  # model from `20_intensity_annotation`.  It is **not loudness**: its feature
-  # set peak-normalises every clip, precisely so that "someone shouting" and
-  # "someone close to the mic" are not the same thing.  It is a deliberately
-  # *coarse, clip-level* channel -- an end-user control ("say it more
-  # intensely"), not a reconstruction aid -- so the thing to measure is a
-  # counterfactual sweep (same text/speaker/seed, level 0..8, score the decoded
-  # audio with the same DSP model), *not* the teacher-forced CE delta.
-  #
-  # Two properties matter more than the numbers:
-  #  * intensity / register / word pitch / word timing are derived from the
-  #    *target audio*, so at train time they are oracles (the semantic vector is
-  #    derived from the *text*, so it carries no leakage at inference).  What
-  #    keeps the audio-derived ones from becoming a voice-conversion renderer is
-  #    that the values are coarse levels, `hint_dropout`/`hint_null_all` drop
-  #    them (so level 0 is a trained "no hint" state), every generation path
-  #    sends that state (`train.sample_hints`), and the val probe reports
-  #    `val_loss_nohint` next to `val_loss` -- if the gap is large the model is
-  #    leaning on the oracle.
-  #  * enabling it changes the parameter set, so it needs a fresh `exp_name` +
-  #    `--transfer_from` (new tables load as untrained), not `--resume_from`.
+  # Five optional side channels built by hints/build.py (see HINTS_PLAN.md and
+  # hints/README.md).  Each continuous value is bucketed at load time with the
+  # edges in `hints_json`, so the level count is a config change, not a re-run.
+  # Level 0 = "not provided" (trained via hint_dropout/hint_null_all).  Enabling
+  # this changes the parameter set: fresh exp_name + --transfer_from.
+  #   intensity  perceptual effort 1-9, loudness-independent, clip-level
+  #   register   f0 level relative to the speaker's median, clip-level
+  #   semantic   bge-small-en-v1.5 384-d sentence vector, from the text
+  #   pitch/slot per-word f0 and duration buckets (need the --words pass)
   hints: true
-  # Path to the hints.json written by hints/build.py (its `levels` block holds
-  # the equal-frequency edges).  The dataset and the model read the *same* file,
-  # so a level id cannot mean two different things.  Relative to the cwd.
-  #
-  # v0.9 points at a *relative-register* file: `hints/build.py
-  # --relative-register --fit-edges-only` writes `levels.register.speaker_means`
-  # (one semitone offset per speaker, fitted over the training split) and fits
-  # the register edges on the residual, so a register level means "this
-  # utterance is N semitones above/below this speaker's usual level".  The
-  # absolute file is kept next to it so the old run stays reproducible.
+  # hints/build.py output.  Dataset and model read the SAME file, so a level id
+  # cannot mean two things; it is part of the checkpoint contract.  v0.9+ uses
+  # the --relative-register file (levels.register.speaker_means).
   hints_json: data/genshin_plus_extras/hints_rel.json
-  # Assert that this config and `hints_json` agree about the register scale.
-  # The level *ids* are identical either way, so nothing else can catch a
-  # mismatch; CodeTransformer raises if the flag and the file disagree.
+  # Assert that the config and hints_json agree about the register scale (the
+  # level ids are identical either way, so no shape guard can catch it).
   relative_register: true
-  # Also feed the clip-level channels (intensity + semantic) to the decoder, as
-  # a constant added to every column like spk_emb.  Off = encoder-only ablation.
+  # Feed the clip-level channels (intensity + semantic) to the decoder too.
+  # Off = encoder-only ablation.
   decoder_hints: true
   # Width of the stored sentence vector (bge-small-en-v1.5 = 384).
   semantic_dim: 384
-  # Word-pitch cuts in semitones relative to the utterance's voiced median
-  # (fixed, not corpus quantiles -- see hints/levels.py).  8 voiced bins, then
-  # one explicit "unvoiced" class (level 9) and 0 = "absent".
-
+  # Word-pitch cuts in semitones around the utterance's voiced median (fixed):
+  # 8 voiced bins, then one explicit "unvoiced" class, then 0 = "absent".
   hint_pitch_edges: [-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0]
   # Word-duration buckets: log2 of the slot length in code frames.
   n_slot_buckets: 8
-  # Per-channel dropout probability (training items only).  Each channel is
-  # dropped independently; a dropped channel is level 0 / the semantic null
-  # vector.  Keep `semantic` highest: it is the most informative channel about
-  # the utterance and the easiest to over-fit (one vector per clip).
+  # Per-channel dropout (training items only); a dropped channel is level 0 /
+  # sem_null.  Keep semantic highest: it is the most informative per clip.
   hint_dropout:
     intensity: 0.15
     register: 0.10
     pitch: 0.15
     semantic: 0.20
     timing: 0.15
-  # Drop *every* channel for this fraction of items, so the fully-unconditional
-  # path is trained too (needed for hint-free inference and for the
-  # `val_loss_nohint` probe to mean something).
+  # Drop every channel for this fraction of items so the unconditional path is
+  # trained too (hint-free inference, and val_loss_nohint must mean something).
   hint_null_all: 0.10
-  # ---- where the *clip-level* channels are injected (v1.0, Phase 2) --------
-  # The additive path above `PhonemeEncoder._temporal_norm` cannot express a
-  # per-clip constant: that norm standardises every dimension over *time*, so
-  # the mean subtraction cancels any position-independent offset (and any FiLM
-  # computed from one).  Measured on transformer_v0.9: intensity 0 -> 4 moved the
-  # pre-norm residual by 4.0 % and the CE by 0.0000 nats.  These two switches add
-  # a path *after* the norm on each side.  Both zero-initialise, so a
-  # `--transfer_from` model starts as an exact copy of its source and the new
-  # projections have to earn their effect.
+  # ---- post-norm injection of the clip-level channels (v1.0, off) ----------
+  # The additive path above _temporal_norm cannot express a per-clip constant
+  # (the norm subtracts the temporal mean).  These add a zero-initialised path
+  # after the norm instead; measured to carry the signal but not improve the
+  # knob, so both ship off.  New parameters -> fresh exp_name.
   #   hint_film_memory  -> encoder memory: mem * (1 + gamma(h)) + beta(h)
-  #   hint_decoder_proj -> decoder output: out + W h, after the final decoder
-  #                        norm and before the heads (shared by all codebooks)
-  # Phase 2's four arms are (false,false) = the v0.9 baseline, (true,false),
-  # (false,true) and (true,true).  Enabling either changes the parameter set, so
-  # it needs a fresh `exp_name` + `--transfer_from`.
+  #   hint_decoder_proj -> decoder output, after the final norm, before heads
   hint_film_memory: false
   hint_decoder_proj: false
-  # ---- monotone (ordered) encoding of the two clip-level channels (v1.1) ---
-  # `true` replaces `int_emb`/`reg_emb`/`dec_int_emb` (a free `(n_levels+1, H)`
-  # row per level) with ONE learned direction per channel times the level mapped
-  # linearly onto [-1, 1], plus a trained "absent" vector for level 0:
-  #     x += int_dir * z(level) + int_null * (level == 0)
-  # Why: the free tables were measured to stay small and mutually arbitrary --
-  # ||int_emb[8] - int_emb[0]|| = 0.61 in a 768-d space whose post-norm memory
-  # norm is ~27.7 (~2 %), and *identical* after 433 k steps on v0.9.  With CE as
-  # the only objective the level is almost loss-irrelevant, so nothing grows the
-  # rows; the "level" ends up a tiny random perturbation instead of a dial.
-  # An ordered direction is monotone by construction and shares one gradient
-  # across the whole range (see HINTS_V1_PLAN.md §5.6).  `register` gets the same
-  # treatment; the per-phone channels (pitch/slot) keep their tables because they
-  # are categorical and already work.
-  # Changes the parameter set (drops 3 tables, adds 6 vectors), so it needs a
-  # fresh `exp_name` + `--transfer_from`.  `2_training.py:check_special_layout`
-  # refuses both mismatched directions in the dangerous order.
-  # Validated: `true` is what made intensity a monotone dial (+0.086/level over
-  # 0.94 span, `||Delta h||` 0.61 -> 2.41) in HINTS_V1_PLAN.md §5.8.  It stays
-  # `false` here so every pre-v1.1 checkpoint remains resumable; copy
-  # `scratch/hints_v1_runs/20261115-v11/configs/hints_v1_p4_final_mono1.yaml`
-  # for a new hints run.
+  # ---- monotone encoding of the clip-level channels (v1.1) ----------------
+  # true replaces the free (n_levels+1, H) rows with one learned direction per
+  # channel times z(level) in [-1, 1] plus a trained "absent" vector.  This is
+  # what made intensity a monotone dial (HINTS_V1_PLAN.md §5.8).  New parameter
+  # set -> fresh exp_name; stays false so pre-v1.1 checkpoints stay resumable.
   hint_monotone: false
-  # ---- classifier-free guidance over the hints (v1.0, Phase 3) -------------
-  # Generation only: `logits = uncond + w * (cond - uncond)`, where `uncond` is
-  # the trained null state (level 0 / sem_null) and `cond` the hints passed in.
-  # This is what turns "the channel is available" into "the channel is a knob":
-  # the teacher-forced CE gradient a style channel gets is tiny (0.0000-0.011
-  # nats measured), while the cond-uncond direction is exactly the channel's
-  # effect.  Costs a second decoder pass per step; skipped automatically when
-  # the hints already *are* the null state.  1.0 is the identity, `null`/absent
-  # is off.  `hint_guidance_books` overrides the scalar per codebook (order
-  # spec0..spec7, pitch8..9), e.g. guide the pitch books harder than the
-  # timbre books.  Sweep `w` against WER *and* repetition before believing it:
-  # v0.8's failure mode was a sharpening-induced repetition attractor.
+  # ---- classifier-free guidance over the hints (v1.0, off) ----------------
+  # logits = uncond + w*(cond - uncond), uncond = the trained null state.
+  # w=1 is the identity.  Swept and negative (w=1 best), so it ships off.
   hint_guidance: null
   hint_guidance_books: null
   # Also feed `sid` to the decoder (its own embedding table), not just to the
@@ -565,57 +441,25 @@ train:
   sample_hint_guidance: null
 
   # ---- counterfactual hint margin (v1.1) -----------------------------------
-  # The clip-level levels are almost loss-irrelevant under plain CE (their level
-  # moves the memory by ~2 % of its norm and the level table never grows --
-  # HINTS_V1_PLAN.md §5.6), so CE trains neither the encoding nor the model's
-  # *sensitivity* to the level.  On `counterfactual_rate` of the steps this
-  # scores the same batch twice -- once with every sample's level replaced by a
-  # different one -- and adds
-  #     relu(margin - (CE_shifted - CE_true))
-  # i.e. "changing the level must cost at least `margin` nats".  That is the
-  # cheapest objective that rewards *dependence* on the hint (the plan's §4.1
-  # fallback).  Plain augmentation cannot do this: with the target codes fixed,
-  # a perturbed hint is best ignored, so augmenting alone trains invariance.
-  # `counterfactual_weight` scales the penalty.  Keep it well below 1: the
-  # penalty's gradient is `-d CE_shifted/dθ` (an *ascent* on the shifted arm),
-  # which is O(1) per nat regardless of the margin, so a weight of 1.0 is a
-  # full-strength anti-training signal on every counterfactual step.  0.2 is
-  # 20 % of the main gradient on 25 % of the steps, i.e. ~5 % averaged, and
-  # still gives the direction a direct route (scaling `int_dir` up makes the
-  # level matter, which is what the margin asks for).
-  # Cost: an extra encode+decode+backward on `rate` of the steps (~25 % slower
-  # at rate 0.25).  It runs *after* the main backward on purpose: building both
-  # graphs before either backward doubles the peak activation memory and OOMs at
-  # the shipped batch size (fp32, batch 24 x 256 frames, ~13 GB of 15.5 GB --
-  # measured).  Requires hints; needs a fresh `exp_name` only if
-  # `transformer.hint_monotone` also changes.
-  # Watch `train_cf_gap` (CE_shifted - CE_true) in TensorBoard: it should rise
-  # from ~0 towards `margin`, and `train_loss` should not blow up.
+  # Clip-level levels are nearly loss-irrelevant under plain CE, so also score
+  # the batch with each sample's level replaced by a different one and add
+  #   relu(margin - (CE_shifted - CE_true))
+  # i.e. "moving the level must cost `margin` nats" -- the cheapest objective
+  # that rewards dependence on the hint.  Runs as a SECOND backward after the
+  # main one (two live graphs OOM at the shipped batch size).  Keep
+  # counterfactual_weight well below 1 (~5 % averaged at 0.2 x rate 0.25).
+  # Watch train_cf_gap rise towards `margin` (HINTS_V1_PLAN.md §5.7-5.8).
   counterfactual_margin: 0.0
   counterfactual_weight: 0.2
   counterfactual_rate: 0.0
   # Which clip-level channels to shift (they have a level to move).
   counterfactual_channels: "intensity,register"
 
-  # Which hint state *generation* runs in -- the TensorBoard samples (codes /
-  # audio / mel / pitch), the FIM infill probe, the speaker probe, the OOD
-  # probe and the REPL's default (it reads this key too).  This is not
-  # cosmetic: `None` is not "no hints".  `hint_dropout` / `hint_null_all` train
-  # **level 0** (`sem_null` for the semantic vector) as the "not provided"
-  # state, and pre-Phase-0 every sampling path instead dropped the vectors
-  # entirely -- a different function, measured at +0.136 nats on the finished
-  # v0.9 (of which the trained null state is +0.023).  So:
-
-  #   "cond" -> the item's real `.cond` hints (val batches carry them; the
-  #             OOD probe has no target audio and falls back to null)
-  #   "null" -> the trained null state (level 0 everywhere).  Default.
-  #   "omit" -> no hint vectors at all.  Pre-Phase-0 behaviour, kept only for
-  #             ablations; it is out of distribution for a hint model.
-  # Every log tag carries the state: `codes_hint/`, `codes_nohint/`,
-  # `codes_omit/` (and `codes/` when the model has no hint tables), plus the
-  # scalar `sample/hints_mode` (0 = omit, 1 = null, 2 = real `.cond`).
-  # Quoted on purpose: an unquoted `null` is YAML's missing value, which is
-  # read as "null" too, but writing it explicitly avoids the ambiguity.
+  # Hint state for *generation* (TensorBoard samples, FIM/speaker/OOD probes,
+  # the REPL default).  None is NOT "no hints": the trained null state (level 0)
+  # is the only hint-free state the model saw.  "cond" = the item's real .cond
+  # (OOD falls back to null); "omit" = no vectors (pre-Phase-0, ablation only).
+  # Every log tag carries the state; sample/hints_mode is 0/1/2.
   sample_hints: "cond"
 
   # TensorBoard logging of "what the model actually produces". Every
