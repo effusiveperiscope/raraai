@@ -12,13 +12,13 @@
 # its own section there.  Summary by version: v0.4.1 memory norm + residual
 # scaling, v0.5 EOS token, v0.6-fim / v0.7-fim2 span regeneration + length cond,
 # v0.8 conditioning hints, v0.9 relative register + zero-init tables,
-# v1.0 post-norm hint injection + guidance (ablations, off), v1.1 monotone
+# hints v1.0 post-norm hint injection + guidance (ablations, off), v1.1 monotone
 # hint encoding + counterfactual margin (recipe: scratch/hints_v1_runs/),
-# v2.0 per-word pitch anchors (HINTS_PLAN.md §10).
+# hints v2.0 per-word pitch anchors (HINTS_PLAN.md §10).
 # The exp_name is deliberately *not* a v1 run's: 2_training.py auto-resumes
 # checkpoints_stage2/{exp_name}/last.ckpt, and a v1 (table) checkpoint cannot
 # be resumed into the anchor layout.
-exp_name: transformer_v2.0_anchors
+exp_name: transformer_hints_v2
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -274,7 +274,7 @@ gen:
 train:
   # 48 on 5090, 24 on 5060Ti
   batch_size: 24
-  lr: 5e-5
+  lr: 3e-5
   betas:
   - 0.9
   - 0.98
@@ -363,8 +363,8 @@ train:
   # (the historical values) the run spends 700 k steps un-annealing and is back
   # at full LR by step 600 k.  2_training.py now warns once when a run crosses
   # `cosine_anneal_end` (see TrainModule._check_anneal_end).
-  cosine_anneal_end: 500000
-  max_steps: 500000
+  cosine_anneal_end: 150000
+  max_steps: 100000
   max_epochs: -1
   max_frames: 256          # code frames per training segment (25 Hz)
   max_phone_length: 512
