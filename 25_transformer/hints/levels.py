@@ -167,6 +167,304 @@ def word_pitch_levels(pitch_st, voiced, edges=None):
 
 
 
+#: Number of **pitch anchors** stored per word (Hints V2).  A word is reduced to
+#: at most this many ``(position, value)`` points; see ``detect_pitch_anchors``.
+#: The value is repeated over the word's phones, so it is the *word*'s contour
+#: that is stored, not a per-phone sample.
+DEFAULT_PITCH_ANCHORS = 3
+
+#: Deviation (semitones) below which a span counts as straight.  A word whose
+#: whole contour stays inside this band becomes **one** anchor (the "flat word"
+#: case); otherwise the greedy split runs until it has ``max_anchors`` points.
+PITCH_ANCHOR_TOLERANCE_ST = 0.2
+
+#: Median-filter width, in f0 frames (10 ms each).  **Spike removal only**:
+#: a 3-point median deletes a one-frame octave error (12 st) without rounding a
+#: real 2-3 frame peak, which a wider window would shrink (and, on a ramp, bias
+#: the endpoints inwards -- both measured while building this).
+PITCH_ANCHOR_SMOOTH_FRAMES = 3
+
+#: Octave-error guard: a frame further than this from its 5-frame local median is
+#: treated as a tracker octave jump and replaced by that median.  A 1-frame spike
+#: is already gone after the median filter, but a 2-frame jump survives it and
+#: becomes a real anchor (measured: a `-11.4 st` anchor in a smoke clip).  Real
+#: f0 movements within one word are far below 6 st per 50 ms, so this is targeted.
+PITCH_ANCHOR_OCTAVE_ST = 6.0
+
+
+def _masked_median(y: np.ndarray, k: int) -> np.ndarray:
+    """Median-filter ``y`` ignoring NaNs.  ``NaN`` where a window is all-NaN.
+
+    A plain filter would either propagate NaN or treat unvoiced frames as 0 Hz,
+    both of which invent an extremum at every voice boundary.
+
+    The first/last ``k // 2`` frames are left unsmoothed: a truncated window
+    biases the median inwards (for a ramp the edge value becomes its neighbour),
+    which invents a spurious anchor at each end.
+    """
+    n = y.shape[0]
+    half = max(int(k) // 2, 1)
+    out = np.full(n, np.nan, dtype=np.float64)
+    for i in range(n):
+        lo, hi = i - half, i + half + 1
+        if lo < 0 or hi > n:
+            out[i] = y[i]
+            continue
+        w = y[lo:hi]
+        w = w[~np.isnan(w)]
+        if w.size:
+            out[i] = np.median(w)
+    return out
+
+
+def _guard_octaves(y: np.ndarray, threshold: float) -> np.ndarray:
+    """Replace frames whose 5-frame local median is > ``threshold`` away.
+
+    Targets the survivable octave error: the 3-point median removes a one-frame
+    jump, but a two-frame one is still an anchor and would tell the model to drop
+    a word an octave.  A genuine peak is kept because its *local median* is close
+    to it when it lasts more than a couple of frames.
+    """
+    n = y.shape[0]
+    if n < 3:
+        return y
+    out = y.copy()
+    for i in range(n):
+        if not np.isfinite(y[i]):
+            continue
+        lo, hi = max(0, i - 2), min(n, i + 3)
+        w = y[lo:hi]
+        w = w[np.isfinite(w)]
+        if w.size < 3:
+            continue
+        med = float(np.median(w))
+        if abs(float(y[i]) - med) > float(threshold):
+            out[i] = med
+    return out
+
+
+def _optimal_knots(pos: np.ndarray, val: np.ndarray, max_anchors: int):
+    """Exact best piecewise-linear fit with at most ``max_anchors`` knots.
+
+    The endpoints are always knots (a word's contour has to say where it starts
+    and ends); the interior knots are chosen by dynamic programming to minimise
+    the squared error of the line segments between them.  This is the same
+    objective the quality gate measures, so the detector cannot lose to a better
+    placement: measured on 1 068 Genshin words, a greedy splitter lands at
+    0.90 st and this at **0.81 st** (3 knots, code-frame contours).
+
+    Costs are O(1) per candidate segment via six prefix sums, so the DP is
+    ``O(K*n^2)``; ``n`` is a word's code-frame length (median 6, p95 28).
+
+    Returns:
+        Sorted indices into ``pos``/``val`` (at least one).
+    """
+    n = int(pos.shape[0])
+    if n <= 1:
+        return [0]
+    k_max = min(int(max_anchors), n) - 1          # number of segments
+    if k_max <= 0:
+        return [0]
+    if k_max == 1:
+        return [0, n - 1]
+
+    x = pos.tolist()
+    y = val.tolist()
+    p1 = [0.0] * (n + 1)
+    px = [0.0] * (n + 1)
+    py = [0.0] * (n + 1)
+    pxx = [0.0] * (n + 1)
+    pxy = [0.0] * (n + 1)
+    pyy = [0.0] * (n + 1)
+    for t in range(n):
+        xt, yt = x[t], y[t]
+        p1[t + 1] = p1[t] + 1.0
+        px[t + 1] = px[t] + xt
+        py[t + 1] = py[t] + yt
+        pxx[t + 1] = pxx[t] + xt * xt
+        pxy[t + 1] = pxy[t] + xt * yt
+        pyy[t + 1] = pyy[t] + yt * yt
+
+    def cost(i: int, j: int) -> float:
+        """SSE of the line through knots ``i``/``j`` on the points between."""
+        if j <= i + 1:
+            return 0.0
+        lo, hi = i + 1, j
+        m = p1[hi] - p1[lo]
+        if m <= 0.0:
+            return 0.0
+        sx = px[hi] - px[lo]
+        sy = py[hi] - py[lo]
+        sxx = pxx[hi] - pxx[lo]
+        sxy = pxy[hi] - pxy[lo]
+        syy = pyy[hi] - pyy[lo]
+        dx = x[j] - x[i]
+        slope = (y[j] - y[i]) / dx if dx > 0.0 else 0.0
+        icpt = y[i] - slope * x[i]
+        sse = (syy - 2.0 * icpt * sy - 2.0 * slope * sxy
+               + icpt * icpt * m + 2.0 * icpt * slope * sx
+               + slope * slope * sxx)
+        return sse if sse > 0.0 else 0.0
+
+    inf = float("inf")
+    dp = [[inf] * n for _ in range(k_max + 1)]
+    parent = [[-1] * n for _ in range(k_max + 1)]
+    dp[0][0] = 0.0
+    for k in range(1, k_max + 1):
+        for j in range(1, n):
+            best, best_i = inf, -1
+            for i in range(0, j):
+                prev = dp[k - 1][i]
+                if prev == inf:
+                    continue
+                v = prev + cost(i, j)
+                if v < best:
+                    best, best_i = v, i
+            dp[k][j] = best
+            parent[k][j] = best_i
+    if dp[k_max][n - 1] == inf:                   # unreachable; keep endpoints
+        return [0, n - 1]
+    knots = []
+    j = n - 1
+    for k in range(k_max, 0, -1):
+        knots.append(j)
+        j = parent[k][j]
+    knots.append(0)
+    knots.reverse()
+    return knots
+
+
+def _fit_sse(pos: np.ndarray, val: np.ndarray, knots) -> float:
+    """Squared error of the piecewise-linear fit through ``knots``."""
+    k = list(knots)
+    if not k:
+        return float("inf")
+    if len(k) == 1:
+        return float(np.sum((val - val[k[0]]) ** 2))
+    rec = np.interp(pos, pos[k], val[k])
+    return float(np.sum((val - rec) ** 2))
+
+
+def _prune_knots(pos: np.ndarray, val: np.ndarray, knots, tolerance: float):
+    """Drop interior knots the fit does not need.
+
+    The exact DP fills the budget even on a straight ramp (any knot on the line
+    gives zero error, so the tie-break just picks one), and a redundant knot is
+    not free: it is another slot the model has to learn.  Remove an interior
+    knot while doing so raises the RMS error by no more than ``tolerance``.
+    """
+    k = list(knots)
+    limit = (float(tolerance) ** 2) * max(len(pos), 1)
+    while len(k) > 2:
+        cur = _fit_sse(pos, val, k)
+        best = None
+        for i in range(1, len(k) - 1):
+            cand = k[:i] + k[i + 1:]
+            inc = _fit_sse(pos, val, cand) - cur
+            if best is None or inc < best[0]:
+                best = (inc, cand)
+        if best is None or best[0] > limit:
+            break
+        k = best[1]
+    return k
+
+
+def detect_pitch_anchors(contour_hz, ref_hz: float,
+                         max_anchors: int = DEFAULT_PITCH_ANCHORS,
+                         tolerance_st: float = PITCH_ANCHOR_TOLERANCE_ST,
+                         smooth_frames: int = PITCH_ANCHOR_SMOOTH_FRAMES,
+                         octave_st: float = PITCH_ANCHOR_OCTAVE_ST):
+    """Reduce one word's f0 contour to at most ``max_anchors`` points.
+
+    This is the Hints V2 replacement for the single word-mean: a word's pitch is
+    stored as `(position, semitones)` anchors, and the *model* decides how to
+    use them.  Measured on Genshin (words >= 8 code frames): the word mean
+    reconstructs the contour to ~2.1 st, 3 anchors to ~0.7 st, and anchors
+    chosen at detected positions beat uniformly spaced samples at equal count.
+
+    Args:
+        contour_hz: 1-D f0 in Hz over the word span, 0 (or non-finite) where
+            unvoiced.  From ``FeatureExtractor.extract``'s ``pitch_contour``.
+        ref_hz: the utterance's reference pitch, i.e. the median of its voiced
+            word means.  Values are stored in semitones relative to this, which
+            keeps the hint independent of the speaker and of the absolute key.
+        max_anchors: budget (``transformer.hint_pitch_anchors``).
+        tolerance_st: a span flatter than this contributes no extra anchor.
+        smooth_frames: median filter width, in f0 frames.
+        octave_st: a frame this far from its local median is treated as a
+            tracker octave error and replaced (see `_guard_octaves`).
+
+    Returns:
+        ``(values, positions, n)`` where ``values`` and ``positions`` are
+        ``float32`` arrays of length ``max_anchors`` (zero-padded) and ``n`` is
+        the number of valid entries.  ``n == 0`` means the word has no voiced
+        frames at all -- a distinct state from "no hint provided", which the
+        `(B, n_phone)` state tensor keeps separate.
+    """
+    vals = np.zeros(int(max_anchors), dtype=np.float32)
+    poss = np.zeros(int(max_anchors), dtype=np.float32)
+    c = np.asarray(contour_hz, dtype=np.float64).reshape(-1)
+    if c.size == 0 or not np.isfinite(ref_hz) or ref_hz <= 0:
+        return vals, poss, 0
+    voiced = np.isfinite(c) & (c > 0)
+    if not voiced.any():
+        return vals, poss, 0
+
+    st = np.full(c.shape, np.nan, dtype=np.float64)
+    st[voiced] = 12.0 * np.log2(c[voiced] / float(ref_hz))
+    st = _masked_median(st, smooth_frames)
+    st = _guard_octaves(st, octave_st)
+
+    keep = voiced & np.isfinite(st)
+    frames = np.flatnonzero(keep)
+    if frames.size == 0:
+        return vals, poss, 0
+    n_frames = int(c.size)
+    # Normalised position inside the word: 0 at the first frame, 1 at the last.
+    denom = max(n_frames - 1, 1)
+    pos = frames.astype(np.float64) / denom
+    y = st[frames]
+
+    if y.size == 1:
+        chosen = [0]
+    else:
+        # A genuinely flat word collapses to one point at its mean.  The test
+        # is the contour's own *range*, not the deviation from the endpoint
+        # line: a straight 12 st ramp has zero deviation but is not flat.
+        if float(np.ptp(y)) <= tolerance_st:
+            chosen = []
+        else:
+            chosen = _prune_knots(
+                pos, y, _optimal_knots(pos, y, int(max_anchors)),
+                float(tolerance_st))
+    if not chosen:
+        n = 1
+        vals[0] = float(np.mean(y))
+        poss[0] = 0.5
+        return vals, poss, n
+    n = min(len(chosen), int(max_anchors))
+    for i, j in enumerate(chosen[:n]):
+        vals[i] = float(y[j])
+        poss[i] = float(min(max(pos[j], 0.0), 1.0))
+    return vals, poss, int(n)
+
+
+def load_pitch_anchors(path: str) -> Optional[int]:
+    """``hints.json`` -> ``words.pitch_anchors`` (the anchor count), or ``None``.
+
+    The count is part of the checkpoint contract: the same anchor slot index
+    means a different point of the contour if it changes, so the model compares
+    this against ``transformer.hint_pitch_anchors``.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        doc = json.load(f) or {}
+    value = (doc.get("words") or {}).get("pitch_anchors")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def slot_bucket(slots, n_buckets: int = DEFAULT_SLOT_BUCKETS):
     """Log2 duration buckets for word slots (code frames); ``0`` = absent.
 

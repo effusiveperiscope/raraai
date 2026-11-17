@@ -93,6 +93,14 @@ def channel_deltas(net, batches):
 @torch.no_grad()
 def level_sweep(net, batch, channel):
     """CE as one channel's level goes over its whole table (0 = absent)."""
+    if (channel == "pitch"
+            and getattr(net, "hint_pitch_mode", "table") == "anchors"):
+        # Hints V2 anchors are continuous, not a level table.  `hint_channel_deltas`
+        # still measures the channel (it drops `hint_pitch_state`), and a
+        # semitone sweep belongs in `scratch/hint_knob_report.py --shift pitch=`.
+        print("pitch: anchors mode has no level table -- sweep skipped "
+              "(use hint_knob_report.py --shift 'pitch=-4,-2,2,4')")
+        return []
     key, n_levels = {
         "intensity": ("hint_int", net.n_intensity_levels),
         "register": ("hint_reg", net.n_register_levels),

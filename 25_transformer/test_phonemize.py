@@ -342,7 +342,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument('--expect', action='append', default=None,
         help='substring that must appear in the text-path phone string '
              '(repeatable; e.g. --expect REH1D)')
+    parser.add_argument('--regress', action='store_true',
+        help='run the phonemizer regression table (hyphenated compounds, '
+             'read present/past, for/four, typographic apostrophes, the -day '
+             'family); pure CPU, no audio or aligner')
     return parser.parse_args(argv)
+
+
+#: ``(text, needle, should_contain)`` -- the bugs the phonemizer has actually
+#: shipped (see AGENTS.md "Heteronyms" and `horsephonemizer.py`).  Kept here so a
+#: dictionary or g2p_en change cannot silently undo them.
+REGRESSIONS = (
+    # Hyphenated compounds: g2p_en sends the whole token to its neural
+    # fallback, which emitted "well-cowner" / "twenty-own" / "self-see-see-o".
+    ('Top-notch', 'TAA1P-NAA1CH', True),
+    ('well-known', 'WEH1L-NOW1N', True),
+    ('twenty-one', 'TWEH1NTIY0-WAH1N', True),
+    ('self-esteem', 'SEH1LF-AH0STIY1M', True),
+    ('state-of-the-art', 'STEY1T-AH1V-DHAH0-AA1RT', True),
+    # ...and the non-compound form is unchanged.
+    ('notch', 'NAA1CH', True),
+    # g2p_en's READ homograph table is inverted (VBD -> the *present* vowel),
+    # so the present tense always lost without a dictionary pin.
+    ('I read books.', 'RIY1D', True),
+    ('I have read it.', 'REH1D', True),
+    # "for" is a function word and must not be stressed like "four".
+    ('I bought it for you.', 'FAO0R', True),
+    ('I have four apples.', 'FAO1R', True),
+    ('I bought it for you.', 'FAO1R', False),
+    # Typographic apostrophes are not in g2p_en's [a-z'] sanitiser, so the
+    # token becomes "dont" and misses the dictionary entirely.
+    ('don\u2019t', 'DOW1NT', True),
+    # The -day family is pinned to EY2 (cmudict variant 1 is IY0).
+    ('Monday, Tuesday.', 'DEY2', True),
+)
+
+
+def run_regressions(fe: FeatureExtractor, checks: Checks) -> None:
+    print_header('PHONEMIZER REGRESSIONS')
+    for text, needle, want in REGRESSIONS:
+        got = fe.hphzr.phonemize_sentence(text)
+        ok = (needle in got) == bool(want)
+        checks.check(ok, f'{text!r} {"contains" if want else "lacks"} '
+                         f'{needle!r}', '' if ok else f'got {got!r}')
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -379,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     for text in texts:
         phones, ids = run_text_path(fe, text, checks)
         text_results.append((text, phones, ids))
+
+    if args.regress:
+        run_regressions(fe, checks)
 
     if args.expect:
         print_header('EXPECT CHECKS (text path)')

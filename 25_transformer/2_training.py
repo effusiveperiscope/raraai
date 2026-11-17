@@ -577,7 +577,10 @@ class TrainModule(pl.LightningModule):
             return None
         off = dict(batch)
         off["hint_int"] = torch.zeros_like(batch["hint_int"])
-        for key in ("hint_reg", "hint_pitch", "hint_slot"):
+        for key in ("hint_reg", "hint_pitch", "hint_slot",
+                    # Hints V2 anchors: state 0 is the trained absent path.
+                    "hint_pitch_val", "hint_pitch_pos", "hint_pitch_n",
+                    "hint_pitch_state", "hint_phone_frac"):
             if batch.get(key) is not None:
                 off[key] = torch.zeros_like(batch[key])
         if batch.get("hint_sem_valid") is not None:
@@ -2074,7 +2077,10 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
     # need: the *widths* come from hints_json, so a different hints.json would
     # silently reinterpret every stored level id.
     has_hints = any(k in state_dict for k in ("net.int_emb.weight",
-                                              "net.pitch_emb.weight"))
+                                              "net.pitch_emb.weight",
+                                              "net.slot_emb.weight",
+                                              "net.int_dir",
+                                              "net.pitch_val_dir"))
     has_mono = "net.int_dir" in state_dict
     if has_hints and not net.hints:
         raise SystemExit(
@@ -2118,6 +2124,42 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
         print(f"NOTE: {message}")
 
     if has_hints and net.hints:
+        # ``transformer.hint_pitch_mode`` swaps the whole pitch representation:
+        #   table   -> (n_pitch_levels+2, H) per-phone level embedding (v1);
+        #   anchors -> per-slot directions over up to A word anchors (v2).
+        # Both directions drop trained weights, so neither may happen silently.
+        has_pitch_table = "net.pitch_emb.weight" in state_dict
+        has_pitch_anchor = "net.pitch_val_dir" in state_dict
+        if net.hint_pitch_mode == "anchors" and has_pitch_table:
+            message = (f"{source} stores the v1 per-phone pitch level table "
+                       f"(net.pitch_emb.weight), but this model uses "
+                       f"transformer.hint_pitch_mode=anchors: the table is "
+                       f"dropped and the anchor directions start at zero, so "
+                       f"the pitch channel has no effect until it is trained.")
+            if strict:
+                raise SystemExit(
+                    f"ERROR: {message}  Use --transfer_from {source} instead of "
+                    f"--resume_from, or set hint_pitch_mode: table to evaluate "
+                    f"that checkpoint.")
+            print(f"NOTE: {message}")
+        if net.hint_pitch_mode == "table" and has_pitch_anchor:
+            raise SystemExit(
+                f"ERROR: {source} has the Hints V2 pitch-anchor parameters "
+                f"(net.pitch_val_dir / net.pitch_absent), but this model was "
+                f"built with transformer.hint_pitch_mode=table.  Set "
+                f"hint_pitch_mode: anchors and hint_pitch_anchors to the "
+                f"trained value "
+                f"({int(state_dict['net.pitch_val_dir'].shape[0])}).")
+        if net.hint_pitch_mode == "anchors" and has_pitch_anchor:
+            have = int(state_dict["net.pitch_val_dir"].shape[0])
+            if have != net.hint_pitch_anchors:
+                raise SystemExit(
+                    f"ERROR: {source} stores {have} pitch anchors per word, but "
+                    f"transformer.hint_pitch_anchors={net.hint_pitch_anchors}.  "
+                    f"Anchor slot i means a different point of the word's "
+                    f"contour at a different count, so the ids cannot be "
+                    f"reinterpreted.  Set hint_pitch_anchors: {have} and use a "
+                    f"corpus built with --pitch-anchors {have}.")
         tables = [("net.int_emb.weight", net.int_emb),
                   ("net.reg_emb.weight", net.reg_emb),
                   ("net.pitch_emb.weight", net.pitch_emb),

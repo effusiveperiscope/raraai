@@ -238,9 +238,20 @@ def run_arm(net, net_g, items, labels, args, device, collator,
             batch[key] = torch.full_like(batch[key], int(level))
         elif shift is not None:
             skey, delta, smax = shift
-            cur = batch[skey].long()
-            batch[skey] = torch.where(
-                cur > 0, (cur + delta).clamp(1, smax), cur)
+            if (skey == "hint_pitch"
+                    and getattr(net, "hint_pitch_mode", "table") == "anchors"):
+                # Continuous anchors: the delta is in semitones and applies to
+                # every *present* anchor slot (an unvoiced word keeps n=0).
+                val = batch.get("hint_pitch_val")
+                if val is not None and val.numel():
+                    num = batch["hint_pitch_n"].clamp(max=val.shape[-1])
+                    mask = (torch.arange(val.shape[-1]).view(1, 1, -1)
+                            < num.unsqueeze(-1)).to(val.dtype)
+                    batch["hint_pitch_val"] = val + mask * float(delta)
+            else:
+                cur = batch[skey].long()
+                batch[skey] = torch.where(
+                    cur > 0, (cur + int(round(delta))).clamp(1, smax), cur)
         hint_arg = {k: (v.to(device) if torch.is_tensor(v) else v)
                     for k, v in batch.items()}
         # `--gen_scale` lets the model run *past* the reference length, which a
@@ -384,7 +395,7 @@ def main(argv=None) -> int:
             if name not in CHANNELS:
                 raise SystemExit(f"--shift: unknown channel {name!r}; choose "
                                  f"from {sorted(CHANNELS)}")
-            shift_spec[name] = [int(v) for v in deltas.split(",") if v.strip()]
+            shift_spec[name] = [float(v) for v in deltas.split(",") if v.strip()]
         args.shift = shift_spec
 
     val_filelist = args.val_filelist or config.train.val_filelist
@@ -479,7 +490,16 @@ def main(argv=None) -> int:
     for channel in channels:
         key = CHANNELS[channel]
         max_level = level_count(net, channel)
-        if args.levels.strip() in ("none", "skip"):
+        anchors_pitch = (channel == "pitch"
+                         and getattr(net, "hint_pitch_mode", "table") == "anchors")
+        if anchors_pitch:
+            # Anchors are continuous: there is no level table to sweep.  Use
+            # `--shift pitch=-4,-2,2,4` (semitones) instead.
+            levels = []
+            if args.levels.strip() not in ("none", "skip"):
+                print("pitch: anchors mode has no level table -- use --shift "
+                      "pitch=-4,-2,2,4 (deltas in semitones)\n")
+        elif args.levels.strip() in ("none", "skip"):
             levels = []                       # shift-only run
         elif args.levels.strip() == "all":
             levels = list(range(0, max_level + 1))

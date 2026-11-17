@@ -303,6 +303,35 @@ sampled clips). So `features.attach_punctuation` puts it back:
   `[..., 8]`. `keep_punctuation` drops characters the tokenizer has no id for
   (`;`, `:`, Unicode quotes) so they never become `[UNK]`.
 
+**The two phone paths are identical only if the aligner's tokens are mapped back
+to the transcript's.** `attach_punctuation` also stores **`seg_idx`** (the
+indices into `text.split()` an item covers, a punctuation-only segment being
+absorbed by the preceding word), and `phonemize_items` phonemizes *those*
+tokens one at a time with sentence-level tags. That matters for two reasons:
+
+- **Internal punctuation is destroyed by `clean_token`.** `top-notch` becomes
+  `topnotch`, which is absent from both the hand dictionary and cmudict, so it
+  takes g2p_en's neural fallback; `--phones_from transcript` writes
+  `T AA1 P - N AA1 CH`. The old code only used the transcript's own tokens when
+  `len(text.split()) == len(items)`, i.e. it silently fell back to the stripped
+  tokens whenever the transcript contained a standalone punctuation token — and
+  then the phones disagreed with the corpus's, so `word_index_for_phones`
+  dropped the clip's word hints. Measured on the V2 rebuild: **3 546 of 151 653
+  clips (2.3 %)** were dropped for this reason.
+- **The word-count guard must count aligner words, not whitespace tokens.**
+  `word_index_for_phones` compares against `features.transcript_words(text)`
+  (one entry per word-bearing segment). `len(text.split())` is one too high for
+  every `—` / `--` / `...` token, which alone rejected 2.4 % of Genshin clips.
+
+After both fixes, `phonemize_text(t)`, `align + phonemize_items(t)` and the
+stored `phone_ids` are byte-identical (verified on 20 clips, including
+standalone-punctuation and hyphenated ones), and word hints cover **99.92 %** of
+`data/genshin_plus_extras`. The remainder cannot be aligned: no audio/transcript
+on this box, or a tokenizer-normalisation edge case (`*emphasis*` and `"quoted"`
+phone strings decode with `[UNK]`, so `_token_spans` refuses to guess word
+boundaries). Those clips keep their clip-level hints and simply have no word
+fields, which the dataset reads as the trained "absent" pitch/timing state.
+
 `data/base2` was built **before** this fix, so its `phone_ids` have no
 punctuation at all; rebuild them with `--only phones` (cheap, no codec) before a
 fresh stage-2 run so the text distribution matches the base checkpoint.
@@ -1230,7 +1259,7 @@ obvious place for them):
 
 | register | `n_levels` equal-frequency bins from `hints.json`, fitted on the **deviation from the speaker's median** (v0.9; see below) | encoder |
 | semantic | 384-d bge vector -> `Linear(384, H)` | encoder + decoder |
-| word pitch | 8 voiced bins (2 st cuts in [-6, +6], saturating) + 1 unvoiced (`hint_pitch_edges`, fixed) | encoder, per phone |
+| word pitch | **v2 (default): 3 per-word anchors** `(value st, position)` repeated over the word's phones, plus the phone's position in the word; **v1: 8 voiced bins** (2 st cuts in [-6, +6]) + 1 unvoiced | encoder, per phone |
 
 | word timing | 8 log2 duration buckets (`n_slot_buckets`, fixed) | encoder, per phone |
 
@@ -1368,6 +1397,56 @@ Two switches fix the representation (full measurements:
   `load_submodule_prefix` is quiet, so a post-norm/monotone checkpoint loaded
   into a model without those flags silently loses the tensors;
   `eval_stage2_wer.load_transformer_weights` now raises instead.
+
+### Pitch anchors (stage 2, Hints V2)
+
+`transformer.hint_pitch_mode` selects the word-pitch representation:
+
+- **`table`** — the v1 layout: one level id per phone, `(n_pitch_levels+2, H)`
+  `pitch_emb`. Kept as the constructor default so every pre-V2 checkpoint stays
+  loadable; evaluate an old run with this.
+- **`anchors`** (shipped in `configs/transformer.yaml`) — each word's f0 contour
+  is reduced to at most `hint_pitch_anchors` (**3**) `(value, position)` points
+  and the whole vector is **repeated over the word's phones**, together with
+  each phone's fractional position inside the word. The model encodes it
+  monotonically (`dir_val[a] * tanh(st/6) + dir_pos[a] * (pos-0.5)`, per-slot
+  nulls for unused slots, plus separate absent and unvoiced vectors).
+
+Why: v1 stored one voiced **mean** per word — measured on Genshin words of >= 8
+code frames it reconstructs the contour to 2.1 st, 3 anchors to 0.7 st, and
+anchors beat uniformly spaced samples at equal count. But projecting anchors to
+one value per phone is worth nothing beyond 2 (1.62 st) because a 320-440 ms
+word averages 2.5 phones — hence the repeat-over-phones vector. The detector
+(`hints.levels.detect_pitch_anchors`) is an exact DP over knot positions; it
+reconstructs to **0.87 st** on the 885-word gate (the word mean: 2.09).
+
+Contract and reload cost:
+
+- `.cond` v2 adds `pitch_anchors_st` `(n_word, A)`, `pitch_anchors_pos`
+  `(n_word, A)` and `pitch_anchor_n` `(n_word,)` (`0` = the word is unvoiced).
+  The v1 fields are still written; a v1 `.cond` is read as **one anchor at
+  pos 0.5**, so a half-rebuilt corpus trains.
+- `A` is part of the checkpoint contract (`hints.json` -> `words.pitch_anchors`,
+  `check_special_layout` compares it); `--resume_from` across `table`/`anchors`
+  is refused in both directions, `--transfer_from` table→anchors is a NOTE
+  (directions start at zero).
+- Pitch stays encoder-only; the timing channel is unchanged. `phone_ids` do
+  change (the phonemizer fixes below), so rebuilding is
+  `2_preprocess.py --only phones` + one `hints/build.py --words
+  --pitch-anchors 3`, plus a fresh `exp_name`. No stage-1 work.
+- `scratch/stage2_repl.py` derives the mode/count from the checkpoint, and
+  `j` shifts anchors in **semitones**. `hint_knob_report.py --shift
+  pitch=-4,-2,2,4` is the semitone sweep (`hint_channel_probe.py` skips its
+  level sweep in anchors mode; `hint_channel_deltas` still drops the channel).
+
+Phonemizer fixes shipped with it (see `HINTS_PLAN.md` §10):
+hyphenated compounds were going through g2p_en's neural fallback
+(`well-known` -> `WEH1L K AO1 N ER0`; 3.9 % of Genshin clips), typographic
+apostrophes turned `don’t` into `dont` (1.9 % of Expresso tokens), `READ/VB`
+was pinned to the present vowel (`RIY1D`; g2p_en's table is inverted) and `FOR`
+to `F AO0 R` (it used to be identical to `FOUR`). `scratch/audit_oov.py`
+generates the remaining OOV list per filelist; `test_phonemize.py --regress`
+and `test_pitch_anchors.py` guard all of it.
 
 
 ---
@@ -1779,6 +1858,16 @@ Two switches fix the representation (full measurements:
     needs `hints/build.py` to have written its `.cond` files (the dataset degrades
     a missing one to "no hints", counting them for the one-time
     `Hints: N without a .cond` print).
+
+    **V2 adds a second, independent layout switch:** `transformer.hint_pitch_mode`
+    (`table` vs `anchors`) and `hint_pitch_anchors` (the anchor count). They
+    change the *pitch* parameter set only, and `check_special_layout` refuses a
+    mismatch in both directions (anchors→table is fatal: the trained directions
+    would be dropped; table→anchors is the intended `--transfer_from` warm start,
+    reported as a NOTE). `hints.json`'s `words.pitch_anchors` is compared against
+    the config, because anchor slot `i` means a different point of the contour at
+    a different count and no shape check would catch a *reinterpretation*. See
+    §4 "Pitch anchors".
 
 22. **`hints=None` is not "no hints" for a hint-enabled model (Phase 0).**
     `generate`/`infill`/`encode`/`forward` resolve `None` (and

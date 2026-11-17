@@ -13,8 +13,12 @@
 # scaling, v0.5 EOS token, v0.6-fim / v0.7-fim2 span regeneration + length cond,
 # v0.8 conditioning hints, v0.9 relative register + zero-init tables,
 # v1.0 post-norm hint injection + guidance (ablations, off), v1.1 monotone
-# hint encoding + counterfactual margin (recipe: scratch/hints_v1_runs/).
-exp_name: transformer_v0.9
+# hint encoding + counterfactual margin (recipe: scratch/hints_v1_runs/),
+# v2.0 per-word pitch anchors (HINTS_PLAN.md §10).
+# The exp_name is deliberately *not* a v1 run's: 2_training.py auto-resumes
+# checkpoints_stage2/{exp_name}/last.ckpt, and a v1 (table) checkpoint cannot
+# be resumed into the anchor layout.
+exp_name: transformer_v2.0_anchors
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -57,7 +61,21 @@ transformer:
   semantic_dim: 384
   # Word-pitch cuts in semitones around the utterance's voiced median (fixed):
   # 8 voiced bins, then one explicit "unvoiced" class, then 0 = "absent".
+  # Only read when hint_pitch_mode: table.
   hint_pitch_edges: [-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0]
+  # ---- pitch representation (Hints V2) ------------------------------------
+  # table   -> v1: one level id per phone (8 voiced bins + unvoiced + absent).
+  # anchors -> up to `hint_pitch_anchors` (value, position) anchors per WORD,
+  #            repeated over the word's phones together with the phone's
+  #            position inside the word.  See HINTS_PLAN.md / dataset_codes.
+  # Why not one value per phone: measured on Genshin (words >= 8 code frames),
+  # the v1 word mean reconstructs the f0 contour to 2.1 st and 3 anchors to
+  # 0.7 st, but *projecting* 3 anchors onto one value per phone is no better
+  # than 2 (1.62 st) -- a 320-440 ms word has ~2.5 phones.  Hence the vector.
+  # The count is part of the checkpoint contract and must match the corpus.
+  # Changes the parameter set -> fresh exp_name + --transfer_from.
+  hint_pitch_mode: anchors
+  hint_pitch_anchors: 3
   # Word-duration buckets: log2 of the slot length in code frames.
   n_slot_buckets: 8
   # Per-channel dropout (training items only); a dropped channel is level 0 /
@@ -84,8 +102,9 @@ transformer:
   # true replaces the free (n_levels+1, H) rows with one learned direction per
   # channel times z(level) in [-1, 1] plus a trained "absent" vector.  This is
   # what made intensity a monotone dial (HINTS_V1_PLAN.md §5.8).  New parameter
-  # set -> fresh exp_name; stays false so pre-v1.1 checkpoints stay resumable.
-  hint_monotone: false
+  # set -> fresh exp_name.  V2 warms up from hints_v1_p4_final_mono1, which is
+  # monotone, so this must stay true for the transfer to load the directions.
+  hint_monotone: true
   # ---- classifier-free guidance over the hints (v1.0, off) ----------------
   # logits = uncond + w*(cond - uncond), uncond = the trained null state.
   # w=1 is the identity.  Swept and negative (w=1 best), so it ships off.
@@ -449,9 +468,10 @@ train:
   # main one (two live graphs OOM at the shipped batch size).  Keep
   # counterfactual_weight well below 1 (~5 % averaged at 0.2 x rate 0.25).
   # Watch train_cf_gap rise towards `margin` (HINTS_V1_PLAN.md §5.7-5.8).
-  counterfactual_margin: 0.0
+  # V2 uses the v1.1 recipe's values (the run this one warm-starts from).
+  counterfactual_margin: 0.05
   counterfactual_weight: 0.2
-  counterfactual_rate: 0.0
+  counterfactual_rate: 0.25
   # Which clip-level channels to shift (they have a level to move).
   counterfactual_channels: "intensity,register"
 

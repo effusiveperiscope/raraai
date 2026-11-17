@@ -889,6 +889,25 @@ class Stage2REPL:
             if bool(tcfg.get("hint_decoder_proj", False)) != proj:
                 print(f"NOTE: hint_decoder_proj={proj} in {source}; using that.")
                 tcfg.hint_decoder_proj = proj
+            # Hints V2 pitch representation.  The anchor count is a parameter
+            # dimension, so a config that disagrees would fail to load; take it
+            # from the checkpoint like everything else here.
+            anchors = has("pitch_val_dir")
+            if (str(tcfg.get("hint_pitch_mode", "table") or "table")
+                    != ("anchors" if anchors else "table")):
+                print(f"NOTE: hint_pitch_mode="
+                      f"{'anchors' if anchors else 'table'} in {source}; using "
+                      f"that.")
+                tcfg.hint_pitch_mode = "anchors" if anchors else "table"
+            if anchors:
+                for k in keys:
+                    if k == "pitch_val_dir" or k.endswith(".pitch_val_dir"):
+                        count = int(state[k].shape[0])
+                        if int(tcfg.get("hint_pitch_anchors", 3) or 3) != count:
+                            print(f"NOTE: hint_pitch_anchors={count} in "
+                                  f"{source}; using that.")
+                            tcfg.hint_pitch_anchors = count
+                        break
 
     def _generator(self):
         """The frozen stage-1 Generator, or ``None`` when audio is off."""
@@ -1131,14 +1150,26 @@ class Stage2REPL:
             base = self._null_base_hints(n_phone)
 
         n_int, n_reg, n_pitch, n_slot = self._hint_widths()
+        anchors = getattr(self.net, "hint_pitch_mode", "table") == "anchors"
+        A = int(getattr(self.net, "hint_pitch_anchors", 3))
+
+        def resize(v, tail=()):
+            out = torch.zeros((n_phone,) + tuple(tail),
+                              dtype=(v.dtype if v is not None else torch.float32))
+            if v is not None and v.numel():
+                m = min(n_phone, int(v.shape[0]))
+                out[:m] = v[:m].to(out.dtype)
+            return out
+
         # Per-phone arrays must match this generation's phone sequence.
-        for key in ("hint_pitch", "hint_slot"):
-            v = base.get(key)
-            out = torch.zeros(n_phone, dtype=torch.long)
-            if v is not None and int(v.numel()):
-                m = min(n_phone, int(v.numel()))
-                out[:m] = v[:m].long()
-            base[key] = out
+        base["hint_pitch"] = resize(base.get("hint_pitch"))
+        base["hint_slot"] = resize(base.get("hint_slot"))
+        if anchors:
+            base["hint_pitch_val"] = resize(base.get("hint_pitch_val"), (A,))
+            base["hint_pitch_pos"] = resize(base.get("hint_pitch_pos"), (A,))
+            base["hint_pitch_n"] = resize(base.get("hint_pitch_n"))
+            base["hint_pitch_state"] = resize(base.get("hint_pitch_state"))
+            base["hint_phone_frac"] = resize(base.get("hint_phone_frac"))
         if base.get("hint_int") is None:
             base["hint_int"] = torch.zeros((), dtype=torch.long)
         if base.get("hint_reg") is None:
@@ -1156,11 +1187,35 @@ class Stage2REPL:
             base["hint_reg"] = torch.tensor(
                 max(0, min(n_reg, int(self.hint_register))), dtype=torch.long)
 
-        # Per-word shifts (pitch is bucketed at 2 st/bin).
-        dp = int(round(float(self.hint_pitch_st) / 2.0))
-        if dp and n_pitch:
-            base["hint_pitch"] = self._shift_levels(
-                base["hint_pitch"], dp, n_pitch)
+        # Per-word shifts: anchors are continuous semitones, the v1 table is
+        # bucketed at 2 st/bin.
+        if anchors:
+            if float(self.hint_pitch_st):
+                present = base["hint_pitch_state"] == 1
+                if bool(present.any()):
+                    num = base["hint_pitch_n"].clamp(max=A)
+                    mask = (torch.arange(A).view(1, A)
+                            < num.unsqueeze(-1)).to(torch.float32)
+                    base["hint_pitch_val"] = (base["hint_pitch_val"]
+                                              + mask * float(self.hint_pitch_st))
+                else:
+                    # Arbitrary text carries no `.cond`: synthesise one anchor
+                    # so the control still does something (the v1 path fills
+                    # the middle bucket for the same reason).
+                    base["hint_pitch_state"] = torch.ones(n_phone, dtype=torch.long)
+                    base["hint_pitch_n"] = torch.ones(n_phone, dtype=torch.long)
+                    val = torch.zeros(n_phone, A)
+                    val[:, 0] = float(self.hint_pitch_st)
+                    base["hint_pitch_val"] = val
+                    pos = torch.zeros(n_phone, A)
+                    pos[:, 0] = 0.5
+                    base["hint_pitch_pos"] = pos
+                    base["hint_phone_frac"] = torch.full((n_phone,), 0.5)
+        else:
+            dp = int(round(float(self.hint_pitch_st) / 2.0))
+            if dp and n_pitch:
+                base["hint_pitch"] = self._shift_levels(
+                    base["hint_pitch"], dp, n_pitch)
         if self.hint_slot_shift and n_slot:
             base["hint_slot"] = self._shift_levels(
                 base["hint_slot"], int(self.hint_slot_shift), n_slot)
@@ -1581,6 +1636,11 @@ class Stage2REPL:
             if v is not None:
                 out[key] = v[0].detach().cpu()
         for key in ("hint_pitch", "hint_slot"):
+            v = batch.get(key)
+            if v is not None:
+                out[key] = v[0, :n_phone].detach().cpu()
+        for key in ("hint_pitch_val", "hint_pitch_pos", "hint_pitch_n",
+                    "hint_pitch_state", "hint_phone_frac"):
             v = batch.get(key)
             if v is not None:
                 out[key] = v[0, :n_phone].detach().cpu()

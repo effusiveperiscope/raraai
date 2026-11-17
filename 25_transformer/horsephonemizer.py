@@ -44,6 +44,23 @@ def _split_punctuation(s):
     return s[:start], s[start:end], s[end:]
 
 
+def _keep_punct(s):
+    """Drop the punctuation the g2pen tokenizer has no id for (see `_KEEP_PUNCT`)."""
+    return ''.join(ch for ch in s if ch in _KEEP_PUNCT)
+
+
+#: Hyphen-like characters that glue a compound into one token.
+_COMPOUND_SEP = re.compile(r'[-\u2010\u2011\u2012\u2013\u2014]')
+
+#: Typographic apostrophes -> ASCII.  g2p_en's sanitiser keeps only ``[a-z']``
+#: (ASCII), so ``don’t`` with U+2019 becomes ``dont`` -- absent from both the
+#: hand dictionary and cmudict, i.e. another silent trip through the neural
+#: fallback (found by ``scratch/audit_oov.py``: 1.9 % of Expresso tokens).
+_APOSTROPHES = str.maketrans({
+    "\u2019": "'", "\u2018": "'", "\u02bc": "'", "\uff07": "'", "\u00b4": "'",
+})
+
+
 class HorsePhonemizer:
     """g2p_en + a hand-written ARPAbet dictionary, with heteronym support.
 
@@ -120,10 +137,17 @@ class HorsePhonemizer:
         return ' '.join(self._phonemize_word(w, t) for w, t in zip(words, tags))
 
     def _phonemize_word(self, s, tag=None):
-        """Phonemize one token: hand dictionary > POS-aware heteronym > g2p_en."""
+        """Phonemize one token: hand dictionary > compound > heteronym > g2p_en."""
+        # Typographic apostrophes are not in `[a-z']`, so g2p_en's sanitiser
+        # deletes them (``don’t`` -> ``dont``) and the token misses both the
+        # dictionary and cmudict.  Normalise before any lookup.
+        s = str(s).translate(_APOSTROPHES)
         pron = self._dictionary_pronunciation(s, tag)
         if pron is not None:
             # Hand-written overrides always win, exactly as before.
+            return pron
+        pron = self._compound_pronunciation(s, tag)
+        if pron is not None:
             return pron
         if tag is not None:
             pron = self._homograph_pronunciation(s, tag)
@@ -131,6 +155,48 @@ class HorsePhonemizer:
                 return pron
         p = [arp for arp in g2p(s) if arp != ' ']
         return ''.join(p)
+
+    def _compound_pronunciation(self, s, tag=None):
+        """Phonemize a hyphenated compound part by part, else ``None``.
+
+        ``g2p_en`` tokenises with ``TweetTokenizer``, which keeps ``top-notch``
+        as **one** token.  That token is not in cmudict, so it falls through to
+        ``G2p.predict()`` -- the character-level neural fallback -- which emits
+        phonotactically plausible garbage rather than failing:
+
+            Top-notch        -> T AA1 P N AH0 T AO2 K
+            well-known       -> WEH1L K AO1 N ER0        ("well-cowner")
+            twenty-one       -> TWEH1N TIY0 OW2 N        ("twenty-own")
+            state-of-the-art -> STEY1T HH AO2 R F T IH0 D
+            self-esteem      -> S EH1L F S IY1 T S IY0
+
+        (``notch`` alone is ``N AA1 CH``, so the dictionary is not the problem.)
+        Measured on the shipped filelists: 3.9 % of Genshin clips, 2.1 %
+        Expresso, 1.3 % VCTK and 0.8 % MLP contain at least one such token, and
+        they get a *wrong word*, not a wrong vowel.  The aligner path is broken
+        differently (its ``clean_token`` strips the hyphen, giving ``Topnotch``,
+        which is also OOV), but both paths phonemize the *transcript's* own
+        tokens, so splitting here fixes both.
+
+        The whole token was already tried against the hand dictionary by
+        ``_dictionary_pronunciation``, so a pinned ``TOP-NOTCH`` still wins.
+        Hyphens are kept in the output: the g2pen tokenizer has an id for ``-``
+        (905), and the aligner path already keeps it in ``_KEEP_PUNCT``.
+        """
+        prefix, word, suffix = _split_punctuation(s.strip())
+        parts = _COMPOUND_SEP.split(word)
+        if len(parts) < 2:
+            return None
+        pieces = []
+        for part in parts:
+            if not part:
+                continue
+            if pieces:
+                pieces.append('-')
+            pieces.append(self._phonemize_word(part, tag))
+        if not pieces:
+            return None
+        return _keep_punct(prefix) + ''.join(pieces) + _keep_punct(suffix)
 
     def _dictionary_pronunciation(self, s, tag=None):
         """Hand-dictionary lookup for `s`, preferring a POS-qualified key.
@@ -156,9 +222,7 @@ class HorsePhonemizer:
         # Drop the punctuation g2p_en would have deleted (see `_KEEP_PUNCT`), so
         # the dictionary path cannot emit a character the tokenizer has no id
         # for and the two phonemizer paths keep the same shape.
-        prefix = ''.join(ch for ch in prefix if ch in _KEEP_PUNCT)
-        suffix = ''.join(ch for ch in suffix if ch in _KEEP_PUNCT)
-        return prefix + pron + suffix
+        return _keep_punct(prefix) + pron + _keep_punct(suffix)
 
     def _dict_pronunciation(self, s_up, tag=None):
         """Dictionary value for the bare-word key `s_up`, POS-qualified first."""

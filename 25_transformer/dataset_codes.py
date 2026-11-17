@@ -47,6 +47,13 @@ the corpus rebuilt:
     hint_pitch    (B, N)    long   per-phone word-pitch level
                                    (0 absent, 1..P voiced bins, P+1 unvoiced)
     hint_slot     (B, N)    long   per-phone word-duration bucket (0 absent)
+    hint_pitch_val(B, N, A) float  word's pitch-anchor values, repeated over
+                                   its phones (Hints V2; semitones)
+    hint_pitch_pos(B, N, A) float  anchor positions, fraction of the word
+    hint_pitch_n  (B, N)    long   valid anchors for this phone's word
+                                   (0 = the word has no voiced frames)
+    hint_pitch_state(B, N)  long   0 absent, 1 voiced, 2 unvoiced
+    hint_phone_frac(B, N)   float  phone's position inside its word, 0..1
 
 The per-phone arrays are gathered from the word-level fields via
 ``phone_word_idx``, and cropped in lockstep with ``max_phone_length``.  Edges for
@@ -54,6 +61,16 @@ intensity/register come from ``hints.json`` (equal-frequency quantiles fitted by
 ``hints/build.py``); word pitch and word slots use *fixed* cuts
 (``hints.levels.DEFAULT_PITCH_EDGES`` / ``DEFAULT_SLOT_BUCKETS``) so a level id
 means the same thing in every corpus and in an inference UI.
+
+**Pitch is stored twice on purpose.**  ``hint_pitch`` is the v1 level id
+(``transformer.hint_pitch_mode: table``); ``hint_pitch_val``/``pos``/``n`` are
+the V2 anchors, repeated over each phone because the encoder input is per phone
+and a word's contour cannot be represented by one scalar per phone (measured:
+3 anchors projected to one value per phone is no better than 2).  Every phone
+of a word carries the whole anchor vector, and ``hint_phone_frac`` makes the
+phone's place in that contour explicit.  A v1 ``.cond`` (no anchor keys) is
+read as **one anchor** at ``pos=0.5`` with the old word mean, so old corpora
+keep training.
 
 Dropout is what keeps this from becoming an oracle/voice-conversion renderer:
 ``hint_dropout`` zeroes each channel independently per item and
@@ -247,6 +264,10 @@ class CodeDataset(Dataset):
             "hint_int": 0, "hint_reg": 0,
             "hint_sem": None, "hint_sem_valid": False,
             "hint_pitch": None, "hint_slot": None,
+            # Hints V2 pitch anchors (repeat-over-phones representation).
+            "hint_pitch_val": None, "hint_pitch_pos": None,
+            "hint_pitch_n": None, "hint_pitch_state": None,
+            "hint_phone_frac": None,
         }
         path = cond_path_for(phone_ids_path)
         if not os.path.exists(path):
@@ -288,10 +309,59 @@ class CodeDataset(Dataset):
                     idx = word.numpy()
                     out["hint_pitch"] = torch.as_tensor(pitch_w[idx].astype(np.int64))
                     out["hint_slot"] = torch.as_tensor(slot_w[idx].astype(np.int64))
+                    self._load_pitch_anchors(cond, idx, out)
 
         if self.is_train:
             self._dropout_hints(out)
         return out
+
+    def _load_pitch_anchors(self, cond, idx, out) -> None:
+        """Expand a word's pitch anchors over its phones (Hints V2).
+
+        Every phone of a word receives the word's whole anchor vector
+        (``(n_phone, A)``), plus its own normalised position inside the word, so
+        the encoder sees both the contour and where in it the phone sits.  One
+        scalar per phone cannot carry it: measured on Genshin, projecting 3
+        anchors to one value per phone is no better than projecting 2, because a
+        320-440 ms word averages ~2.5 phones.
+
+        A v1 ``.cond`` (no anchor keys) becomes one anchor at ``pos=0.5`` with
+        the old word mean, which is exactly the v1 behaviour.
+        """
+        n_word = int(idx.max()) + 1 if idx.size else 0
+        voiced = cond.get("pitch_word_voiced")
+        voiced_w = (voiced.bool().reshape(-1).numpy() if voiced is not None
+                    else np.zeros(n_word, dtype=bool))
+        if "pitch_anchors_st" in cond and "pitch_anchor_n" in cond:
+            a_st = cond["pitch_anchors_st"].float().numpy()
+            a_pos = cond["pitch_anchors_pos"].float().numpy()
+            a_n = cond["pitch_anchor_n"].long().reshape(-1).numpy()
+        else:
+            # v1 fallback: the word mean is the single anchor.
+            v1 = cond["pitch_word_st"].float().reshape(-1).numpy()
+            v1 = np.where(np.isfinite(v1), v1, 0.0)
+            a_st = v1[:, None].astype(np.float32)
+            a_pos = np.full_like(a_st, 0.5)
+            a_n = voiced_w.astype(np.int64)
+        if (a_st.ndim != 2 or a_st.shape[0] < n_word or a_pos.shape != a_st.shape
+                or a_n.shape[0] < n_word):
+            # A word field that does not describe this clip is dropped, not
+            # guessed (the n_phone check above already catches most of these).
+            return
+
+        counts = np.bincount(idx, minlength=n_word)
+        offsets = np.concatenate(([0], np.cumsum(counts)))[:-1]
+        rank = np.arange(idx.size) - offsets[idx]
+        frac = (rank + 0.5) / np.maximum(counts[idx], 1)
+        # state: 0 absent (dropped later), 1 voiced, 2 unvoiced.  Unvoiced is a
+        # *trained* state, distinct from "no hint provided" (see v1's unvoiced
+        # level; the whole point of the dropout design).
+        state = np.where(voiced_w[idx], 1, 2).astype(np.int64)
+        out["hint_pitch_val"] = torch.from_numpy(a_st[idx].astype(np.float32))
+        out["hint_pitch_pos"] = torch.from_numpy(a_pos[idx].astype(np.float32))
+        out["hint_pitch_n"] = torch.from_numpy(a_n[idx].astype(np.int64))
+        out["hint_pitch_state"] = torch.from_numpy(state)
+        out["hint_phone_frac"] = torch.from_numpy(frac.astype(np.float32))
 
     def _dropout_hints(self, out: Dict[str, object]) -> None:
         """Zero hint channels in-place (training only; see ``_load_hints``)."""
@@ -307,8 +377,15 @@ class CodeDataset(Dataset):
             out["hint_reg"] = 0
         if "semantic" in off:
             out["hint_sem_valid"] = False
-        if "pitch" in off and out["hint_pitch"] is not None:
-            out["hint_pitch"] = torch.zeros_like(out["hint_pitch"])
+        if "pitch" in off:
+            if out["hint_pitch"] is not None:
+                out["hint_pitch"] = torch.zeros_like(out["hint_pitch"])
+            # Hints V2: state 0 is the model's "absent" path; the value/position
+            # tensors are then ignored (they are left as-is, like a level id
+            # that a table would still index but never reach).
+            if out["hint_pitch_state"] is not None:
+                out["hint_pitch_state"] = torch.zeros_like(
+                    out["hint_pitch_state"])
         if "timing" in off and out["hint_slot"] is not None:
             out["hint_slot"] = torch.zeros_like(out["hint_slot"])
 
@@ -361,7 +438,9 @@ class CodeDataset(Dataset):
                                     sid=item.get("sid_raw", item["sid"]))
             # Per-phone hint arrays must be cropped in lockstep with the phones,
             # otherwise they would describe a different text than the model sees.
-            for key in ("hint_pitch", "hint_slot"):
+            for key in ("hint_pitch", "hint_slot", "hint_pitch_val",
+                        "hint_pitch_pos", "hint_pitch_n", "hint_pitch_state",
+                        "hint_phone_frac"):
                 if hint.get(key) is not None:
                     hint[key] = hint[key][: phone_ids.numel()]
 
@@ -405,10 +484,15 @@ class CodeDataset(Dataset):
 
 class CodeCollator:
     def __init__(self, config=None, phone_pad_id: int = 0, code_pad_id: int = 0):
+        # Hints V2: the anchor width comes from the config, so a v1 `.cond`
+        # (one anchor) and a v2 one (A anchors) can share a batch.
+        self.n_pitch_anchors = 3
         if config is not None:
             tcfg = getattr(config, "transformer", None)
             if tcfg is not None:
                 phone_pad_id = int(getattr(tcfg, "phone_pad_id", phone_pad_id))
+                self.n_pitch_anchors = int(
+                    tcfg.get("hint_pitch_anchors", 3) or 3)
         self.phone_pad_id = phone_pad_id
         self.code_pad_id = code_pad_id
 
@@ -442,6 +526,9 @@ class CodeCollator:
         has_hints = "hint_int" in batch[0]
         hint_int = hint_reg = hint_sem = hint_sem_valid = None
         hint_pitch = hint_slot = None
+        has_anchors = has_hints and batch[0].get("hint_pitch_val") is not None
+        hint_pitch_val = hint_pitch_pos = hint_pitch_n = None
+        hint_pitch_state = hint_phone_frac = None
         if has_hints:
             hint_int = torch.zeros(len(batch), dtype=torch.long)
             hint_reg = torch.zeros(len(batch), dtype=torch.long)
@@ -452,6 +539,17 @@ class CodeCollator:
                                    dtype=torch.float32)
             hint_pitch = torch.zeros(len(batch), max_phone, dtype=torch.long)
             hint_slot = torch.zeros(len(batch), max_phone, dtype=torch.long)
+        if has_anchors:
+            A = self.n_pitch_anchors
+            hint_pitch_val = torch.zeros(len(batch), max_phone, A,
+                                         dtype=torch.float32)
+            hint_pitch_pos = torch.zeros(len(batch), max_phone, A,
+                                         dtype=torch.float32)
+            hint_pitch_n = torch.zeros(len(batch), max_phone, dtype=torch.long)
+            hint_pitch_state = torch.zeros(len(batch), max_phone,
+                                           dtype=torch.long)
+            hint_phone_frac = torch.zeros(len(batch), max_phone,
+                                          dtype=torch.float32)
 
         for i, x in enumerate(batch):
             p = x["phone_ids"]
@@ -481,6 +579,19 @@ class CodeCollator:
                     n_h = min(int(pitch_hint.numel()), max_phone)
                     hint_pitch[i, :n_h] = pitch_hint[:n_h].long()
                     hint_slot[i, :n_h] = x["hint_slot"][:n_h].long()
+                if has_anchors:
+                    val = x.get("hint_pitch_val")
+                    if val is not None and val.numel() > 0:
+                        n_h = min(int(val.shape[0]), max_phone)
+                        a_h = min(int(val.shape[1]), hint_pitch_val.shape[2])
+                        hint_pitch_val[i, :n_h, :a_h] = val[:n_h, :a_h].float()
+                        hint_pitch_pos[i, :n_h, :a_h] = \
+                            x["hint_pitch_pos"][:n_h, :a_h].float()
+                        hint_pitch_n[i, :n_h] = x["hint_pitch_n"][:n_h].long()
+                        hint_pitch_state[i, :n_h] = \
+                            x["hint_pitch_state"][:n_h].long()
+                        hint_phone_frac[i, :n_h] = \
+                            x["hint_phone_frac"][:n_h].float()
 
         out = {
             "phone_ids": phone_ids,
@@ -506,5 +617,13 @@ class CodeCollator:
                 "hint_sem_valid": hint_sem_valid,
                 "hint_pitch": hint_pitch,
                 "hint_slot": hint_slot,
+            })
+        if has_anchors:
+            out.update({
+                "hint_pitch_val": hint_pitch_val,
+                "hint_pitch_pos": hint_pitch_pos,
+                "hint_pitch_n": hint_pitch_n,
+                "hint_pitch_state": hint_pitch_state,
+                "hint_phone_frac": hint_phone_frac,
             })
         return out

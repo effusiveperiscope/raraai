@@ -114,6 +114,33 @@ def _token_spans(pieces, joined, lengths):
     return spans
 
 
+def _mean_bins(values, n):
+    """Average a contour into ``n`` bins, ignoring unvoiced (0 / NaN) entries.
+
+    Used to bring a word's 100 Hz f0 span to the **code-frame** rate (25 Hz)
+    before anchor detection: the transformer generates pitch codes at that rate,
+    so a faster feature is not representable in the output and only adds
+    high-frequency wobble to the fit.
+    """
+    v = np.asarray(values, dtype=np.float64).reshape(-1)
+    if v.size == 0 or n <= 0:
+        return np.zeros(0)
+    edges = np.linspace(0, v.size, int(n) + 1)
+    out = np.zeros(int(n), dtype=np.float64)
+    for i in range(int(n)):
+        lo = int(round(edges[i]))
+        hi = int(round(edges[i + 1]))
+        lo = max(0, min(lo, v.size))
+        hi = max(lo, min(hi, v.size))
+        if hi <= lo:
+            out[i] = 0.0
+            continue
+        w = v[lo:hi]
+        w = w[np.isfinite(w) & (w > 0)]
+        out[i] = float(w.mean()) if w.size else 0.0
+    return out
+
+
 def _f0_span(f0, start_time, end_time, hop=160, sr=16000):
     """Slice a frame-level f0 contour to the frames centred in a word span.
 
@@ -238,6 +265,55 @@ def _aligner_keeps(ch):
     return cat.startswith('L') or cat.startswith('N')
 
 
+def transcript_words(text):
+    """Split a transcript into ``(word, punctuation)`` the way the aligner does.
+
+    The forced aligner's ``clean_token`` keeps only letters, digits and ``'``,
+    so a whitespace segment with no such character (a lone ``--``, ``...``, an
+    em dash) produces **no item**, while ``text.split()`` still counts it.  Any
+    check that compares "how many words does the transcript have" against the
+    aligner's item count must use this reduction, not ``len(text.split())``:
+    the raw count is one too high whenever the transcript contains a standalone
+    punctuation token, which on Genshin is 2.4 % of clips.
+
+    Punctuation is accumulated on the word it follows (a leading punctuation
+    run goes on the first word), which is exactly what
+    `attach_punctuation` does with it.
+
+    Returns:
+        List of ``(word, punctuation)`` pairs, in reading order.
+    """
+    return [(word, punct) for word, punct, _ in _transcript_segments(text)]
+
+
+def _transcript_segments(text):
+    """``(word, punctuation, segment indices)`` per aligner word.
+
+    Like `transcript_words`, but the third element lists the indices into
+    ``text.split()`` the word covers, so a caller can reproduce the
+    *transcript's* tokens (hyphens, apostrophes and all) for a word the aligner
+    stored in stripped form.  A punctuation-only segment is absorbed by the
+    preceding word (or by the first word when it leads), exactly like its
+    characters are.
+    """
+    pairs = []          # [word, punctuation, [segment index, ...]]
+    pending = []        # leading punctuation-only segments
+    for k, seg in enumerate(str(text or '').split()):
+        word = ''.join(ch for ch in seg if _aligner_keeps(ch))
+        punct = ''.join(ch for ch in seg if not _aligner_keeps(ch))
+        if not word:
+            if pairs:
+                pairs[-1][1] += punct
+                pairs[-1][2].append(k)
+            else:
+                pending.append(k)
+            continue
+        segs = pending + [k]
+        pending = []
+        pairs.append([word, punct, segs])
+    return [(word, punct, segs) for word, punct, segs in pairs]
+
+
 def attach_punctuation(text, items):
     """Put the punctuation the forced aligner strips back onto `items`.
 
@@ -255,6 +331,14 @@ def attach_punctuation(text, items):
     field, which `phonemize_items` appends to that word's phone string -- the
     same shape the whole-transcript path produces (``SPAY1K.`` rather than
     ``SPAY1K``).
+
+    It also stores ``seg_idx``, the indices into ``text.split()`` that the item
+    covers (see `_transcript_segments`), which is what lets `phonemize_items`
+    phonemize the **transcript's own** tokens instead of the aligner's stripped
+    ones.  Without it, any internal punctuation loses information: the aligner
+    turns ``top-notch`` into ``topnotch``, which is absent from both the hand
+    dictionary and cmudict, so the clip's phones disagree with the ones
+    ``--phones_from transcript`` wrote (and its word hints are dropped).
 
     Matching is positional: `text` is split on whitespace, each segment reduced
     with the aligner's own rule gives one word per item (CJK excepted, where
@@ -275,38 +359,33 @@ def attach_punctuation(text, items):
     """
     if not text or not items:
         return False
-    pairs = []  # (word, punctuation) in reading order
-    pending = ''  # punctuation seen before the first word
-    for seg in str(text).split():
-        word = ''.join(ch for ch in seg if _aligner_keeps(ch))
-        punct = ''.join(ch for ch in seg if not _aligner_keeps(ch))
-        if not word:
-            if pairs:
-                pairs[-1] = (pairs[-1][0], pairs[-1][1] + punct)
-            else:
-                pending += punct
-            continue
-        pairs.append((word, pending + punct))
-        pending = ''
+    pairs = _transcript_segments(text)
     if not pairs:
         return False
 
-    attached = []  # (item index, punctuation)
+    attached = []  # (first item index, last item index, punct, seg indices)
     idx = 0
-    for word, punct in pairs:
+    for word, punct, segs in pairs:
         target = word.lower()
+        first = idx
         consumed = ''
         while idx < len(items) and len(consumed) < len(target):
             consumed += str(items[idx].get('text', '')).lower()
             idx += 1
         if consumed != target:
             return False
-        attached.append((idx - 1, punct))
+        attached.append((first, idx - 1, punct, segs))
     if idx != len(items):
         return False
-    for i, punct in attached:
+    for first, last, punct, segs in attached:
         if punct:
-            items[i]['punct'] = items[i].get('punct', '') + punct
+            items[last]['punct'] = items[last].get('punct', '') + punct
+        if first != last:
+            # The aligner split this word over several items (CJK): there is no
+            # single transcript token to phonemize, so leave it to the per-item
+            # path rather than duplicating phones.
+            continue
+        items[last]['seg_idx'] = list(segs)
     return True
 
 
@@ -532,14 +611,15 @@ class FeatureExtractor:
 
         Args:
             items: Dicts as returned by `align`; ``text`` and the optional
-                ``punct`` are used.
+                ``punct`` / ``seg_idx`` are used.
             transcript: the text the items were aligned against.  When given and
-                it has one word per item, **its** words are phonemized (and no
-                ``punct`` is re-appended -- the punctuation is in the transcript
-                already), so the ids are exactly what `phonemize_text` returns
-                for that transcript.  Without it the items' own ``text`` fields
-                are used, with the punctuation `align` stripped from them put
-                back per item.
+                `align` mapped every item to transcript token(s), **those**
+                tokens are phonemized (one at a time, with sentence-level tags),
+                so the ids are exactly what `phonemize_text` returns for that
+                transcript -- including internal punctuation the aligner strips
+                (``top-notch`` stays a compound).  Without it the items' own
+                ``text`` fields are used, with the punctuation `align` stripped
+                from them put back per item.
 
         **The words are tokenized once, as a sentence**, exactly like
         `phonemize_text`; each item then gets a *slice* of that sequence. So
@@ -559,16 +639,39 @@ class FeatureExtractor:
         """
         texts = [str(it.get("text", "")) for it in items]
         use_transcript = False
+        preset = None               # phones straight from the transcript's own tokens
         if transcript is not None and str(transcript).strip():
-            words = str(transcript).split()
-            if len(words) == len(items):
-                texts, use_transcript = words, True
-        tags = self.hphzr.tag_words(texts)
+            if all(it.get("seg_idx") for it in items):
+                # ``align`` recorded which whitespace tokens of the transcript
+                # each item covers (`attach_punctuation`).  Phonemize *those*,
+                # token by token, so the phone string is literally what
+                # `phonemize_sentence` / `phonemize_text` produce for this
+                # transcript -- the aligner's stripped tokens would lose internal
+                # punctuation (``top-notch`` -> ``topnotch`` -> neural fallback).
+                tokens = str(transcript).split()
+                tags_t = self.hphzr.tag_words(tokens)
+                per_token = [self.hphzr.phonemize(tok, tag=t)
+                             for tok, t in zip(tokens, tags_t)]
+                # No empty-string filtering: the per-item join must reproduce
+                # ``' '.join(per_token)`` byte for byte, or the tokenizer sees a
+                # different string (it is not whitespace-normalising).
+                texts = [" ".join(tokens[k] for k in it["seg_idx"])
+                         for it in items]
+                preset = [" ".join(per_token[k] for k in it["seg_idx"])
+                          for it in items]
+                use_transcript = True
+            elif len(str(transcript).split()) == len(items):
+                texts, use_transcript = str(transcript).split(), True
+        tags = (self.hphzr.tag_words(texts) if preset is None
+                else [None] * len(texts))
         out = []
-        for item, text, tag in zip(items, texts, tags):
-            punct = ("" if use_transcript
-                     else self.keep_punctuation(item.get("punct", "")))
-            phones = self.hphzr.phonemize(text, tag=tag) + punct
+        for i, (item, text, tag) in enumerate(zip(items, texts, tags)):
+            if preset is not None:
+                punct, phones = "", preset[i]
+            else:
+                punct = ("" if use_transcript
+                         else self.keep_punctuation(item.get("punct", "")))
+                phones = self.hphzr.phonemize(text, tag=tag) + punct
             entry = dict(item)
             entry["text"] = text
             entry["punct"] = punct
@@ -792,8 +895,12 @@ class FeatureExtractor:
         stored = [int(i) for i in np.asarray(stored_ids).reshape(-1).tolist()]
         if text is not None and str(text).strip():
             # A dropped/merged word would otherwise be silently redistributed
-            # over its neighbours.
-            if len(str(text).split()) != len(items):
+            # over its neighbours.  Count *aligner* words, not whitespace
+            # tokens: a lone ``--`` / ``...`` / em dash produces no item, so
+            # `len(text.split())` is one too high for ~2.4 % of Genshin clips
+            # and would reject an alignment that is perfectly correct (see
+            # `transcript_words`).
+            if len(transcript_words(text)) != len(items):
                 return None
 
         flat, lengths = [], []
@@ -810,7 +917,7 @@ class FeatureExtractor:
         return out
 
     def hint_words(self, items, total_seconds=None, code_fps=None,
-                   word_index=None):
+                   word_index=None, max_anchors=None):
         """Word-level timing + relative-pitch hints from aligned items.
 
         `items` are the dicts from `extract` (or `align` + `phonemize_items`), so
@@ -826,6 +933,16 @@ class FeatureExtractor:
                                                relative to the utterance; NaN if
                                                the word has no voiced frames
             pitch_word_voiced bool(n_word)
+            pitch_anchors_st  float16(n_word, A)  up to A anchor values, st
+            pitch_anchors_pos float16(n_word, A)  anchor positions, word fraction
+            pitch_anchor_n    int8(n_word)        valid anchors; 0 = unvoiced
+
+        The anchor fields are the Hints V2 pitch representation: the word's f0
+        contour reduced to at most ``max_anchors`` ``(position, value)`` points
+        (``hints.levels.detect_pitch_anchors``), repeated over the word's phones
+        by the dataset.  ``pitch_word_st`` / ``pitch_word_voiced`` are kept so a
+        v1 corpus (and the v1 control arm) still works; a v1 file is read as one
+        anchor at ``pos=0.5``.
 
         The slots are **start-to-start** (the last one runs to the end of the
         clip), so they partition ``[0, total_seconds * code_fps)`` and per-word
@@ -842,6 +959,10 @@ class FeatureExtractor:
                 rather than per word; omit it and the index is derived from the
                 items' own ``phone_ids``, which is only correct when the stored
                 sequence is exactly their concatenation.
+            max_anchors: per-word pitch anchor budget (default
+                ``hints.levels.DEFAULT_PITCH_ANCHORS``).  Anchors need each
+                item's ``pitch_contour`` (set by `extract`); on an align-only
+                path a voiced word degrades to one anchor at its word mean.
 
         Raises:
             ValueError: word start times are not non-decreasing.
@@ -867,10 +988,45 @@ class FeatureExtractor:
                             for it in items], dtype=np.float64)
         voiced = means > 0
         pitch_st = np.full(n_word, np.nan, dtype=np.float64)
+        ref_hz = 0.0
         if voiced.any():
-            ref = float(np.median(means[voiced]))
-            if ref > 0:
-                pitch_st[voiced] = 12.0 * np.log2(means[voiced] / ref)
+            ref_hz = float(np.median(means[voiced]))
+            if ref_hz > 0:
+                pitch_st[voiced] = 12.0 * np.log2(means[voiced] / ref_hz)
+
+        # Per-word pitch anchors (Hints V2): up to `max_anchors` points of the
+        # word's own f0 contour, in semitones relative to the same `ref_hz` the
+        # word mean uses.  This is the representation the stage-2 model gets;
+        # `pitch_word_st` above is kept for v1 corpora and the v1 control arm.
+        from hints.levels import DEFAULT_PITCH_ANCHORS, detect_pitch_anchors
+        n_anchor = int(max_anchors or DEFAULT_PITCH_ANCHORS)
+        anchors_st = np.zeros((n_word, n_anchor), dtype=np.float32)
+        anchors_pos = np.zeros((n_word, n_anchor), dtype=np.float32)
+        anchor_n = np.zeros(n_word, dtype=np.int8)
+        for i, it in enumerate(items):
+            vals = np.zeros(n_anchor, dtype=np.float32)
+            pos = np.zeros(n_anchor, dtype=np.float32)
+            n = 0
+            contour = it.get("pitch_contour")
+            if contour is not None and ref_hz > 0:
+                # Detect at the *code-frame* rate: that is the rate the model
+                # generates pitch codes at, so finer detail cannot be rendered
+                # and only perturbs the fit.
+                dur = (float(it.get("end_time", 0.0))
+                       - float(it.get("start_time", 0.0)))
+                n_code = max(1, int(round(dur * fps)))
+                code_contour = _mean_bins(contour, n_code)
+                vals, pos, n = detect_pitch_anchors(
+                    code_contour, ref_hz, max_anchors=n_anchor)
+            elif voiced[i]:
+                # Align-only path (no `pitch_contour`): keep the old word mean
+                # as a single anchor rather than losing the channel.
+                vals[0] = float(pitch_st[i])
+                pos[0] = 0.5
+                n = 1
+            anchors_st[i, :] = vals
+            anchors_pos[i, :] = pos
+            anchor_n[i] = int(n)
 
         n_phone = int(sum(np.asarray(it.get("phone_ids", [])).size
                           for it in items))
@@ -893,6 +1049,9 @@ class FeatureExtractor:
             "word_slot_f": torch.from_numpy(word_slot_f),
             "pitch_word_st": torch.from_numpy(pitch_st).to(torch.float16),
             "pitch_word_voiced": torch.from_numpy(voiced),
+            "pitch_anchors_st": torch.from_numpy(anchors_st).to(torch.float16),
+            "pitch_anchors_pos": torch.from_numpy(anchors_pos).to(torch.float16),
+            "pitch_anchor_n": torch.from_numpy(anchor_n),
         }
 
     def extract_hints(self, data_48k, transcription=None, *, intensity=True,

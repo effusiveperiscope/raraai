@@ -62,7 +62,9 @@ for _p in (_HERE, _ROOT):
 import numpy as np
 import torch
 
-from hints.levels import DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS
+from hints.levels import (DEFAULT_PITCH_ANCHORS, DEFAULT_PITCH_EDGES,
+                          DEFAULT_SLOT_BUCKETS, PITCH_ANCHOR_SMOOTH_FRAMES,
+                          PITCH_ANCHOR_TOLERANCE_ST)
 
 COND_SUFFIX = ".cond"
 PHONE_SUFFIX = ".phone_ids"
@@ -96,7 +98,12 @@ COND_KEYS = {"intensity": "intensity", "register": "register_st",
 #: alongside) is the staleness anchor: ``dataset_codes.py`` refuses the word
 #: fields when it does not equal ``phone_ids.numel()``.
 WORD_KEYS = ("phone_word_idx", "word_start_f", "word_slot_f",
-             "pitch_word_st", "pitch_word_voiced")
+             "pitch_word_st", "pitch_word_voiced",
+             # Hints V2 per-word pitch anchors (see hints/levels.py).  A v1
+             # file has none of these and is read by the dataset as one anchor
+             # at pos=0.5, so `--skip-existing --words` must *not* consider
+             # such a file complete.
+             "pitch_anchors_st", "pitch_anchors_pos", "pitch_anchor_n")
 
 
 
@@ -560,7 +567,7 @@ def fit_edges_from_conds(items, args, hints) -> int:
                 previous = json.load(f) or {}
         except Exception:
             previous = {}
-    doc = {"version": 1, "created_by": "hints/build.py",
+    doc = {"version": 2, "created_by": "hints/build.py",
            "levels": dict(previous.get("levels") or {}),
            "dsp": previous.get("dsp"), "semantic": previous.get("semantic"),
            "words": previous.get("words")}
@@ -670,9 +677,13 @@ def main(argv=None) -> int:
                    help="do not fit level edges (still writes coverage/provenance)")
     p.add_argument("--words", action="store_true",
                    help="also write the per-word fields (phone_word_idx, "
-                        "word_start_f/slot_f, pitch_word_st/voiced). Needs "
-                        "--source-filelist transcripts and the Qwen forced "
-                        "aligner; runs sequentially on --device.")
+                        "word_start_f/slot_f, pitch_word_st/voiced, and the "
+                        "Hints V2 pitch anchors). Needs --source-filelist "
+                        "transcripts and the Qwen forced aligner; runs "
+                        "sequentially on --device.")
+    p.add_argument("--pitch-anchors", type=int, default=DEFAULT_PITCH_ANCHORS,
+                   help="pitch anchors per word written by --words (default "
+                        "%(default)s); must match transformer.hint_pitch_anchors")
     p.add_argument("--config", default="configs/base.yaml",
                    help="stage-1 config, used by --words (frame rate, hp)")
     p.add_argument("--force", action="store_true",
@@ -759,6 +770,10 @@ def main(argv=None) -> int:
             want.append(COND_KEYS["semantic"])
         if args.words and rec["text"] and rec["wave"]:
             want.append("phone_word_idx")
+            # A v1 .cond has the v1 word fields but no anchors; require one of
+            # the anchor keys so `--skip-existing --words` rebuilds it instead
+            # of leaving the clip on the one-anchor fallback forever.
+            want.append("pitch_anchors_st")
         if not want:
             n_nodata += 1
             continue
@@ -804,7 +819,7 @@ def main(argv=None) -> int:
                 rec = dict(loaded) if isinstance(loaded, dict) else {}
             except Exception:
                 rec = {}
-        rec["version"] = 1
+        rec["version"] = 2
         n_added = 0
         nph = phone_count(r["phone_ids"])
         if nph is not None:
@@ -940,7 +955,8 @@ def main(argv=None) -> int:
                 continue
             got = fe.hint_words(
                 word_items, total_seconds=len(wave) / float(WAVE_SR),
-                code_fps=code_fps, word_index=word_idx)
+                code_fps=code_fps, word_index=word_idx,
+                max_anchors=args.pitch_anchors)
             got["n_phone"] = int(len(word_idx))
             words[r["base"]] = got
             flush(r)                # written now, not after the whole corpus
@@ -968,7 +984,7 @@ def main(argv=None) -> int:
                 previous = json.load(f) or {}
         except Exception:
             previous = {}
-    doc = {"version": 1, "created_by": "hints/build.py",
+    doc = {"version": 2, "created_by": "hints/build.py",
            "levels": dict(previous.get("levels") or {}),
            "dsp": previous.get("dsp"),
            "semantic": previous.get("semantic")}
@@ -995,6 +1011,17 @@ def main(argv=None) -> int:
             "n_slot_buckets": int(DEFAULT_SLOT_BUCKETS),
             "pitch_unit": "semitones re: the utterance's voiced-median f0",
             "slot_unit": "code frames, start-to-start",
+            # Hints V2: per-word pitch anchors.  The count is part of the
+            # checkpoint contract (`transformer.hint_pitch_anchors`), because
+            # slot index i means a different point of the contour if it moves.
+            "pitch_anchors": int(args.pitch_anchors),
+            "pitch_anchor_unit": ("semitones re: utterance voiced-median f0; "
+                                  "position as a fraction of the word span"),
+            "pitch_anchor_detector": {
+                "method": "optimal knots (dynamic programming)",
+                "tolerance_st": float(PITCH_ANCHOR_TOLERANCE_ST),
+                "smooth_frames": int(PITCH_ANCHOR_SMOOTH_FRAMES),
+            },
         }
     partial = bool(args.limit) or n_skipped > 0
     if not args.no_edges:
@@ -1065,9 +1092,11 @@ def main(argv=None) -> int:
               + (f", {n_word_mismatch} dropped (phone count != stored "
                  f"phone_ids)" if n_word_mismatch else ""))
         if n_word_mismatch:
-            print("  ^ those clips' phone_ids are stale relative to the current "
-                  "phonemizer: re-run `2_preprocess.py --only phones`, then "
-                  "re-run this pass.")
+            print("  ^ those clips' phones disagree with this alignment.  The "
+                  "usual cause is stale `phone_ids` (re-run `2_preprocess.py "
+                  "--only phones`, then this pass), but check the error list "
+                  "below first: tokenizer-normalisation cases (`*emphasis*`, "
+                  "quotes) fail here even on a fresh corpus.")
     print(f"  wrote {hints_json}")
     if args.limit and not args.no_edges:
         print("NOTE: --limit was used, so the bin edges above are fitted on a "

@@ -264,3 +264,127 @@ v0.9 therefore changed, cheapest-first:
    prefix/suffix/middle objective, which teaches "continue from a context", not
    "advance through the text".
 4. **Warm start from `best-checkpoint.ckpt`**, not the post-anneal `last.ckpt`.
+
+---
+
+## 10. Hints V2 — per-word pitch anchors
+
+**Status (2026-11-16): implemented, not yet trained.** Switches:
+`transformer.hint_pitch_mode: anchors` + `hint_pitch_anchors: 3` (the shipped
+`configs/transformer.yaml`), a `.cond` v2 corpus (`hints/build.py --words
+--pitch-anchors 3`), and the phonemizer fixes below.
+
+### Why the representation changed
+
+Measured on 300 Genshin clips (`<base>.cond` + stage-1 `<base>.f0`), 1 609 words
+of >= 8 code frames (>= 320 ms), residual in semitones against the word's f0
+contour:
+
+| N | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| best piecewise-constant fit | 2.12 | 1.18 | 0.72 | 0.49 | 0.32 |
+| uniformly spaced samples | 2.12 | 1.58 | 1.22 | 0.94 | — |
+
+- v1 stored **one voiced mean per word** — the worst case. Per-word pitch
+  range: median 3.5 st, 6.5 st for long words, p90 11–15 st; 19 % of words are
+  within 0.5 st of constant (a genuinely flat word) and 40 % within 1 st.
+- Anchors at detected positions beat uniform sampling at equal count (uniform
+  N=4 is worse than optimal N=3).
+- **But projecting anchors to one value per phone is worth nothing beyond 2**
+  (1.72 st at N=2, 1.62 at N=3/N=4) because a 320–440 ms word has ~2.5 phones
+  (median 2). Hence the **vector**: every phone of a word carries the word's
+  whole anchor set, plus its own position inside the word.
+
+The detector (`hints.levels.detect_pitch_anchors`) is an exact DP over knot
+positions (piecewise-linear, endpoints fixed, redundant knots pruned). On the
+885-word gate it reconstructs to **0.87 st median** vs **2.09 st** for the word
+mean (a greedy splitter reaches only 0.90, hence the DP).
+
+### Contract
+
+`.cond` v2 adds, next to the v1 fields (which are kept):
+
+```
+pitch_anchors_st    float16(n_word, A)  semitones re: the utterance voiced median
+pitch_anchors_pos   float16(n_word, A)  position as a fraction of the word span
+pitch_anchor_n      int8(n_word)        valid anchors; 0 = the word is unvoiced
+```
+
+`A = transformer.hint_pitch_anchors` and is part of the checkpoint contract;
+`hints.json` records it (`words.pitch_anchors`) and the model refuses a
+mismatch. A v1 `.cond` (no anchor keys) is read as **one anchor at pos 0.5**
+with the old word mean, so a half-rebuilt corpus still trains.
+
+Per phone the dataset emits `hint_pitch_val (N, A)`, `hint_pitch_pos (N, A)`,
+`hint_pitch_n (N)`, `hint_pitch_state (N)` (0 absent / 1 voiced / 2 unvoiced)
+and `hint_phone_frac (N)`. The model encodes it as
+
+```
+sum_a  mask_a * ( dir_val[a] * tanh(st_a / 6) + dir_pos[a] * (pos_a - 0.5) )
+     + (~mask_a) * null[a]
+     + dir_frac * (phone_frac - 0.5)
+     + where(state == 2, unvoiced, 0) + where(state == 0, absent, 0)
+```
+
+so the three trained states stay distinct (the dropout design depends on it)
+and a level is continuous: "raise this word a major third" is 3 st, not a bin.
+`hint_pitch_mode: table` keeps the v1 `pitch_emb` for old checkpoints; the two
+layouts are refused in both directions by `check_special_layout`.
+
+Pitch stays **encoder-only** (the decoder keeps the clip-level channels), and
+the timing channel is **unchanged** — the whole V2 hint stack is in practice a
+duration plan (`slot` alone recovers the v1 WER gain), so that was left alone
+deliberately.
+
+### Phonemizer fixes (same corpus rebuild)
+
+- **Hyphenated compounds** went through g2p_en's character-level neural
+  fallback because `TweetTokenizer` keeps `top-notch` as one token and it is
+  absent from cmudict: `well-known` -> `WEH1L K AO1 N ER0`,
+  `self-esteem` -> `S EH1L F S IY1 T S IY0`. 3.9 % of Genshin clips, 2.1 %
+  Expresso, 1.3 % VCTK, 0.8 % MLP contain such a token. `_phonemize_word` now
+  tries the whole token against the hand dictionary first, then splits on
+  hyphens (`Top-notch` -> `T AA1 P - N AA1 CH`).
+- **Typographic apostrophes** are not in g2p_en's `[a-z']` sanitiser, so
+  `don’t` became `dont` and missed both the dictionary and cmudict (1.9 % of
+  Expresso tokens). Normalised to ASCII before every lookup.
+- **`READ/VB`** -> `R IY1 D` (g2p_en's homograph table is inverted, so the
+  present tense always lost), **`FOR`** -> `F AO0 R` (it was identical to
+  `FOUR`, both `F AO1 R`).
+- `scratch/audit_oov.py` lists every token that still reaches the neural
+  fallback, per filelist, so the pin list is generated rather than guessed.
+
+`test_phonemize.py --regress` and `test_pitch_anchors.py` guard all of it.
+
+### Corpus rebuild: the aligner path vs the transcript path
+
+Rebuilding the corpus surfaced a second, larger defect than any of the above:
+**the two phonemizer paths disagreed on 2.3 % of clips**, and every disagreeing
+clip lost its word-level hints (pitch anchors *and* timing). Two independent
+causes, both fixed:
+
+- `features.attach_punctuation` now records which whitespace tokens of the
+  transcript each aligned item covers (`seg_idx`), and `phonemize_items`
+  phonemizes *those* instead of the aligner's stripped ones. The aligner's
+  `clean_token` deletes internal punctuation, so `top-notch` arrived as
+  `topnotch` -- OOV, neural fallback -- while the transcript path (which wrote
+  `phone_ids`) produced `T AA1 P - N AA1 CH`. The old code only used the
+  transcript's tokens when the whitespace counts matched exactly, which a single
+  standalone `—` / `--` / `...` token breaks.
+- `word_index_for_phones`'s safety check counted `text.split()`, so the same
+  standalone punctuation token made it reject an alignment that was correct.
+  It now counts `features.transcript_words(text)` (word-bearing segments only).
+
+Measured result: `phonemize_text` == `align` + `phonemize_items` == stored
+`phone_ids` on all checked clips, word-hint coverage 3 546/151 653 missing ->
+**115/151 653 (0.08 %)**, and the coverage gate passes. The residual failures are
+clips with no audio/transcript in this environment and tokenizer edge cases
+(`*emphasis*` / `"quoted"` phone strings decode with `[UNK]`, which
+`_token_spans` refuses to slice).
+
+### Reload cost
+
+`phone_ids` change, so `2_preprocess.py --only phones` (cheap, no codec) and
+then one `hints/build.py --words` pass (the old word fields go stale). No
+stage-1 re-preprocessing. A new `exp_name` + `--transfer_from` is required.
+

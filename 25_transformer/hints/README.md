@@ -230,7 +230,9 @@ volume) instead of 8 KB. Measured after the fix: 400 clips = 1.94 MB total, max
 
 The three clip-level hints need no alignment. The **word** fields
 (`phone_word_idx`, `word_start_f`, `word_slot_f`, `pitch_word_st`,
-`pitch_word_voiced`) do, so they are a separate, optional pass:
+`pitch_word_voiced`, and the Hints V2 pitch anchors `pitch_anchors_st` /
+`pitch_anchors_pos` / `pitch_anchor_n`) do, so they are a separate, optional
+pass:
 
 ```bash
 python hints/build.py \
@@ -296,4 +298,26 @@ Slots are start-to-start in **code frames** (25 Hz), so they sum to the clip
 length; `pitch_word_st` is each word's voiced-mean f0 in semitones relative to
 the utterance's median, NaN (plus `pitch_word_voiced=False`) when the word has no
 voiced frames.
+
+**Hints V2 pitch anchors.** Next to the word mean, `--words` writes up to
+`--pitch-anchors` (**3**) `(value, position)` points per word, which is what
+`transformer.hint_pitch_mode: anchors` consumes:
+
+| key | type | meaning |
+|---|---|---|
+| `pitch_anchors_st` | float16(n_word, A) | anchor f0, semitones re: the utterance's voiced median |
+| `pitch_anchors_pos` | float16(n_word, A) | anchor position as a fraction of the word span |
+| `pitch_anchor_n` | int8(n_word) | valid anchors; **0 = the word has no voiced frames** |
+
+The detector (`hints.levels.detect_pitch_anchors`) runs on the word's contour at
+the **code-frame** rate and picks the knots of the best piecewise-linear fit
+(exact DP); a word whose contour stays inside `PITCH_ANCHOR_TOLERANCE_ST` (0.2
+st) of flat collapses to one anchor. Measured on real Genshin words of >= 8
+code frames: **0.87 st** reconstruction error vs **2.09 st** for the word mean.
+
+`--pitch-anchors` must match `transformer.hint_pitch_anchors`, because anchor
+slot `i` means a different point of the contour at a different count; the value
+is recorded in `hints.json` -> `words.pitch_anchors` and the model refuses a
+mismatch. A `.cond` written before V2 (no anchor keys) still loads: the dataset
+reads the word mean as one anchor at `pos=0.5`.
 

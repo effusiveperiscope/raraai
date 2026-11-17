@@ -107,14 +107,16 @@ import torch.nn.functional as F
 
 try:                                    # repo root on sys.path (training/tests)
     from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
-                              load_levels as load_hint_levels)
+                              load_levels as load_hint_levels,
+                              load_pitch_anchors)
 except ImportError:                     # `python modeling/transformer.py`
     import os as _os
     import sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(
         _os.path.abspath(__file__))))
     from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
-                              load_levels as load_hint_levels)
+                              load_levels as load_hint_levels,
+                              load_pitch_anchors)
 
 
 def _get_cfg(cfg, key, default):
@@ -775,6 +777,28 @@ class CodeTransformer(nn.Module):
         # (bins/unvoiced) and they already work.  See HINTS_V1_PLAN.md §5.6.
         self.hint_monotone = bool(_get_cfg(tcfg, "hint_monotone", False))
 
+        # Hints V2 pitch representation.
+        #   ``table``   -> v1: one level id per phone, ``(n_pitch_levels+2, H)``
+        #                  embedding.  Kept as the default so every pre-V2
+        #                  checkpoint stays loadable without editing a config.
+        #   ``anchors`` -> up to A ``(value, position)`` anchors per *word*,
+        #                  repeated over the word's phones (see
+        #                  ``dataset_codes`` and ``hints.levels``).  Chosen by
+        #                  ``configs/transformer.yaml``.
+        # Measured (Genshin, words >= 8 code frames): one word mean reconstructs
+        # the contour to 2.1 st, 3 anchors to 0.7 st, but *projecting* those
+        # anchors to one value per phone is worth nothing beyond 2 (1.62 st) --
+        # a 320-440 ms word has ~2.5 phones.  Hence the repeat-over-phones
+        # vector plus ``hint_phone_frac``.
+        self.hint_pitch_mode = str(
+            _get_cfg(tcfg, "hint_pitch_mode", "table") or "table").strip().lower()
+        if self.hint_pitch_mode not in ("anchors", "table"):
+            raise ValueError(
+                "transformer.hint_pitch_mode must be 'anchors' or 'table', "
+                f"got {self.hint_pitch_mode!r}")
+        self.hint_pitch_anchors = max(
+            int(_get_cfg(tcfg, "hint_pitch_anchors", 3) or 3), 1)
+
         # Every remaining channel is a small ``(n_levels + 1, hidden)``
         # embedding indexed by a level id, row 0 being the trained "not
         # provided" state (the dataset applies per-channel dropout, so that row
@@ -842,6 +866,40 @@ class CodeTransformer(nn.Module):
             self.slot_emb = nn.Embedding(self.n_slot_buckets + 1, hidden_size)
             self.sem_proj = nn.Linear(self.semantic_dim, hidden_size)
             self.sem_null = nn.Parameter(torch.zeros(hidden_size))
+            if self.hint_pitch_mode == "anchors":
+                # The anchor count is part of the checkpoint contract: slot
+                # index a means a different point of the contour if it moves.
+                stored = load_pitch_anchors(self.hints_json)
+                if stored is not None and int(stored) != self.hint_pitch_anchors:
+                    raise ValueError(
+                        f"transformer.hint_pitch_anchors="
+                        f"{self.hint_pitch_anchors} but {self.hints_json} was "
+                        f"built with {stored} anchors per word.  Re-run "
+                        f"hints/build.py --words --pitch-anchors "
+                        f"{self.hint_pitch_anchors}, or match the config to the "
+                        f"corpus (the anchor slots would otherwise mean "
+                        f"different points of the contour).")
+                # One direction per anchor *slot*, so slot index a always means
+                # "the a-th point of the word's contour" -- the same ordering
+                # the detector emitted.  ``pitch_slot_null`` covers words with
+                # fewer than A anchors (so "absent slot" != "0 st"), and
+                # ``pitch_absent`` / ``pitch_unvoiced`` are the two trained
+                # states the dropout design relies on.
+                A = self.hint_pitch_anchors
+                self.pitch_emb = None
+                self.pitch_val_dir = nn.Parameter(torch.zeros(A, hidden_size))
+                self.pitch_pos_dir = nn.Parameter(torch.zeros(A, hidden_size))
+                self.pitch_slot_null = nn.Parameter(torch.zeros(A, hidden_size))
+                self.pitch_unvoiced = nn.Parameter(torch.zeros(hidden_size))
+                self.pitch_absent = nn.Parameter(torch.zeros(hidden_size))
+                self.pitch_frac_dir = nn.Parameter(torch.zeros(hidden_size))
+            else:
+                self.pitch_val_dir = None
+                self.pitch_pos_dir = None
+                self.pitch_slot_null = None
+                self.pitch_unvoiced = None
+                self.pitch_absent = None
+                self.pitch_frac_dir = None
             if self.hint_monotone:
                 self.int_emb = None
                 self.reg_emb = None
@@ -891,6 +949,12 @@ class CodeTransformer(nn.Module):
             self.int_dir = self.int_null = None
             self.reg_dir = self.reg_null = None
             self.dec_int_dir = self.dec_int_null = None
+            self.pitch_val_dir = None
+            self.pitch_pos_dir = None
+            self.pitch_slot_null = None
+            self.pitch_unvoiced = None
+            self.pitch_absent = None
+            self.pitch_frac_dir = None
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -1292,6 +1356,15 @@ class CodeTransformer(nn.Module):
             "hint_sem_valid": zeros(batch_size, dt=torch.bool),
             "hint_pitch": zeros(batch_size, n_phone),
             "hint_slot": zeros(batch_size, n_phone),
+            # Hints V2 anchors: state 0 = the trained "absent" path, so these
+            # zeros are the null state (not an out-of-distribution input).
+            "hint_pitch_val": zeros(batch_size, n_phone,
+                                    self.hint_pitch_anchors, dt=torch.float32),
+            "hint_pitch_pos": zeros(batch_size, n_phone,
+                                    self.hint_pitch_anchors, dt=torch.float32),
+            "hint_pitch_n": zeros(batch_size, n_phone),
+            "hint_pitch_state": zeros(batch_size, n_phone),
+            "hint_phone_frac": zeros(batch_size, n_phone, dt=torch.float32),
         }
 
     def resolve_hints(self, hints, batch_size: int, n_phone: int, device):
@@ -1409,13 +1482,70 @@ class CodeTransformer(nn.Module):
             clip = clip + sem
 
         pos = None
-        pitch = hints.get("hint_pitch")
-        if pitch is not None and pitch.numel() > 0:
-            pos = self.pitch_emb(pitch.to(device).long())
-            slot = hints.get("hint_slot")
-            if slot is not None:
-                pos = pos + self.slot_emb(slot.to(device).long())
+        if self.hint_pitch_mode == "anchors":
+            pos = self._pitch_anchor_vec(hints, device)
+        else:
+            pitch = hints.get("hint_pitch")
+            if pitch is not None and pitch.numel() > 0:
+                pos = self.pitch_emb(pitch.to(device).long())
+        slot = hints.get("hint_slot")
+        if slot is not None and slot.numel() > 0:
+            slot_vec = self.slot_emb(slot.to(device).long())
+            pos = slot_vec if pos is None else pos + slot_vec
         return clip, pos
+
+    def _pitch_anchor_vec(self, hints, device):
+        """``(B, N, H)`` per-phone vector from each word's pitch anchors.
+
+        Every phone of a word carries the word's **whole** anchor vector; a
+        scalar per phone is not enough (measured: projecting 3 anchors to one
+        value per phone is no better than 2, because a 320-440 ms word has ~2.5
+        phones).  The phone's normalised position inside its word and the anchor
+        positions are carried alongside, so the contour *and* the phone's place
+        in it are both expressible.
+
+        Three trained states are kept apart, because hint dropout relies on it:
+
+        * absent (state 0) -> ``pitch_absent``;
+        * voiced (state 1) -> the anchor sum, padded slots -> ``pitch_slot_null``;
+        * unvoiced (state 2) -> the same plus ``pitch_unvoiced``.
+        """
+        val = hints.get("hint_pitch_val")
+        pos = hints.get("hint_pitch_pos")
+        num = hints.get("hint_pitch_n")
+        state = hints.get("hint_pitch_state")
+        if (val is None or val.numel() == 0 or pos is None or num is None
+                or state is None):
+            return None
+        A = int(self.hint_pitch_anchors)
+        val = val.to(device, torch.float32)
+        pos = pos.to(device, torch.float32)
+        if val.shape[-1] < A:
+            pad = torch.zeros(val.shape[:-1] + (A - val.shape[-1],),
+                              dtype=val.dtype, device=val.device)
+            val = torch.cat((val, pad), dim=-1)
+            pos = torch.cat((pos, pad), dim=-1)
+        val = val[..., :A]
+        pos = pos[..., :A]
+        num = num.to(device).long().clamp_(min=0, max=A)
+        state = state.to(device).long()
+        frac = hints.get("hint_phone_frac")
+        frac = (frac.to(device, torch.float32) if frac is not None
+                else torch.zeros(num.shape, dtype=torch.float32, device=device))
+
+        ar = torch.arange(A, device=device).view(1, 1, A)
+        mask = ar < num.unsqueeze(-1)                     # (B, N, A)
+        out = torch.einsum("bna,ah->bnh", torch.tanh(val / 6.0) * mask,
+                           self.pitch_val_dir)
+        out = out + torch.einsum("bna,ah->bnh", (pos - 0.5) * mask,
+                                 self.pitch_pos_dir)
+        out = out + ((~mask).unsqueeze(-1) * self.pitch_slot_null).sum(dim=-2)
+        out = out + (frac - 0.5).unsqueeze(-1) * self.pitch_frac_dir
+        present = (state != 0).unsqueeze(-1)
+        out = (out * present.to(out.dtype)
+               + (~present).to(out.dtype) * self.pitch_absent)
+        out = out + (state == 2).unsqueeze(-1).to(out.dtype) * self.pitch_unvoiced
+        return out
 
     def _dec_hint(self, hints) -> Optional[torch.Tensor]:
         """``(B, H)`` constant added to every decoder column (or ``None``).
@@ -1898,7 +2028,10 @@ class CodeTransformer(nn.Module):
         "int": ("hint_int",),
         "reg": ("hint_reg",),
         "sem": ("hint_sem", "hint_sem_valid"),
-        "pitch": ("hint_pitch",),
+        # Both pitch representations are dropped together: state 0 is the
+        # trained "absent" path for the anchors, level 0 for the v1 table.
+        "pitch": ("hint_pitch", "hint_pitch_val", "hint_pitch_pos",
+                  "hint_pitch_n", "hint_pitch_state"),
         "slot": ("hint_slot",),
     }
 
@@ -2315,8 +2448,11 @@ class CodeTransformer(nn.Module):
         n = self.num_parameters()
         spk = ("encoder+decoder" if self.decoder_speaker_cond else "encoder only")
         if self.hints:
-            hints = (f", hints={self.n_intensity_levels} int/{self.n_pitch_levels}"
-                     f" pitch/{self.n_register_levels} reg/{self.n_slot_buckets}"
+            pitch_desc = (f"{self.hint_pitch_anchors} anchors"
+                          if self.hint_pitch_mode == "anchors"
+                          else f"{self.n_pitch_levels} pitch")
+            hints = (f", hints={self.n_intensity_levels} int/{pitch_desc}"
+                     f"/{self.n_register_levels} reg/{self.n_slot_buckets}"
                      f" slot+sem{self.semantic_dim}"
                      + (' (decoder too)' if self.decoder_hints
                         else ' (encoder only)'))
