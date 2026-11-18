@@ -1365,6 +1365,13 @@ Wiring:
 - **No re-preprocessing**: the codes are unchanged; only config keys move. The
   *parameter set* changes, so it needs a fresh `exp_name` (+ `--transfer_from`),
   like `eos_token`/`fim`/`length_cond`.
+- **The semantic channel is dead weight and measurably so**: CE is 0.004 nats
+  *worse* with the real bge vector than with `sem_null` (negative at every
+  epoch of `transformer_hints_v2`), the real vector sits closer to the null
+  state than a swapped one does, 45 % of its leading variance is predictable
+  from a bag of phone bigrams alone, and only 1.5 % is linearly recoverable
+  from the ground-truth codes (intensity: 50 %, register: 16 %). See
+  `HINTS_PLAN.md` §11 / `scratch/hint_semantic_value.py`.
 - Validation is `test_hints.py` (CPU fixture: bucketing, dropout, per-word
   gather, stale rejection, collator shapes, loss moves when hints are dropped).
 
@@ -1430,6 +1437,17 @@ Contract and reload cost:
   `check_special_layout` compares it); `--resume_from` across `table`/`anchors`
   is refused in both directions, `--transfer_from` table→anchors is a NOTE
   (directions start at zero).
+- **The anchors are relative to the utterance, so there is no global pitch
+  knob.** Measured on `transformer_hints_v2` (step 100 k, 16 val items, paired
+  greedy decode): a +-6 st shift applied to *every* anchor moves the decoded f0
+  by <=0.5 st (the absolute level comes from `sid`), while +-3 st on the second
+  half of the words moves that half by ~1.4 st. Flattening the per-word contour
+  costs 28 % of the within-clip f0 spread. The channel is strongly predictive
+  (CE +0.042 when absent, +0.064 when swapped) but it is a soft, relative
+  control, not a calibrated one; `stage2_repl.py`'s `j` is a *global* shift and
+  is therefore close to a no-op. Full numbers: `HINTS_PLAN.md` §11, probe:
+  `scratch/hint_v2_kpi.py` (trim the decoded f0 to `return_lengths` first --
+  `generate` pads the batch, so untrimmed statistics depend on batch size).
 - Pitch stays encoder-only; the timing channel is unchanged. `phone_ids` do
   change (the phonemizer fixes below), so rebuilding is
   `2_preprocess.py --only phones` + one `hints/build.py --words

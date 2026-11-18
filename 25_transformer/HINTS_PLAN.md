@@ -388,3 +388,83 @@ clips with no audio/transcript in this environment and tokenizer edge cases
 then one `hints/build.py --words` pass (the old word fields go stale). No
 stage-1 re-preprocessing. A new `exp_name` + `--transfer_from` is required.
 
+
+---
+
+## 11. Hints V2 measurements (transformer_hints_v2, step 100 k)
+
+Run with `scratch/hint_v2_kpi.py` (new; read-only) and
+`scratch/hint_semantic_value.py` (new). 16 val items, greedy decode
+(`top_k=1`), frozen `base_v0.7` Generator; f0 from
+`infer_from_codes(return_pitch=True)`.
+
+### Pitch anchors: real, but a *soft and relative* knob
+
+| arm | teacher-forced CE | dCE | f0 spread | pitch-code chg |
+|---|---|---|---|---|
+| own anchors | 2.2459 | — | 2.96 st | — |
+| absent (null state) | 2.2878 | **+0.0419** | 2.28 st | 0.64 |
+| flattened (1 anchor/word) | 2.2855 | **+0.0397** | 2.12 st (−28 %) | 0.62 |
+| swapped across clips | 2.3097 | **+0.0638** | 1.59 st | 0.67 |
+
+Behaviour (paired arms, same seed):
+
+* **local step**: second half of the phones +3 st → that half sits **+1.44 st**
+  above the first (own +0.28); −3 st → **−1.36 st**. Symmetric, ~45 % transfer,
+  wide per-clip spread (some clips 0, some +5.5).
+* **global level**: ±6 st on *every* anchor → ≤0.5 st of f0 movement. This is by
+  construction — the anchors are semitones re: the utterance's own voiced
+  median, so a global shift asks for something no clip contains; absolute level
+  comes from `sid`. **There is no global pitch knob in this representation**
+  (`stage2_repl.py`'s `j` therefore is nearly a no-op).
+* **melodic ramp** (±2 st across the utterance): no reproducible trend transfer.
+* flattening the per-word contour costs 28 % of the within-clip f0 spread, so
+  the anchors do shape the melody's amplitude, mostly at word granularity.
+
+So: not placebo — the channel is strongly predictive and content-specific, and
+local relative edits land at roughly half their requested size — but it is not
+a calibrated editing control.
+
+**Probe footgun (fixed in the script):** `generate` pads the batch to its
+longest member (repeating that member's last frame), so decoding the whole f0
+row makes every statistic batch-composition dependent — the *same* clip's
+second-half pitch moved by 4 st between a 6- and a 16-item batch. Trim each row
+to `return_lengths` × (f0 frames / code frames) first.
+
+### Semantic: redundant, and not in the code space
+
+| measurement | value |
+|---|---|
+| CE with the real vector vs `sem_null` | **−0.0043 nats** (better *without*) |
+| `val_hint_channel_delta/sem`, 0→97 k | −0.0010 … −0.0005 (always negative) |
+| R²(semantic ← phones) median / PC1..4 | **+0.155** / +0.45 +0.48 +0.41 +0.38 |
+| R²(semantic ← speaker mean) | −0.002 (not a speaker proxy) |
+| R²(semantic ← ground-truth codes) | **+0.015** |
+| R²(intensity ← codes) / R²(register ← codes), same probe | **+0.499** / +0.158 |
+
+Behaviour: own-vs-null code agreement 67.7 % (<5 frames), swapped-vs-null
+57.7 %, own-vs-swapped 56.0 %; duration identical (10.24 s), f0 spread
+3.05/3.29/3.41 st, energy cv 1.94/2.40/2.35. The real vector sits *closer to
+the null state* than any other vector does, i.e. it acts as a small
+in-distribution perturbation, not as information.
+
+Reading: the vector is largely a function of the phoneme sequence the model
+already sees (45 % of its leading variance from a bag-of-phone-bigrams, a
+strict lower bound), and what is left is not linearly recoverable from the
+codes at all (0.015 vs 0.50 for intensity, the reference for "the codes really
+carry it"). No injection site can fix the second part.
+
+Options, cheapest first:
+
+1. `hint_dropout.semantic: 1.0` — config only, keeps the parameters but makes
+   `sem_null` unconditional; removes the noise from training *and* from the
+   `sample_hints: cond` generation path. Expected ≈ +0.004 nats of val_loss.
+2. Remove the channel (`semantic_hint: false`, new `exp_name` +
+   `--transfer_from`): same quality, 296 k fewer parameters, honest checkpoint.
+3. `counterfactual_channels: "intensity,register,semantic"` — would force
+   dependence on a vector the codes cannot express; expected to cost CE and add
+   nothing. Only as a wiring sanity check.
+4. A different representation (per-word lexical embedding, or a style/emotion
+   label) is the only version that could work — but the codespace table says
+   what the codes *do* carry is intensity (0.50) and register (0.16), both
+   already channels. Without a new labelled target there is nothing to encode.
