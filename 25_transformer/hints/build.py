@@ -90,6 +90,11 @@ DEFAULT_MODEL = os.path.join(_HERE, "models", "dsp_intensity",
                              "tier1_augmented.pkl")
 
 HINT_KEYS = ("intensity", "register", "semantic")
+#: What a plain run computes.  ``semantic`` stays *valid* (``--hints
+#: semantic`` still works and old corpora carry the key) but is no longer
+#: consumed by the model -- the sentence CLS was removed in V2.2 -- so it is
+#: not worth the bge pass by default.
+DEFAULT_HINT_KEYS = ("intensity", "register")
 #: hint name -> key in the ``.cond`` dict
 COND_KEYS = {"intensity": "intensity", "register": "register_st",
              "semantic": "semantic"}
@@ -626,6 +631,146 @@ def fit_edges_from_conds(items, args, hints) -> int:
     return 0
 
 
+def run_word_bert(items: Sequence[dict], args) -> int:
+    """Per-word BERT states -> ``<base>.cond["word_bert"]`` (Hints V2.1).
+
+    The sentence CLS is dead weight (HINTS_PLAN.md §11), but *word*-level
+    states are not: on 30 k words, ``bert-base-uncased`` last-hidden-state means
+    add +0.018 out-of-fold R2 to word duration/pitch/range **beyond** the phone
+    sequence (POS +0.010, bge token states +0.007, and both the sentence CLS and
+    a hashed-spelling lexical control sit at ~0.001).  The gain keeps growing to
+    ~256 dims, so the full 768 are stored and the model learns the projection
+    (``transformer.hint_word_sem``).
+
+    Alignment is free: the words come from the transcript reduced exactly like
+    the forced aligner's tokens (``features.transcript_words``), and the
+    ``.cond`` already stores ``phone_word_idx`` for those words.  A clip whose
+    counts disagree is skipped (its word fields are stale), never guessed.
+
+    Writes each clip as soon as it is computed, so an interrupted run loses
+    minutes, and ``--skip-existing`` resumes.
+    """
+    import collections
+
+    import numpy as np
+    from features import transcript_words
+
+    try:
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError:                       # pragma: no cover
+        print("transformers is required for --word-bert")
+        return 2
+
+    device = validate_device(args.device)
+    transcripts = read_transcripts(args.source_filelist)
+    hints_json = args.hints_json or os.path.join(
+        os.path.dirname(args.filelist[0]) or ".", "hints.json")
+
+    tok = AutoTokenizer.from_pretrained(args.word_bert_model)
+    model = AutoModel.from_pretrained(args.word_bert_model).to(device).eval()
+    if device != "cpu":
+        model.to(device)
+
+    jobs, reasons = [], collections.Counter()
+    for it in items:
+        base = clip_base(it["phone_ids"])
+        cond = cond_path(it["phone_ids"], args.out_dir)
+        text = transcripts.get(base)
+        if not text:
+            reasons["no transcript"] += 1
+            continue
+        if not os.path.exists(cond):
+            reasons["no .cond"] += 1
+            continue
+        try:
+            rec = torch.load(cond, map_location="cpu", weights_only=True,
+                             mmap=True)
+        except Exception:
+            reasons["unreadable .cond"] += 1
+            continue
+        if "phone_word_idx" not in rec or "word_start_f" not in rec:
+            reasons["no word fields"] += 1
+            continue
+        if args.skip_existing and "word_bert" in rec:
+            reasons["reused"] += 1
+            continue
+        words = [w for w, _ in transcript_words(text)]
+        n_word = int(rec["word_start_f"].numel())
+        n_phone = int(rec["n_phone"]) if "n_phone" in rec else -1
+        if not words or n_word != len(words):
+            reasons["word count != transcript"] += 1
+            continue
+        stored = torch.load(it["phone_ids"], map_location="cpu",
+                            weights_only=True).reshape(-1).numel()
+        if n_phone != stored:
+            reasons["n_phone != phone_ids"] += 1
+            continue
+        jobs.append({"base": base, "cond": cond, "rec": rec, "words": words})
+    if reasons:
+        print("word bert: " + "  ".join(f"{k} {v}" for k, v in
+                                        reasons.most_common()))
+    print(f"word bert: {len(jobs)} clip(s) to compute "
+          f"({args.word_bert_model})")
+    if not jobs:
+        return 0
+
+    dim = None
+    written = 0
+    batch = max(int(args.word_bert_batch), 1)
+    for start in range(0, len(jobs), batch):
+        chunk = jobs[start:start + batch]
+        enc = tok([j["words"] for j in chunk], is_split_into_words=True,
+                  return_tensors="pt", padding=True, truncation=True,
+                  max_length=256).to(device)
+        with torch.no_grad():
+            hidden = model(**enc).last_hidden_state.float().cpu().numpy()
+        for b, job in enumerate(chunk):
+            word_ids = enc.word_ids(batch_index=b)
+            vec = np.zeros((len(job["words"]), hidden.shape[-1]),
+                           dtype=np.float32)
+            buckets = collections.defaultdict(list)
+            for j, wid in enumerate(word_ids):
+                if wid is not None:
+                    buckets[wid].append(j)
+            for w, js in buckets.items():
+                if w < vec.shape[0]:
+                    vec[w] = hidden[b, js].mean(0)
+            if not buckets:
+                continue
+            dim = int(vec.shape[1])
+            rec = dict(job["rec"])            # mmap view -> real tensors on save
+            rec["word_bert"] = torch.from_numpy(vec).to(torch.float16)
+            write_cond(job["cond"], rec)
+            written += 1
+        if (start // batch) % 10 == 0:
+            print(f"  {written}/{len(jobs)} clip(s) written", flush=True)
+
+    # provenance (merge: never drop the edges/speaker means another pass fitted)
+    doc = {}
+    if os.path.exists(hints_json):
+        try:
+            with open(hints_json, "r", encoding="utf-8") as f:
+                doc = json.load(f) or {}
+        except Exception:
+            doc = {}
+    words_doc = dict(doc.get("words") or {})
+    words_doc["word_bert"] = {
+        "model": str(args.word_bert_model),
+        "dim": int(dim or 0),
+        "pooling": "mean over wordpiece last_hidden_state",
+        "dtype": "float16",
+        "unit": "one vector per word, repeated over the word's phones",
+    }
+    doc["words"] = words_doc
+    if os.path.dirname(hints_json):
+        os.makedirs(os.path.dirname(hints_json), exist_ok=True)
+    with open(hints_json, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+    print(f"word bert: wrote {written} .cond file(s), dim {dim}; "
+          f"provenance -> {hints_json}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -648,7 +793,7 @@ def main(argv=None) -> int:
                    help="never read source audio; only use --wave-dir tensors")
     p.add_argument("--out-dir", default=None,
                    help="write every .cond here instead of next to phone_ids")
-    p.add_argument("--hints", default=",".join(HINT_KEYS),
+    p.add_argument("--hints", default=",".join(DEFAULT_HINT_KEYS),
                    help="comma list of intensity,register,semantic")
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help="DSP intensity .pkl (see hints/README.md)")
@@ -681,6 +826,18 @@ def main(argv=None) -> int:
                         "Hints V2 pitch anchors). Needs --source-filelist "
                         "transcripts and the Qwen forced aligner; runs "
                         "sequentially on --device.")
+    p.add_argument("--word-bert", action="store_true",
+                   help="compute the per-word BERT states (Hints V2.1) and "
+                        "merge them into the existing .cond files as "
+                        "'word_bert' (n_word, D) float16.  Text only: needs "
+                        "--source-filelist and the .cond word fields from the "
+                        "--words pass, no audio and no aligner.  Resumable "
+                        "with --skip-existing.")
+    p.add_argument("--word-bert-model", default="bert-base-uncased",
+                   help="the encoder for --word-bert (dim is read back from "
+                        "the model and recorded in hints.json)")
+    p.add_argument("--word-bert-batch", type=int, default=32,
+                   help="clips per forward in --word-bert (default %(default)s)")
     p.add_argument("--pitch-anchors", type=int, default=DEFAULT_PITCH_ANCHORS,
                    help="pitch anchors per word written by --words (default "
                         "%(default)s); must match transformer.hint_pitch_anchors")
@@ -712,6 +869,10 @@ def main(argv=None) -> int:
     if "semantic" in hints and not args.source_filelist:
         p.error("--source-filelist is required for semantic "
                 "(it needs the transcript)")
+    if args.word_bert and not args.source_filelist:
+        p.error("--word-bert needs --source-filelist: the per-word states come "
+                "from the transcript, one vector per word of the aligner's "
+                "word list (the .cond already has phone_word_idx).")
     if args.words and not args.source_filelist:
         p.error("--words needs --source-filelist: the forced aligner is given "
                 "the transcript (no ASR is run), so every clip needs a "
@@ -733,6 +894,12 @@ def main(argv=None) -> int:
     print(f"{len(items)} clip(s) from {len(args.filelist)} filelist(s)")
     if args.fit_edges_only:
         return fit_edges_from_conds(items, args, hints)
+    if args.word_bert:
+        # A standalone, text-only mode: it reads the word fields the `--words`
+        # pass wrote and merges one vector per word, so it must not go through
+        # the audio stage (which would recompute intensity/register for every
+        # clip and is 100x slower).
+        return run_word_bert(items, args)
     if source_audio:
         print(f"Audio fallback: {len(source_audio)} source file(s) available "
               f"for clips without a stage-1 .wave")

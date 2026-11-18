@@ -393,6 +393,15 @@ stage-1 re-preprocessing. A new `exp_name` + `--transfer_from` is required.
 
 ## 11. Hints V2 measurements (transformer_hints_v2, step 100 k)
 
+**Outcome (V2.2): the sentence-CLS channel was removed from the model.**
+`sem_proj`/`sem_null`, `hint_sem`/`hint_sem_valid`, the `sem` entry in
+`HINT_CHANNEL_KEYS`, `semantic_dim` and `hint_dropout.semantic` are gone;
+`hints/build.py` no longer computes the vector by default and
+`features.extract_hints(semantic=...)` defaults to False.  The `.cond` key may
+still exist in old corpora; nothing reads it.  Pre-removal checkpoints load with
+a NOTE (the tensors are ignored), so `--transfer_from` from
+`transformer_hints_v2` still works.  The evidence is below.
+
 Run with `scratch/hint_v2_kpi.py` (new; read-only) and
 `scratch/hint_semantic_value.py` (new). 16 val items, greedy decode
 (`top_k=1`), frozen `base_v0.7` Generator; f0 from
@@ -468,3 +477,83 @@ Options, cheapest first:
    label) is the only version that could work — but the codespace table says
    what the codes *do* carry is intensity (0.50) and register (0.16), both
    already channels. Without a new labelled target there is nothing to encode.
+
+---
+
+## 12. Word-level semantic state — probe and model channel (V2.1)
+
+**Status (2026-11-17): implemented and the corpus is rebuilt.**
+`transformer.hint_word_sem: true` / `hint_word_dim: 768`;
+`hints/build.py --word-bert` wrote `word_bert` into all 151 536 clips;
+`test_word_semantics.py` passes; the run needs a fresh `exp_name` +
+`--transfer_from` (the projection is new).
+
+
+The sentence CLS is dead (§11), but that was one representation at one
+granularity.  A word's *state* varies within an utterance, so it can describe
+which word is lengthened/stressed — the thing the codes actually carry.
+`scratch/hint_word_semantics_probe.py` ranks the candidates on the only
+criterion that matters for a hint channel: **does the word's state predict the
+word's prosody beyond the pronunciation** (which the model already sees)?
+
+Targets come from the existing `.cond` (no new pass): log word duration
+(`word_slot_f`), word pitch (`pitch_word_st`, st re: the utterance median) and
+within-word f0 range (`pitch_anchors_st`).  Features are cumulative, 5-fold
+cross-validated **grouped by speaker**: `phones` → `+ speaker` → `+ candidate`.
+Dense candidates are reduced to their leading 32 PCs (a raw 768-d state is
+mostly noise at this sample size; the 32 PCs are what the numbers below use).
+
+Measured on 3 000 clips / 30 098 words / 2 637 speakers, out-of-fold R²
+increment over `phones + speaker`:
+
+| candidate | mean ΔR² | dur | pitch | range | PC1 ← phones+speaker |
+|---|---|---|---|---|---|
+| **bert-base-uncased token states (32 PCs)** | **+0.0179** | +0.017 | **+0.029** | +0.008 | 0.307 |
+| nltk POS one-hot | +0.0095 | +0.013 | +0.008 | +0.008 | 0.048 |
+| bge-small token states (32 PCs) | +0.0067 | +0.008 | +0.006 | +0.006 | 0.122 |
+| hashed spelling, 512 bins (**lexical control**) | +0.0018 | +0.004 | +0.000 | +0.001 | 0.455 |
+| sentence CLS (**null control**) | +0.0013 | +0.002 | −0.001 | +0.003 | 0.022 |
+
+Base R²: duration 0.454, pitch 0.055, range 0.184 — so the pitch gain is
++53 % relative, the largest.
+
+Readings:
+
+* **Word-level context is usable where the sentence CLS was not**: BERT's
+  increment is 14x the CLS control's, and the CLS control is where it should
+  be (~0), which validates the method.
+* **The gain is contextual, not lexical**: a 512-bin hash of the spelling is
+  46 % predictable from phones+speaker yet adds ~nothing, so the encoder is
+  contributing syntax/word-role/context, not a fancier word-id lookup.
+* **POS is the cheap half**: 45 int8 per word, no new dependency, no encoder
+  pass, and +0.0095.  BERT is 1.9x the gain for 32 float16 per word plus a
+  one-off BERT pass over the transcripts.
+* **bge token states are weak** relative to bert-base, even though bge's CLS
+  is the sentence embedding everything else in the stack uses.  Do not assume
+  one model's sentence vector implies good token states.
+
+### What was wired (full 768, not 32)
+
+The 32-dim figure above is the probe's *regularisation* choice, not a property
+of the representation: a PCA-width sweep (`--pca_list 8,16,32,64,128,256,raw`)
+keeps climbing to 256 (+0.032 vs +0.018 at 32) at the probe's 30 k words, and
+"raw" 768 only loses there because Ridge has too few rows.  With 1.5 M words
+available in the corpus there is no reason for an offline rank cap, so the
+**full 768 dims are stored** and the model learns the projection:
+
+* `.cond`: `word_bert (n_word, 768)` float16 (`hints/build.py --word-bert`,
+  text only, ~290-600 clips/s; `.cond` ~20 KB median).  `hints.json` records
+  `words.word_bert = {model, dim, pooling}` — width and encoder id are part of
+  the checkpoint contract.
+* dataset: `hint_word (B, N, 768)` (a word's vector repeated over its phones) +
+  `hint_word_valid (B, N)`.  The mask is the absent state because an all-zero
+  BERT output is a legitimate vector; `hint_dropout.word_sem` (0.15) clears the
+  mask only.
+* model: `word_proj = Linear(768, H)` + `word_null`, both zero-initialised,
+  added to every phoneme (encoder-side; decoder-side injection stays ablated).
+* `check_special_layout`: missing channel = NOTE under `--transfer_from`,
+  refused under `--resume_from`; the reverse direction is a hard error; the
+  width must match (both `hints.json` and the checkpoint).
+* Expected CE gain is not predictable from R²; the check is
+  `val_hint_channel_delta/word_sem` (0.0 at step 0 by construction — the
+  projection is zero) plus `eval_stage2_wer.py`.

@@ -418,9 +418,12 @@ def main(argv=None) -> int:
                     ("pitch +4 st", branch(batch, "shift", 4.0)),
                     ("pitch flattened (1 anchor/word)", branch(batch, "flat")),
                     ("pitch swapped across clips", branch(batch, "swap"))]
-    ce_arms += [("semantic absent (sem_null)", branch(batch, "sem_null")),
-                ("semantic swapped across clips", branch(batch, "sem_swap")),
-                ("semantic zero vector (valid)", branch(batch, "sem_zero"))]
+    # The sentence-CLS channel was removed in V2.2; its arms only exist for a
+    # pre-removal checkout, so do not print three identical rows.
+    if getattr(net, "sem_proj", None) is not None:
+        ce_arms += [("semantic absent (sem_null)", branch(batch, "sem_null")),
+                    ("semantic swapped across clips", branch(batch, "sem_swap")),
+                    ("semantic zero vector (valid)", branch(batch, "sem_zero"))]
     for label, b in ce_arms:
         v = ce(b)
         print(f"  {label:<32s} {v:.4f}   ({v - base:+.4f} vs real)")
@@ -559,7 +562,10 @@ def main(argv=None) -> int:
         print("    flattened keeps the level and drops the contour, so a")
         print("    meaningful drop means the anchors shape the melody.")
 
-    if args.skip_semantic:
+    if args.skip_semantic or getattr(net, "sem_proj", None) is None:
+        if getattr(net, "sem_proj", None) is None and not args.skip_semantic:
+            print("\n(semantic arms skipped: the sentence-CLS channel was "
+                  "removed in V2.2)")
         return 0
 
     # ------------------------------------------------------- semantic arms

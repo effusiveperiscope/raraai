@@ -119,7 +119,25 @@ def _audio_metrics(net_g, config, codes, sid, device):
     return {"dur": audio.numel() / sr, "f0": med, "spread": spread, "cv": cv}
 
 
+def _require_channel() -> None:
+    """The sentence-CLS channel was removed in V2.2 -- refuse to fake a result.
+
+    On a current model there is no ``sem_proj``, so every arm of this probe
+    would be identical and the missing effect would read as "measured zero".
+    """
+    from modeling.transformer import CodeTransformer as _CT
+    import omegaconf as _oc
+    net = _CT(_oc.OmegaConf.load("configs/transformer.yaml"))
+    if getattr(net, "sem_proj", None) is None:
+        raise SystemExit(
+            "The sentence-CLS channel was removed in V2.2 (it cost 0.004 nats; "
+            "see HINTS_PLAN.md §11).  This probe only applies to a pre-V2.2 "
+            "checkout/config; the word-level replacement is "
+            "scratch/hint_word_semantics_probe.py.")
+
+
 def main(argv=None) -> int:
+    _require_channel()
     args = parse_args(argv)
     torch.set_float32_matmul_precision("high")
     config = OmegaConf.load(args.config)

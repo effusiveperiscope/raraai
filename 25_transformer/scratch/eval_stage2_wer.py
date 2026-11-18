@@ -97,8 +97,11 @@ TENSOR_SUFFIXES = (".phone_ids", ".spec_codes", ".pitch_codes")
 #: User-facing channel names -> ``CodeTransformer.HINT_CHANNEL_KEYS``.  The
 #: mapping itself is *not* duplicated here: the model owns which batch keys
 #: carry a channel, so a new channel cannot drift out of sync with the ablation.
+# ``semantic`` is *not* here: the sentence-CLS channel was removed in V2.2, so
+# there is nothing to drop.  ``word_sem`` is the per-word state (V2.1).
 HINT_CHANNEL_ALIASES = {"intensity": "int", "register": "reg",
-                        "semantic": "sem", "pitch": "pitch", "slot": "slot"}
+                        "pitch": "pitch", "slot": "slot",
+                        "wordsem": "word_sem", "word_sem": "word_sem"}
 
 
 def hint_channel_keys(name: str):

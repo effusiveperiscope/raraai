@@ -1160,7 +1160,8 @@ levels is a config change and never a re-run):
 | `intensity` | float32(1) | calibrated + whisper-gated DSP prediction of **perceptual intensity** (emotional / phonation effort, 1..9). **Not loudness** — the feature set peak-normalises every clip on purpose. A deliberately coarse, *clip-level*, end-user control, not a reconstruction aid |
 
 | `register_st` | float32(1) | voiced-median f0, semitones re: 100 Hz |
-| `semantic` | float16(384) | bge-small-en-v1.5 CLS embedding, L2-normalised |
+| `semantic` | float16(384) | bge-small-en-v1.5 CLS embedding. **Removed in V2.2** — old `.cond` files still carry it, nothing reads it (see §4) |
+| `word_bert` | float16(n_word, 768) | **V2.1** per-word `bert-base-uncased` last-hidden-state mean (hints/build.py `--word-bert`, text only) |
 
 `hints.json` (next to the first `--filelist`, or `--hints-json`) carries the
 provenance (DSP tier/calibration/gate, semantic model id), coverage, and the
@@ -1258,7 +1259,6 @@ obvious place for them):
 | intensity | `n_levels` equal-frequency bins from `hints.json` (perceptual intensity, loudness-independent) | encoder + decoder |
 
 | register | `n_levels` equal-frequency bins from `hints.json`, fitted on the **deviation from the speaker's median** (v0.9; see below) | encoder |
-| semantic | 384-d bge vector -> `Linear(384, H)` | encoder + decoder |
 | word pitch | **v2 (default): 3 per-word anchors** `(value st, position)` repeated over the word's phones, plus the phone's position in the word; **v1: 8 voiced bins** (2 st cuts in [-6, +6]) + 1 unvoiced | encoder, per phone |
 
 | word timing | 8 log2 duration buckets (`n_slot_buckets`, fixed) | encoder, per phone |
@@ -1314,12 +1314,13 @@ Wiring:
   counted and printed once after the first epoch (`Hints: N without a .cond,
   M stale`).
 - **Collator**: pads `hint_pitch`/`hint_slot` exactly like `phone_ids`
-  (0 = absent) and stacks `hint_int`/`hint_reg`/`hint_sem`/`hint_sem_valid`.
-- **Model**: `encode()` adds `int_emb(int) + reg_emb(reg) + sem_proj(sem)` to
-  every phoneme and `pitch_emb(pitch) + slot_emb(slot)` per phone;
-  `delay_decoder` gets one constant per sample (`dec_int_emb(int) + sem`) added
-  to every column, like `spk_emb`. A dropped semantic vector goes through the
-  learned `sem_null` rather than `sem_proj(0)`, which would be a real sentence.
+  (0 = absent) and stacks `hint_int`/`hint_reg`.
+- **Model**: `encode()` adds `int_emb(int) + reg_emb(reg)` to every phoneme and
+  `pitch_emb(pitch) + slot_emb(slot)` per phone; `delay_decoder` gets one
+  constant per sample (`dec_int_emb(int)`) added to every column, like
+  `spk_emb`. **The sentence-level semantic channel was removed in V2.2** (it
+  cost 0.004 nats and 45 % of it was predictable from the phones; see below) —
+  the per-word state replaced it (V2.1 section further down).
   `decoder_hints: false` is the encoder-only ablation.
 - **Every hint table is zero-initialised (v0.9).** The tables are added to *every*
   phoneme, so a random one is a large perturbation of a warm-started model's text
@@ -1335,9 +1336,10 @@ Wiring:
   the clip-level channels even when the knob works (see v1.1) — they answer "is
   the channel predictive", not "is it controllable".
 - **Generation runs in the trained null state, not "no hints".**
-  `hint_dropout`/`hint_null_all` train **level 0** (`sem_null` for the semantic
-  vector), so `CodeTransformer.null_hints(B, N)` is the only hint-free state the
-  model ever saw. `resolve_hints()` maps `None` (and `"null"`/`"zero"`) to it;
+  `hint_dropout`/`hint_null_all` train **level 0** (``word_null`` for the
+  per-word state, ``hint_word_valid=False``), so
+  `CodeTransformer.null_hints(B, N)` is the only hint-free state the model ever
+  saw. `resolve_hints()` maps `None` (and `"null"`/`"zero"`) to it;
   `"omit"` returns the `OMIT_HINTS` marker (an empty dict, *not* `None`, since
   collapsing them made the ablation arm a copy of the trained one) and omits the
   vectors entirely — a different, out-of-distribution function (measured +0.136
@@ -1365,13 +1367,22 @@ Wiring:
 - **No re-preprocessing**: the codes are unchanged; only config keys move. The
   *parameter set* changes, so it needs a fresh `exp_name` (+ `--transfer_from`),
   like `eos_token`/`fim`/`length_cond`.
-- **The semantic channel is dead weight and measurably so**: CE is 0.004 nats
-  *worse* with the real bge vector than with `sem_null` (negative at every
-  epoch of `transformer_hints_v2`), the real vector sits closer to the null
-  state than a swapped one does, 45 % of its leading variance is predictable
-  from a bag of phone bigrams alone, and only 1.5 % is linearly recoverable
-  from the ground-truth codes (intensity: 50 %, register: 16 %). See
-  `HINTS_PLAN.md` §11 / `scratch/hint_semantic_value.py`.
+- **The semantic channel was removed in V2.2**, and it was measurably dead
+  weight: CE was 0.004 nats *worse* with the real bge vector than with the
+  trained null state (negative at every epoch of `transformer_hints_v2`), the
+  real vector sits closer to the null state than a swapped one does, 45 % of its
+  leading variance is predictable from a bag of phone bigrams alone, and only
+  1.5 % is linearly recoverable from the ground-truth codes (intensity: 50 %,
+  register: 16 %). See `HINTS_PLAN.md` §11 /
+  `scratch/hint_semantic_value.py` (historical: it reads `.cond`, not the
+  model). Old checkpoints still carry `net.sem_proj`/`sem_null`; the loader
+  ignores them and `check_special_layout` prints a NOTE.
+  **Granularity was the problem, not the idea**: *word*-level states do predict
+  word prosody beyond the phones -- bert-base token states +0.018 out-of-fold
+  R2 (pitch +53 % relative), nltk POS +0.010, bge token states +0.007, while a
+  hashed-spelling (lexical) control and the sentence CLS both sit at ~0.001.
+  See `HINTS_PLAN.md` §12 / `scratch/hint_word_semantics_probe.py`;
+  implemented as `hint_word_sem` in V2.1 (section below).
 - Validation is `test_hints.py` (CPU fixture: bucketing, dropout, per-word
   gather, stale rejection, collator shapes, loss moves when hints are dropped).
 
@@ -1456,6 +1467,38 @@ Contract and reload cost:
   `j` shifts anchors in **semitones**. `hint_knob_report.py --shift
   pitch=-4,-2,2,4` is the semitone sweep (`hint_channel_probe.py` skips its
   level sweep in anchors mode; `hint_channel_deltas` still drops the channel).
+
+### Per-word semantic state (stage 2, V2.1)
+
+The sentence CLS is dead (§11 of `HINTS_PLAN.md`), but *word* granularity is
+not. `transformer.hint_word_sem: true` (`hint_word_dim: 768`) feeds one
+`bert-base-uncased` vector **per word**, repeated over the word's phones:
+
+- **Corpus**: `hints/build.py --word-bert --source-filelist ...` writes
+  `word_bert (n_word, 768)` float16 into each `.cond` (needs the `phone_word_idx`
+  from the `--words` pass; no audio, no aligner; ~10 min for 151 k clips at
+  ~290 clips/s on a 5060 Ti). `hints.json` records
+  `words.word_bert = {model, dim, pooling}` — the width and the encoder id are
+  part of the checkpoint contract (a projection trained on 768-d inputs cannot
+  be fed another width, and a different encoder makes every dimension mean
+  something else), enforced in the constructor and by `check_special_layout`.
+- **Dataset**: `hint_word (B, N, 768)` + `hint_word_valid (B, N)`. The mask is
+  the absent state (an all-zero BERT output is a legitimate vector, so zeros
+  must not mean "no hint"); `hint_dropout.word_sem` (0.15) clears the mask only.
+- **Model**: `word_proj: Linear(768, H)` + `word_null`, both zero-initialised,
+  added to every phoneme (encoder-side, like the anchors). Decoder-side
+  injection was ablated negative in v1.0.
+- **Why 768 and not the probe's ~256**: the probe's saturation was a *sample
+  size* artefact (`scratch/hint_word_semantics_probe.py --pca_list ...`), and a
+  trained projection on 1.5 M words has no reason to keep an offline rank cap.
+  Measured increments over `phones + speaker` on 30 k words: bert +0.018
+  (pitch +53 % relative), POS +0.010, bge token states +0.007, hashed-spelling
+  and sentence-CLS controls ~0.001.
+- **No re-preprocessing of the codes**; only the `.cond` files change, so a new
+  `exp_name` + `--transfer_from` is required (new parameters) and the corpus
+  pass is `--word-bert` alone. A checkpoint without the channel is a NOTE under
+  `--transfer_from`, and refused under `--resume_from`.
+
 
 Phonemizer fixes shipped with it (see `HINTS_PLAN.md` §10):
 hyphenated compounds were going through g2p_en's neural fallback
@@ -1985,15 +2028,15 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
 python 2_training.py --config configs/transformer.yaml
 
 # Conditioning hints for stage 2: one <base>.cond per <base>.phone_ids.
-# intensity/register come from the stage-1 tensors; add `semantic` +
-# --source-filelist for the bge vector.  --words adds the per-word pitch/timing
-# fields via the aligner (needs the transcripts; merges into the existing
-# .cond) and drops clips whose phone_ids are stale.  Resumable: re-run the SAME
-# command with --skip-existing.  See hints/README.md for the full set.
+# intensity/register come from the stage-1 tensors; `semantic` is still
+# computable but no longer consumed (removed in V2.2), so it is not the default.
+# --words adds the per-word pitch/timing fields via the aligner (needs the
+# transcripts; merges into the existing .cond) and drops clips whose phone_ids
+# are stale.  Resumable: re-run the SAME command with --skip-existing.
 python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
     --wave-dir data/genshin_full_stage1 \
     --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
-    --hints intensity,register,semantic --words --device cuda:0
+    --hints intensity,register --words --device cuda:0
 
 # Fit the relative register: one semitone offset per speaker plus residual
 # edges.  Pass the *training* split (dataset_codes subtracts these means at load
@@ -2057,6 +2100,8 @@ python scratch/hint_codespace_probe.py --n 4000
 # Semantic-only probe on OOD text (null vs own vector vs another sentence's):
 # code agreement per prefix window, plus decoded duration/f0/energy when audio
 # is on.  The safe default is --no_audio (codes only, seconds per draw).
+# Historical (the sentence CLS was removed in V2.2; the script refuses to run
+# on a current model rather than reporting a fake zero).
 python scratch/hint_semantic_probe.py \
     --checkpoint checkpoints_stage2/hints_v1_p4_final_mono1/last.ckpt --no_audio
 

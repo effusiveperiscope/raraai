@@ -183,7 +183,7 @@ python hints/build.py \
     --workers 8
 
 # add the sentence vector too (downloads the bge weights on first use)
-#   --hints intensity,register,semantic
+#   --hints intensity,register
 # clips with no stage-1 .wave fall back to their own audio file from
 # --source-filelist (on by default; --no-audio-fallback disables)
 
@@ -203,8 +203,11 @@ asserts that):
 from features import FeatureExtractor
 fe = FeatureExtractor(hp=cfg, device="cuda:0")
 rec = fe.extract_hints(wav_48k, "Hey. you don't sound too excited.",
-                       intensity=True, register=True, semantic=True,
+                       intensity=True, register=True, semantic=False,
                        words=False)      # words=True needs the aligner
+# `semantic=True` still computes the bge CLS vector, but the model stopped
+# consuming it in V2.2 (HINTS_PLAN.md §11); pass it only to reproduce an old
+# corpus.
 fe.write_hints("test.wav.cond", rec)     # atomic, same format as build.py
 level = fe.hint_level(float(rec["intensity"]),
                       fe.load_hint_levels("hints.json")["intensity"]["edges"])
@@ -239,7 +242,7 @@ python hints/build.py \
     --filelist data/genshin_plus_extras/train_stage2.txt \
     --wave-dir data/genshin_full_stage1 \
     --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
-    --hints intensity,register,semantic \
+    --hints intensity,register \
     --words --device cuda:0
 # ...and if it stops for any reason, just add --skip-existing to resume:
 python hints/build.py ... --words --device cuda:0 --skip-existing
@@ -248,6 +251,31 @@ python hints/build.py ... --words --device cuda:0 --skip-existing
 - It runs `FeatureExtractor.extract` per clip: the **forced aligner is given the
   transcript**, so no ASR runs. `--source-filelist` is therefore mandatory (and
   its audio is also the intensity fallback).
+
+## Per-word semantic state (`--word-bert`): the text-only pass
+
+Hints V2.1 adds one `bert-base-uncased` vector **per word** (`word_bert`,
+float16, `(n_word, 768)`, mean over the word's wordpieces).  It needs the word
+fields above (for `phone_word_idx`) and the transcripts, but **no audio and no
+aligner**, so it is a separate, fast, resumable pass:
+
+```bash
+python hints/build.py     --filelist data/genshin_plus_extras/train_stage2.txt                data/genshin_plus_extras/val_stage2.txt     --word-bert     --source-filelist filelists_2/genshin_full_eng_text_linux.txt                       filelists_2/mlp_linux.txt                       filelists_2/vctk_linux.txt                       filelists_2/expresso_read_linux.txt     --hints-json data/genshin_plus_extras/hints_rel.json     --hints "" --device cuda:0            # --skip-existing to resume
+```
+
+- Words are the transcript reduced exactly like the aligner's tokens
+  (`features.transcript_words`), so they line up 1:1 with `phone_word_idx`; a
+  clip whose counts disagree is skipped, never guessed.
+- Measured ~290-600 clips/s on a 5060 Ti (151 k clips in ~5 min), and each
+  `.cond` grows to ~20 KB (p75 ~30 KB); the corpus is ~3 GB heavier.
+- It **merges**: the clip-level hints, the word fields and the pitch anchors are
+  preserved, and `hints.json` gains `words.word_bert = {model, dim, pooling}`
+  (the width and encoder id are part of the checkpoint contract, so
+  `transformer.hint_word_dim` must match).
+- Why word-level and not the sentence CLS: see `HINTS_PLAN.md` §11-12.  The CLS
+  is dead weight; word states add +0.018 out-of-fold R2 to word
+  duration/pitch/range beyond the phones, and a hashed-spelling control adds
+  ~0.
 - **Sequential on one GPU** (`--workers` is ignored, with a printed note); the
   aligner + RMVPE are single models. Measured on a 5060 Ti: **~5 clips/s once
   warm** (the first clip pays ~1.2 s for the caches), so the 151 k-clip

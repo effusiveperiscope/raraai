@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Is the semantic hint redundant, and is its content even in the codes?
+"""Is the (now removed) sentence-CLS hint redundant with the codes?
+
+**Historical.**  The sentence CLS was removed from the model in V2.2
+(HINTS_PLAN.md §11): it cost 0.004 nats and this probe is *why* -- it showed
+the vector is largely a function of the phoneme sequence and almost absent from
+the codes.  The script still runs because it reads only `.cond` + code tensors
+(no model), which makes it the reproducible record of that decision and a
+template for judging a future hint channel.
+
 
 Two questions decide whether the 384-d bge CLS channel is worth keeping:
 

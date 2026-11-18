@@ -687,6 +687,10 @@ class Stage2REPL:
         self.hint_slot_shift: int = 0
         self.hint_semantic: str = "cond"
         self.hint_semantic_text: Optional[str] = None
+        # Compatibility width for the retired sentence-CLS channel.  The model
+        # has no such parameters since V2.2, so every semantic control below is
+        # a no-op, kept only so old scripts/flags do not crash.
+        self.semantic_dim: int = 0
         self._base_hints: Optional[dict] = None   # last val item's levels
         self._sem_cache: dict = {}
 
@@ -868,7 +872,9 @@ class Stage2REPL:
         def has(suffix: str) -> bool:
             return any(k == suffix or k.endswith("." + suffix) for k in keys)
 
-        hints = has("sem_proj.weight") or has("sem_null")
+        hints = any(has(k) for k in ("int_emb.weight", "int_dir",
+                                    "pitch_emb.weight", "pitch_val_dir",
+                                    "word_proj.weight"))
         if bool(tcfg.get("hints", False)) != hints:
             print(f"NOTE: hints={hints} in {source}; using that.")
             tcfg.hints = hints
@@ -1170,14 +1176,29 @@ class Stage2REPL:
             base["hint_pitch_n"] = resize(base.get("hint_pitch_n"))
             base["hint_pitch_state"] = resize(base.get("hint_pitch_state"))
             base["hint_phone_frac"] = resize(base.get("hint_phone_frac"))
+        if getattr(self.net, "hint_word_sem", False):
+            wdim = int(self.net.hint_word_dim)
+            base["hint_word"] = resize(base.get("hint_word"), (wdim,))
+            v = base.get("hint_word_valid")
+            if v is None:
+                base["hint_word_valid"] = torch.zeros(n_phone,
+                                                     dtype=torch.bool)
+            else:
+                # A val item's own vectors are usable only when the phone
+                # sequence is unchanged; a shorter/different text falls back to
+                # the trained null state rather than a misaligned word.
+                keep = torch.zeros(n_phone, dtype=torch.bool)
+                m = min(n_phone, int(v.shape[0]))
+                if m == n_phone and int(v.numel()) == n_phone:
+                    keep[:m] = v[:m].bool()
+                base["hint_word_valid"] = keep
         if base.get("hint_int") is None:
             base["hint_int"] = torch.zeros((), dtype=torch.long)
         if base.get("hint_reg") is None:
             base["hint_reg"] = torch.zeros((), dtype=torch.long)
-        if base.get("hint_sem") is None:
-            base["hint_sem"] = torch.zeros(int(self.net.semantic_dim))
-        if base.get("hint_sem_valid") is None:
-            base["hint_sem_valid"] = torch.tensor(False)
+        if not self.semantic_dim:
+            base.pop("hint_sem", None)
+            base.pop("hint_sem_valid", None)
 
         # Absolute level overrides.
         if self.hint_intensity is not None and n_int:
@@ -1220,19 +1241,21 @@ class Stage2REPL:
             base["hint_slot"] = self._shift_levels(
                 base["hint_slot"], int(self.hint_slot_shift), n_slot)
 
-        # Semantic channel: replace, keep, or null it out explicitly.
-        vec = self._semantic_vector()
-        if vec is not None:
-            v = torch.as_tensor(vec, dtype=torch.float32).reshape(-1)
-            if v.numel() != int(self.net.semantic_dim):
-                raise ValueError(
-                    f"semantic vector has {v.numel()} dims, model wants "
-                    f"{self.net.semantic_dim}")
-            base["hint_sem"] = v
-            base["hint_sem_valid"] = torch.tensor(True)
-        elif self.hint_semantic == "null":
-            base["hint_sem"] = torch.zeros(int(self.net.semantic_dim))
-            base["hint_sem_valid"] = torch.tensor(False)
+        # Semantic channel (removed in V2.2): only meaningful for a model that
+        # still has the parameters, which the current one never does.
+        if self.semantic_dim:
+            vec = self._semantic_vector()
+            if vec is not None:
+                v = torch.as_tensor(vec, dtype=torch.float32).reshape(-1)
+                if v.numel() != self.semantic_dim:
+                    raise ValueError(
+                        f"semantic vector has {v.numel()} dims, model wants "
+                        f"{self.semantic_dim}")
+                base["hint_sem"] = v
+                base["hint_sem_valid"] = torch.tensor(True)
+            elif self.hint_semantic == "null":
+                base["hint_sem"] = torch.zeros(self.semantic_dim)
+                base["hint_sem_valid"] = torch.tensor(False)
 
         return {k: (v.unsqueeze(0) if torch.is_tensor(v) else v)
                 for k, v in base.items()}
@@ -1245,8 +1268,8 @@ class Stage2REPL:
         inten = ("base" if self.hint_intensity is None
                  else str(self.hint_intensity))
         reg = ("base" if self.hint_register is None else str(self.hint_register))
-        sem = self.hint_semantic
-        if self.hint_semantic_text:
+        sem = "removed" if not self.semantic_dim else self.hint_semantic
+        if self.semantic_dim and self.hint_semantic_text:
             sem = f"text({self.hint_semantic_text!r})"
         return (f"base={self.hint_mode}, intensity={inten}/{n_int}, "
                 f"register={reg}/{n_reg}, pitch={self.hint_pitch_st:+.1f}st, "
@@ -1629,7 +1652,7 @@ class Stage2REPL:
         if not getattr(self.net, "hints", False) or "hint_int" not in batch:
             return None
         n_phone = int(batch["phone_lengths"][0])
-        keep = ("hint_int", "hint_reg", "hint_sem", "hint_sem_valid")
+        keep = ("hint_int", "hint_reg")
         out = {}
         for key in keep:
             v = batch.get(key)
@@ -1640,7 +1663,9 @@ class Stage2REPL:
             if v is not None:
                 out[key] = v[0, :n_phone].detach().cpu()
         for key in ("hint_pitch_val", "hint_pitch_pos", "hint_pitch_n",
-                    "hint_pitch_state", "hint_phone_frac"):
+                    "hint_pitch_state", "hint_phone_frac",
+                    # V2.1 word state (per phone, trailing 768 dims).
+                    "hint_word", "hint_word_valid"):
             v = batch.get(key)
             if v is not None:
                 out[key] = v[0, :n_phone].detach().cpu()

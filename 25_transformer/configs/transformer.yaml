@@ -18,7 +18,7 @@
 # The exp_name is deliberately *not* a v1 run's: 2_training.py auto-resumes
 # checkpoints_stage2/{exp_name}/last.ckpt, and a v1 (table) checkpoint cannot
 # be resumed into the anchor layout.
-exp_name: transformer_hints_v2
+exp_name: transformer_hints_v2.1_wordsem
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -44,8 +44,13 @@ transformer:
   # this changes the parameter set: fresh exp_name + --transfer_from.
   #   intensity  perceptual effort 1-9, loudness-independent, clip-level
   #   register   f0 level relative to the speaker's median, clip-level
-  #   semantic   bge-small-en-v1.5 384-d sentence vector, from the text
   #   pitch/slot per-word f0 and duration buckets (need the --words pass)
+  #   word_sem   per-word BERT state (V2.1), see hint_word_sem below
+  # The sentence-level bge CLS channel was *removed* in V2.2: it cost 0.004
+  # nats (better without it at every epoch of transformer_hints_v2) and only
+  # 1.5 % of it was recoverable from the codes, vs 50 % for intensity.  The
+  # `.cond` key may still exist (hints/build.py can compute it); nothing reads
+  # it.  Word-level states replace it (hint_word_sem).
   hints: true
   # hints/build.py output.  Dataset and model read the SAME file, so a level id
   # cannot mean two things; it is part of the checkpoint contract.  v0.9+ uses
@@ -54,11 +59,9 @@ transformer:
   # Assert that the config and hints_json agree about the register scale (the
   # level ids are identical either way, so no shape guard can catch it).
   relative_register: true
-  # Feed the clip-level channels (intensity + semantic) to the decoder too.
+  # Feed the clip-level channel (intensity) to the decoder too.
   # Off = encoder-only ablation.
   decoder_hints: true
-  # Width of the stored sentence vector (bge-small-en-v1.5 = 384).
-  semantic_dim: 384
   # Word-pitch cuts in semitones around the utterance's voiced median (fixed):
   # 8 voiced bins, then one explicit "unvoiced" class, then 0 = "absent".
   # Only read when hint_pitch_mode: table.
@@ -76,16 +79,32 @@ transformer:
   # Changes the parameter set -> fresh exp_name + --transfer_from.
   hint_pitch_mode: anchors
   hint_pitch_anchors: 3
+  # ---- per-word semantic state (Hints V2.1) -------------------------------
+  # One `bert-base-uncased` last-hidden-state vector per WORD (mean over its
+  # wordpieces), repeated over the word's phones.  Measured on 30k words
+  # (HINTS_PLAN.md §12): +0.018 out-of-fold R2 on word duration/pitch/range
+  # *beyond* the phone sequence, where the sentence CLS and a lexical
+  # (hashed-spelling) control both sit at ~0.001.  POS is +0.010 and bge token
+  # states +0.007, so BERT-base is the best of the three.
+  # The full 768 dims are stored and `Linear(768, H)` learns what matters; the
+  # probe's numerical optimum was ~256 *at its 30k-word sample*, but a trained
+  # projection on 1.5M words has no reason to keep that cap (a 768-wide state
+  # is 1.5 KB/word).
+  # Needs the corpus rebuilt with `hints/build.py --word-bert`; the width is
+  # part of the checkpoint contract (hints.json -> words.word_bert.dim).
+  # New parameters -> fresh exp_name + --transfer_from.
+  hint_word_sem: true
+  hint_word_dim: 768
   # Word-duration buckets: log2 of the slot length in code frames.
   n_slot_buckets: 8
-  # Per-channel dropout (training items only); a dropped channel is level 0 /
-  # sem_null.  Keep semantic highest: it is the most informative per clip.
+  # Per-channel dropout (training items only); a dropped channel is level 0
+  # (word_sem: `hint_word_valid=False`, i.e. `word_null`).
   hint_dropout:
     intensity: 0.15
     register: 0.10
     pitch: 0.15
-    semantic: 0.20
     timing: 0.15
+    word_sem: 0.15
   # Drop every channel for this fraction of items so the unconditional path is
   # trained too (hint-free inference, and val_loss_nohint must mean something).
   hint_null_all: 0.10

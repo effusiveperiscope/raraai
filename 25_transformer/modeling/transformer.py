@@ -108,7 +108,8 @@ import torch.nn.functional as F
 try:                                    # repo root on sys.path (training/tests)
     from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
                               load_levels as load_hint_levels,
-                              load_pitch_anchors)
+                              load_pitch_anchors, load_word_bert_dim,
+                              load_word_bert_model)
 except ImportError:                     # `python modeling/transformer.py`
     import os as _os
     import sys as _sys
@@ -116,7 +117,8 @@ except ImportError:                     # `python modeling/transformer.py`
         _os.path.abspath(__file__))))
     from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
                               load_levels as load_hint_levels,
-                              load_pitch_anchors)
+                              load_pitch_anchors, load_word_bert_dim,
+                              load_word_bert_model)
 
 
 def _get_cfg(cfg, key, default):
@@ -647,7 +649,6 @@ class CodeTransformer(nn.Module):
         hints_on = bool(_get_cfg(tcfg, "hints", False))
         hints_json = _get_cfg(tcfg, "hints_json", None)
         decoder_hints = bool(_get_cfg(tcfg, "decoder_hints", True))
-        semantic_dim = int(_get_cfg(tcfg, "semantic_dim", 384))
         # *Where* the clip-level channels are injected (Phase 2).  The additive
         # path above ``_temporal_norm`` cannot express a per-clip constant, so
         # these two switches add a post-norm path on each side of the model:
@@ -799,17 +800,26 @@ class CodeTransformer(nn.Module):
         self.hint_pitch_anchors = max(
             int(_get_cfg(tcfg, "hint_pitch_anchors", 3) or 3), 1)
 
+        # Hints V2.1: per-word BERT states, repeated over the word's phones.
+        # The sentence CLS is dead (HINTS_PLAN.md §11), but word-level states
+        # do predict word prosody beyond the phones: +0.018 out-of-fold R2 on
+        # duration/pitch/range, with the gain still growing at 256 dims -- so
+        # the full 768 are stored and *this* projection learns what matters
+        # (§12). ``word_dim`` is part of the checkpoint contract (a projection
+        # trained on 768-d inputs cannot be fed another width, and a different
+        # encoder would make every dimension mean something else).
+        self.hint_word_sem = bool(_get_cfg(tcfg, "hint_word_sem", False))
+        self.hint_word_dim = int(_get_cfg(tcfg, "hint_word_dim", 768) or 768)
+
         # Every remaining channel is a small ``(n_levels + 1, hidden)``
         # embedding indexed by a level id, row 0 being the trained "not
         # provided" state (the dataset applies per-channel dropout, so that row
         # is always exercised).
         # They live here rather than on the encoder/decoder so the checkpoint
-        # has one obvious place for every hint parameter, and so the semantic
-        # projection can feed both halves without being registered twice.
+        # has one obvious place for every hint parameter.
         self.hints = bool(hints_on)
         self.decoder_hints = bool(decoder_hints) and self.hints
         self.hints_json = str(hints_json) if hints_json else None
-        self.semantic_dim = int(semantic_dim)
         self.pitch_edges = [float(e) for e in pitch_edges]
         self.n_slot_buckets = max(int(n_slot_buckets), 1)
         self.relative_register = relative_register
@@ -864,8 +874,22 @@ class CodeTransformer(nn.Module):
                     f"hints_json at an absolute corpus.")
             self.pitch_emb = nn.Embedding(self.n_pitch_levels + 2, hidden_size)
             self.slot_emb = nn.Embedding(self.n_slot_buckets + 1, hidden_size)
-            self.sem_proj = nn.Linear(self.semantic_dim, hidden_size)
-            self.sem_null = nn.Parameter(torch.zeros(hidden_size))
+            if self.hint_word_sem:
+                stored_dim = load_word_bert_dim(self.hints_json)
+                if stored_dim is not None and int(stored_dim) != self.hint_word_dim:
+                    raise ValueError(
+                        f"transformer.hint_word_dim={self.hint_word_dim} but "
+                        f"{self.hints_json} was built with word_bert dim "
+                        f"{stored_dim}.  Re-run hints/build.py --word-bert "
+                        f"(the width is whatever --word-bert-model emits), or "
+                        f"match the config to the corpus.")
+                self._word_bert_model = load_word_bert_model(self.hints_json)
+                self.word_proj = nn.Linear(self.hint_word_dim, hidden_size)
+                self.word_null = nn.Parameter(torch.zeros(hidden_size))
+            else:
+                self._word_bert_model = None
+                self.word_proj = None
+                self.word_null = None
             if self.hint_pitch_mode == "anchors":
                 # The anchor count is part of the checkpoint contract: slot
                 # index a means a different point of the contour if it moves.
@@ -924,7 +948,7 @@ class CodeTransformer(nn.Module):
                                                  hidden_size)
                                     if self.decoder_hints else None)
             # Zero-initialise every hint table.  ``encode`` adds
-            # ``int_emb(int) + reg_emb(reg) + sem_proj(sem)`` to *every*
+            # ``int_emb(int) + reg_emb(reg)`` to *every*
             # phoneme, so a randomly-initialised table is a large random
             # perturbation of the encoder memory -- applied to 90 % of training
             # items, at exactly the moment a ``--transfer_from`` model's text
@@ -936,15 +960,14 @@ class CodeTransformer(nn.Module):
                         self.slot_emb, self.dec_int_emb):
                 if emb is not None:
                     nn.init.zeros_(emb.weight)
-            nn.init.zeros_(self.sem_proj.weight)
-            nn.init.zeros_(self.sem_proj.bias)
+            if self.word_proj is not None:
+                nn.init.zeros_(self.word_proj.weight)
+                nn.init.zeros_(self.word_proj.bias)
         else:
             self.int_emb = None
             self.reg_emb = None
             self.pitch_emb = None
             self.slot_emb = None
-            self.sem_proj = None
-            self.sem_null = None
             self.dec_int_emb = None
             self.int_dir = self.int_null = None
             self.reg_dir = self.reg_null = None
@@ -955,6 +978,9 @@ class CodeTransformer(nn.Module):
             self.pitch_unvoiced = None
             self.pitch_absent = None
             self.pitch_frac_dir = None
+            self.word_proj = None
+            self.word_null = None
+            self._word_bert_model = None
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -1301,7 +1327,7 @@ class CodeTransformer(nn.Module):
         ``hints`` is the collated batch (or any dict with the same keys); the
         hint channels are added to the phoneme embeddings inside the encoder.
         ``None`` on a hint-enabled model resolves to the **trained null state**
-        (all level 0 / ``sem_null``, see :meth:`resolve_hints`), which is what
+        (all level 0, see :meth:`resolve_hints`), which is what
         every generation path should use; ``"omit"`` reproduces the historical
         "no vectors at all" behaviour for ablations.  On a model without hint
         tables both are a no-op, identical to a pre-v0.8 model.
@@ -1320,9 +1346,9 @@ class CodeTransformer(nn.Module):
                    dtype: torch.dtype = torch.long) -> Optional[dict]:
         """The trained "not provided" state, as a collator-shaped dict.
 
-        Every hint table has a level-0 row and ``sem_null`` is its own learned
-        vector, and ``train.hint_dropout`` / ``train.hint_null_all`` exercise
-        exactly this state during training.  **Omitting the vectors instead**
+        Every hint table has a level-0 row (``word_null`` is the semantic
+        state's equivalent), and ``train.hint_dropout`` / ``train.hint_null_all``
+        exercise exactly this state during training.  **Omitting the vectors instead**
         is a *different* function: measured on the finished
         ``transformer_v0.9`` (step 433 455) it costs +0.136 nats against the
         real hints, of which the trained null state accounts for +0.023 -- i.e.
@@ -1343,7 +1369,7 @@ class CodeTransformer(nn.Module):
             return None
         if device is None:
             device = (self.pitch_emb.weight.device if self.pitch_emb is not None
-                      else self.sem_proj.weight.device)
+                      else self.slot_emb.weight.device)
         dev = device
 
         def zeros(*shape, dt=dtype):
@@ -1352,8 +1378,6 @@ class CodeTransformer(nn.Module):
         return {
             "hint_int": zeros(batch_size),
             "hint_reg": zeros(batch_size),
-            "hint_sem": zeros(batch_size, self.semantic_dim, dt=torch.float32),
-            "hint_sem_valid": zeros(batch_size, dt=torch.bool),
             "hint_pitch": zeros(batch_size, n_phone),
             "hint_slot": zeros(batch_size, n_phone),
             # Hints V2 anchors: state 0 = the trained "absent" path, so these
@@ -1365,6 +1389,10 @@ class CodeTransformer(nn.Module):
             "hint_pitch_n": zeros(batch_size, n_phone),
             "hint_pitch_state": zeros(batch_size, n_phone),
             "hint_phone_frac": zeros(batch_size, n_phone, dt=torch.float32),
+            # V2.1: valid=False is the trained "absent" state -> word_null.
+            "hint_word": zeros(batch_size, n_phone, self.hint_word_dim,
+                               dt=torch.float32),
+            "hint_word_valid": zeros(batch_size, n_phone, dt=torch.bool),
         }
 
     def resolve_hints(self, hints, batch_size: int, n_phone: int, device):
@@ -1401,32 +1429,6 @@ class CodeTransformer(nn.Module):
 
 
 
-    def _semantic_hint(self, hints) -> Optional[torch.Tensor]:
-        """Project the 384-d sentence vector to ``hidden_size``.
-
-        Absent / dropped semantic hints go through ``sem_null`` rather than
-        through ``sem_proj(0)``: a dropped channel has to be a *distinct,
-        trained* state, otherwise "no hint" would look like an arbitrary real
-        sentence (the projection has a bias).
-        """
-        if not self.hints or hints is None:
-            return None
-        sem = hints.get("hint_sem")
-        if sem is None or sem.numel() == 0:
-            return None
-        if sem.size(-1) != self.semantic_dim:
-            raise ValueError(
-                f"transformer.semantic_dim={self.semantic_dim} but the batch's "
-                f"hint_sem is {tuple(sem.shape)}; the .cond files and the "
-                f"config disagree (re-run hints/build.py --hints semantic, or "
-                f"fix semantic_dim).")
-        x = self.sem_proj(sem.to(self.sem_null.device, torch.float32))
-        valid = hints.get("hint_sem_valid")
-        if valid is not None:
-            keep = valid.to(x.device).bool().unsqueeze(-1)
-            x = torch.where(keep, x, self.sem_null.to(x.dtype).expand_as(x))
-        return x
-
     @staticmethod
     def monotone_level_vec(levels, direction, null, n_levels):
         """``(B, H)`` ordered-dial encoding of a clip-level hint.
@@ -1453,7 +1455,7 @@ class CodeTransformer(nn.Module):
     def _enc_hints(self, hints, device):
         """``(clip_vec (B,H) | None, per_phone (B,N,H) | None)`` for the encoder.
 
-        Clip-level: intensity + register + semantic.  Per phone: word pitch
+        Clip-level: intensity + register.  Per phone: word pitch
         (including the explicit unvoiced class) + word duration bucket.  Word
         hints are attached to *phones*, not words, because that is the sequence
         the encoder actually sees.
@@ -1477,9 +1479,6 @@ class CodeTransformer(nn.Module):
                     reg, self.reg_dir, self.reg_null, self.n_register_levels)
             else:
                 clip = clip + self.reg_emb(reg)
-        sem = self._semantic_hint(hints)
-        if sem is not None:
-            clip = clip + sem
 
         pos = None
         if self.hint_pitch_mode == "anchors":
@@ -1492,7 +1491,38 @@ class CodeTransformer(nn.Module):
         if slot is not None and slot.numel() > 0:
             slot_vec = self.slot_emb(slot.to(device).long())
             pos = slot_vec if pos is None else pos + slot_vec
+        word = self._word_hint(hints, device)
+        if word is not None:
+            pos = word if pos is None else pos + word
         return clip, pos
+
+    def _word_hint(self, hints, device):
+        """``(B, N, H)`` per-phone vector from each word's BERT state.
+
+        The dataset repeats a word's vector over its phones, so this is a plain
+        per-phone projection -- no pooling of its own.  ``hint_word_valid`` is
+        what carries "absent"/"dropped": those rows go through the learned
+        ``word_null`` rather than ``word_proj(0)``, because an all-zero input is
+        a legitimate (if unusual) encoder vector and the two must stay distinct
+        for the dropout design to mean what it says.
+        """
+        if not self.hint_word_sem:
+            return None
+        w = hints.get("hint_word")
+        if w is None or w.numel() == 0:
+            return None
+        w = w.to(device, torch.float32)
+        if int(w.shape[-1]) != self.hint_word_dim:
+            raise ValueError(
+                f"hint_word has {int(w.shape[-1])} dims but "
+                f"transformer.hint_word_dim={self.hint_word_dim}")
+        x = self.word_proj(w)
+        valid = hints.get("hint_word_valid")
+        if valid is None:
+            return x
+        keep = valid.to(device).bool().unsqueeze(-1)
+        null = self.word_null.to(x.dtype).expand_as(x)
+        return torch.where(keep, x, null)
 
     def _pitch_anchor_vec(self, hints, device):
         """``(B, N, H)`` per-phone vector from each word's pitch anchors.
@@ -1571,9 +1601,6 @@ class CodeTransformer(nn.Module):
         else:
             out = self.dec_int_emb(
                 int_ids.to(self.dec_int_emb.weight.device).long())
-        sem = self._semantic_hint(hints)
-        if sem is not None:
-            out = out + sem
         return out
 
     @staticmethod
@@ -1583,8 +1610,7 @@ class CodeTransformer(nn.Module):
             return a is b
         if a is OMIT_HINTS or b is OMIT_HINTS:
             return a is b
-        for key in ("hint_int", "hint_reg", "hint_sem", "hint_sem_valid",
-                    "hint_pitch", "hint_slot"):
+        for key in ("hint_int", "hint_reg", "hint_pitch", "hint_slot"):
             va, vb = a.get(key), b.get(key)
             if va is None:
                 continue
@@ -1600,7 +1626,7 @@ class CodeTransformer(nn.Module):
 
         Classifier-free guidance over the hint channels:
         ``logits = uncond + w * (cond - uncond)`` with ``uncond`` the trained
-        null state (level 0 / ``sem_null``) and ``cond`` the hints actually
+        null state (every channel absent) and ``cond`` the hints actually
         passed in.  It exists because the hint channels are *style* inputs: the
         teacher-forced CE gradient they get is tiny (measured 0.0000-0.011
         nats), so a plain conditional model gives a weak knob even with a
@@ -1718,8 +1744,8 @@ class CodeTransformer(nn.Module):
                 resulting ``fim_middle_loss`` difference is directly attributable
                 to that channel.
             hints: the collated batch (or any dict with ``hint_int`` /
-                ``hint_reg`` / ``hint_sem`` / ``hint_sem_valid``) whose
-                clip-level channels are added to every decoder column
+                ``hint_reg``) whose clip-level channels are added to every
+                decoder column
                 (``transformer.hints``).  ``None`` is a no-op.
 
         Returns a dict with the total loss plus per-group (spec/pitch) losses
@@ -2027,12 +2053,13 @@ class CodeTransformer(nn.Module):
     HINT_CHANNEL_KEYS = {
         "int": ("hint_int",),
         "reg": ("hint_reg",),
-        "sem": ("hint_sem", "hint_sem_valid"),
         # Both pitch representations are dropped together: state 0 is the
         # trained "absent" path for the anchors, level 0 for the v1 table.
         "pitch": ("hint_pitch", "hint_pitch_val", "hint_pitch_pos",
                   "hint_pitch_n", "hint_pitch_state"),
         "slot": ("hint_slot",),
+        # V2.1 word states: the mask is the absent state, so both move together.
+        "word_sem": ("hint_word", "hint_word_valid"),
     }
 
     @torch.no_grad()
@@ -2044,7 +2071,7 @@ class CodeTransformer(nn.Module):
         neither ``val_loss`` nor ``val_hint_gap`` can: the latter drops every
         channel at once, so one live channel hides four dead ones.  Each arm
         re-scores the *same* batch with exactly one channel at its trained
-        "not provided" state (level 0 / ``hint_sem_valid=False``), plus:
+        "not provided" state (every channel absent), plus:
 
         * ``all``  - every channel dropped (the trained null state, i.e. what
           generation runs in by default);
@@ -2129,8 +2156,8 @@ class CodeTransformer(nn.Module):
                 was built without EOS.
             return_lengths: also return the ``(B,)`` per-sample frame counts.
             hints: optional collated batch / hint dict.  ``None`` means the
-                **trained null state** (every channel at level 0, ``sem_null``
-                for the semantic vector) -- not "no hints"; pass ``"omit"`` for
+                **trained null state** (every channel absent) -- not "no
+                hints"; pass ``"omit"`` for
                 the historical behaviour of dropping the vectors entirely (see
                 :meth:`resolve_hints`).
             hint_guidance, hint_guidance_books: classifier-free guidance over
@@ -2148,7 +2175,7 @@ class CodeTransformer(nn.Module):
         use_eos = self.eos_token if stop_on_eos is None else bool(stop_on_eos)
         use_eos = use_eos and self.eos_token
         try:
-            # ``None`` -> the trained null state (level 0 / ``sem_null``), which
+            # ``None`` -> the trained null state (every channel absent), which
             # is the only hint-free state the model ever saw.  See
             # ``resolve_hints``; pass "omit" to reproduce the pre-Phase-0 path.
             hints = self.resolve_hints(hints, phone_ids.shape[0],
@@ -2453,7 +2480,9 @@ class CodeTransformer(nn.Module):
                           else f"{self.n_pitch_levels} pitch")
             hints = (f", hints={self.n_intensity_levels} int/{pitch_desc}"
                      f"/{self.n_register_levels} reg/{self.n_slot_buckets}"
-                     f" slot+sem{self.semantic_dim}"
+                     f" slot"
+                     + (f"+word{self.hint_word_dim}" if self.hint_word_sem
+                        else "")
                      + (' (decoder too)' if self.decoder_hints
                         else ' (encoder only)'))
             if self.hint_monotone:

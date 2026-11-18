@@ -42,8 +42,6 @@ the corpus rebuilt:
 
     hint_int      (B,)      long   intensity level,      0 = absent
     hint_reg      (B,)      long   register level,       0 = absent
-    hint_sem      (B, 384)  float  sentence embedding,   zeros where absent
-    hint_sem_valid(B,)      bool   False -> the model uses its own null vector
     hint_pitch    (B, N)    long   per-phone word-pitch level
                                    (0 absent, 1..P voiced bins, P+1 unvoiced)
     hint_slot     (B, N)    long   per-phone word-duration bucket (0 absent)
@@ -54,6 +52,10 @@ the corpus rebuilt:
                                    (0 = the word has no voiced frames)
     hint_pitch_state(B, N)  long   0 absent, 1 voiced, 2 unvoiced
     hint_phone_frac(B, N)   float  phone's position inside its word, 0..1
+    hint_word     (B, N, D) float  word's BERT state, repeated over its phones
+                                   (Hints V2.1; D = 768)
+    hint_word_valid(B, N)   bool   False -> the model uses its trained
+                                   ``word_null`` vector (absent / dropped)
 
 The per-phone arrays are gathered from the word-level fields via
 ``phone_word_idx``, and cropped in lockstep with ``max_phone_length``.  Edges for
@@ -94,7 +96,7 @@ from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
                           slot_bucket, word_pitch_levels)
 
 #: Hint channels that ``hint_dropout`` can switch off independently.
-HINT_CHANNELS = ("intensity", "register", "pitch", "semantic", "timing")
+HINT_CHANNELS = ("intensity", "register", "pitch", "timing", "word_sem")
 
 #: ``.cond`` suffix, matching ``hints.build`` (sibling of ``<base>.phone_ids``).
 COND_SUFFIX = ".cond"
@@ -262,12 +264,13 @@ class CodeDataset(Dataset):
         """
         out: Dict[str, object] = {
             "hint_int": 0, "hint_reg": 0,
-            "hint_sem": None, "hint_sem_valid": False,
             "hint_pitch": None, "hint_slot": None,
             # Hints V2 pitch anchors (repeat-over-phones representation).
             "hint_pitch_val": None, "hint_pitch_pos": None,
             "hint_pitch_n": None, "hint_pitch_state": None,
             "hint_phone_frac": None,
+            # Hints V2.1 per-word BERT state, repeated over the word's phones.
+            "hint_word": None, "hint_word_valid": None,
         }
         path = cond_path_for(phone_ids_path)
         if not os.path.exists(path):
@@ -288,12 +291,6 @@ class CodeDataset(Dataset):
                 out["hint_reg"] = bucket_levels(
                     register_rel_st(value, sid, self.register_speaker_means),
                     self.register_edges)
-        if "semantic" in cond:
-            vec = cond["semantic"].float().reshape(-1)
-            if torch.isfinite(vec).all() and float(vec.abs().sum()) > 0:
-                out["hint_sem"] = vec
-                out["hint_sem_valid"] = True
-
         # Word-level span: only usable if it describes *this* phone sequence.
         if "phone_word_idx" in cond:
             if int(cond.get("n_phone", -1)) != int(n_phone):
@@ -310,6 +307,7 @@ class CodeDataset(Dataset):
                     out["hint_pitch"] = torch.as_tensor(pitch_w[idx].astype(np.int64))
                     out["hint_slot"] = torch.as_tensor(slot_w[idx].astype(np.int64))
                     self._load_pitch_anchors(cond, idx, out)
+                    self._load_word_bert(cond, idx, out)
 
         if self.is_train:
             self._dropout_hints(out)
@@ -363,6 +361,29 @@ class CodeDataset(Dataset):
         out["hint_pitch_state"] = torch.from_numpy(state)
         out["hint_phone_frac"] = torch.from_numpy(frac.astype(np.float32))
 
+    def _load_word_bert(self, cond, idx, out) -> None:
+        """Expand each word's BERT state over its phones (Hints V2.1).
+
+        The word vector is *repeated* over the word's phones, exactly like the
+        pitch anchors: the encoder input is per phone, and a word has ~2.5
+        phones, so there is no meaningful per-phone projection to compute here.
+        Absence is a per-phone mask (``hint_word_valid``), which the model maps
+        to its own trained ``word_null`` vector -- an all-zero BERT output is a
+        legitimate vector and must not be overloaded to mean "no hint".
+
+        A ``.cond`` without ``word_bert`` (pre-V2.1, or a clip whose word fields
+        were dropped) simply leaves both keys ``None``.
+        """
+        wb = cond.get("word_bert")
+        if wb is None:
+            return
+        vec = wb.float()
+        need = (int(idx.max()) + 1) if idx.size else 0
+        if vec.dim() != 2 or vec.shape[0] < need:
+            return
+        out["hint_word"] = vec[idx]
+        out["hint_word_valid"] = torch.ones(int(idx.size), dtype=torch.bool)
+
     def _dropout_hints(self, out: Dict[str, object]) -> None:
         """Zero hint channels in-place (training only; see ``_load_hints``)."""
         if self.hint_null_all > 0.0 and self.rng.random() < self.hint_null_all:
@@ -375,8 +396,6 @@ class CodeDataset(Dataset):
             out["hint_int"] = 0
         if "register" in off:
             out["hint_reg"] = 0
-        if "semantic" in off:
-            out["hint_sem_valid"] = False
         if "pitch" in off:
             if out["hint_pitch"] is not None:
                 out["hint_pitch"] = torch.zeros_like(out["hint_pitch"])
@@ -388,6 +407,10 @@ class CodeDataset(Dataset):
                     out["hint_pitch_state"])
         if "timing" in off and out["hint_slot"] is not None:
             out["hint_slot"] = torch.zeros_like(out["hint_slot"])
+        if "word_sem" in off and out["hint_word_valid"] is not None:
+            # Keep the vectors; the mask is what the model reads, so switching
+            # the channel back on is free.
+            out["hint_word_valid"] = torch.zeros_like(out["hint_word_valid"])
 
     def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor):
         """Cut the item to ``max_frames`` and report whether its end survived.
@@ -440,7 +463,7 @@ class CodeDataset(Dataset):
             # otherwise they would describe a different text than the model sees.
             for key in ("hint_pitch", "hint_slot", "hint_pitch_val",
                         "hint_pitch_pos", "hint_pitch_n", "hint_pitch_state",
-                        "hint_phone_frac"):
+                        "hint_phone_frac", "hint_word", "hint_word_valid"):
                 if hint.get(key) is not None:
                     hint[key] = hint[key][: phone_ids.numel()]
 
@@ -521,22 +544,24 @@ class CodeCollator:
         fim_prefix_len = torch.zeros(len(batch), dtype=torch.long)
         fim_mid_len = torch.zeros(len(batch), dtype=torch.long)
         # Conditioning hints (no-op unless the dataset emits them, i.e. unless
-        # transformer.hints is on).  Level 0 / hint_sem_valid=False is the
-        # trained "not provided" state, so padding with zeros is correct.
+        # transformer.hints is on).  Level 0 is the trained "not provided"
+        # state, so padding with zeros is correct.
         has_hints = "hint_int" in batch[0]
-        hint_int = hint_reg = hint_sem = hint_sem_valid = None
+        hint_int = hint_reg = None
         hint_pitch = hint_slot = None
         has_anchors = has_hints and batch[0].get("hint_pitch_val") is not None
         hint_pitch_val = hint_pitch_pos = hint_pitch_n = None
         hint_pitch_state = hint_phone_frac = None
+        # A batch can mix clips with and without `word_bert` (a clip whose word
+        # fields were dropped), so presence is per batch, not per first item.
+        dims_word = [int(x["hint_word"].shape[1]) for x in batch
+                     if x.get("hint_word") is not None] if has_hints else []
+        has_word = bool(dims_word)
+        word_dim = max(dims_word) if dims_word else 0
+        hint_word = hint_word_valid = None
         if has_hints:
             hint_int = torch.zeros(len(batch), dtype=torch.long)
             hint_reg = torch.zeros(len(batch), dtype=torch.long)
-            hint_sem_valid = torch.zeros(len(batch), dtype=torch.bool)
-            dims = [int(x["hint_sem"].numel()) for x in batch
-                    if x.get("hint_sem") is not None]
-            hint_sem = torch.zeros(len(batch), dims[0] if dims else 0,
-                                   dtype=torch.float32)
             hint_pitch = torch.zeros(len(batch), max_phone, dtype=torch.long)
             hint_slot = torch.zeros(len(batch), max_phone, dtype=torch.long)
         if has_anchors:
@@ -550,6 +575,11 @@ class CodeCollator:
                                            dtype=torch.long)
             hint_phone_frac = torch.zeros(len(batch), max_phone,
                                           dtype=torch.float32)
+        if has_word:
+            hint_word = torch.zeros(len(batch), max_phone, word_dim,
+                                    dtype=torch.float32)
+            hint_word_valid = torch.zeros(len(batch), max_phone,
+                                          dtype=torch.bool)
 
         for i, x in enumerate(batch):
             p = x["phone_ids"]
@@ -570,10 +600,6 @@ class CodeCollator:
             if has_hints:
                 hint_int[i] = int(x.get("hint_int", 0))
                 hint_reg[i] = int(x.get("hint_reg", 0))
-                hint_sem_valid[i] = bool(x.get("hint_sem_valid", False))
-                sem = x.get("hint_sem")
-                if sem is not None and hint_sem.size(1) > 0:
-                    hint_sem[i, : sem.numel()] = sem.float()
                 pitch_hint = x.get("hint_pitch")
                 if pitch_hint is not None and pitch_hint.numel() > 0:
                     n_h = min(int(pitch_hint.numel()), max_phone)
@@ -592,6 +618,14 @@ class CodeCollator:
                             x["hint_pitch_state"][:n_h].long()
                         hint_phone_frac[i, :n_h] = \
                             x["hint_phone_frac"][:n_h].float()
+                if has_word:
+                    w = x.get("hint_word")
+                    if w is not None and w.numel():
+                        n_h = min(int(w.shape[0]), max_phone)
+                        d_h = min(int(w.shape[1]), hint_word.shape[2])
+                        hint_word[i, :n_h, :d_h] = w[:n_h, :d_h].float()
+                        hint_word_valid[i, :n_h] = \
+                            x["hint_word_valid"][:n_h].bool()
 
         out = {
             "phone_ids": phone_ids,
@@ -613,10 +647,13 @@ class CodeCollator:
             out.update({
                 "hint_int": hint_int,
                 "hint_reg": hint_reg,
-                "hint_sem": hint_sem,
-                "hint_sem_valid": hint_sem_valid,
                 "hint_pitch": hint_pitch,
                 "hint_slot": hint_slot,
+            })
+        if has_word:
+            out.update({
+                "hint_word": hint_word,
+                "hint_word_valid": hint_word_valid,
             })
         if has_anchors:
             out.update({

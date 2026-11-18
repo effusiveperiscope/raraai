@@ -1055,7 +1055,7 @@ class FeatureExtractor:
         }
 
     def extract_hints(self, data_48k, transcription=None, *, intensity=True,
-                      register=True, semantic=True, words=False,
+                      register=True, semantic=False, words=False,
                       language="English", code_fps=None):
         """Every conditioning hint for one clip, in the ``.cond`` layout.
 
@@ -1071,7 +1071,10 @@ class FeatureExtractor:
             intensity: 1-9 DSP intensity (no text, no aligner, ~20 ms CPU).
             register: utterance register in semitones re: 100 Hz. Needs f0, so
                 it builds the RMVPE model (the stage-1 pitch extractor).
-            semantic: 384-d sentence embedding; needs `transcription`.
+            semantic: 384-d sentence embedding; needs `transcription`.  Off by
+                default: the model stopped consuming it in V2.2 (HINTS_PLAN.md
+                §11), so computing it only bloats the `.cond`; pass True to
+                reproduce an old corpus.
             words: also align and emit the per-word timing/pitch fields; needs
                 the Qwen / forced-aligner weights (``load_qwen=True``).
             language: forwarded to `align`.

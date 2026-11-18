@@ -568,10 +568,9 @@ class TrainModule(pl.LightningModule):
     def _hints_off(self, batch):
         """``batch`` with every hint channel dropped to its "absent" state.
 
-        Level 0 / ``hint_sem_valid=False`` is exactly what
-        ``dataset_codes`` emits for a clip whose hints were dropped (or never
-        built), i.e. the state the model has been trained to handle -- not an
-        out-of-distribution input.
+        Level 0 is exactly what ``dataset_codes`` emits for a clip whose hints
+        were dropped (or never built), i.e. the state the model has been trained
+        to handle -- not an out-of-distribution input.
         """
         if "hint_int" not in batch:
             return None
@@ -580,11 +579,11 @@ class TrainModule(pl.LightningModule):
         for key in ("hint_reg", "hint_pitch", "hint_slot",
                     # Hints V2 anchors: state 0 is the trained absent path.
                     "hint_pitch_val", "hint_pitch_pos", "hint_pitch_n",
-                    "hint_pitch_state", "hint_phone_frac"):
+                    "hint_pitch_state", "hint_phone_frac",
+                    # V2.1 word states: the mask is the absent state.
+                    "hint_word", "hint_word_valid"):
             if batch.get(key) is not None:
                 off[key] = torch.zeros_like(batch[key])
-        if batch.get("hint_sem_valid") is not None:
-            off["hint_sem_valid"] = torch.zeros_like(batch["hint_sem_valid"])
         return off
 
     def _reset_hint_channel_probe(self):
@@ -625,7 +624,7 @@ class TrainModule(pl.LightningModule):
         """``(hints argument, log tag)`` for one **generation** call.
 
         ``None`` is not a neutral value here: ``generate`` resolves it to the
-        trained *null state* (level 0 / ``sem_null``), whereas ``"omit"`` drops
+        trained *null state* (every channel absent), whereas ``"omit"`` drops
         the vectors entirely.  Both are reachable, but they are different
         functions and the difference is visible in the output (+0.051 nats and
         a 52 % encoder-memory shift on transformer_v0.9), so every sample log
@@ -2080,7 +2079,8 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                                               "net.pitch_emb.weight",
                                               "net.slot_emb.weight",
                                               "net.int_dir",
-                                              "net.pitch_val_dir"))
+                                              "net.pitch_val_dir",
+                                              "net.word_proj.weight"))
     has_mono = "net.int_dir" in state_dict
     if has_hints and not net.hints:
         raise SystemExit(
@@ -2160,6 +2160,44 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                     f"contour at a different count, so the ids cannot be "
                     f"reinterpreted.  Set hint_pitch_anchors: {have} and use a "
                     f"corpus built with --pitch-anchors {have}.")
+        # V2.1 word states: a fresh projection is fine under --transfer_from
+        # (it starts at zero, so the warm start reproduces its source exactly),
+        # but dropping a *trained* one is never acceptable, and the width is
+        # part of the contract because the encoder's dimensions would otherwise
+        # be reinterpreted.
+        has_word = "net.word_proj.weight" in state_dict
+        if net.hint_word_sem and not has_word and has_hints:
+            message = (f"{source} has no per-word semantic state "
+                       f"(net.word_proj.weight), but this model uses "
+                       f"transformer.hint_word_sem: the projection starts at "
+                       f"zero, so the channel has no effect until it is trained.")
+            if strict:
+                raise SystemExit(
+                    f"ERROR: {message}  Use --transfer_from {source} instead of "
+                    f"--resume_from, or set hint_word_sem: false.")
+            print(f"NOTE: {message}")
+        if has_word and not net.hint_word_sem:
+            raise SystemExit(
+                f"ERROR: {source} has the Hints V2.1 per-word state parameters "
+                f"(net.word_proj / net.word_null), but this model was built "
+                f"with transformer.hint_word_sem=false.  Set hint_word_sem: "
+                f"true and hint_word_dim to the trained width "
+                f"({int(state_dict['net.word_proj.weight'].shape[1])}).")
+        if has_word and net.hint_word_sem:
+            have = int(state_dict["net.word_proj.weight"].shape[1])
+            if have != net.hint_word_dim:
+                raise SystemExit(
+                    f"ERROR: {source} stores {have}-dim per-word states, but "
+                    f"transformer.hint_word_dim={net.hint_word_dim}.  Set "
+                    f"hint_word_dim: {have}, or use a corpus built with "
+                    f"--word-bert-model matching that width.")
+        # The sentence-CLS channel was removed in V2.2 (it cost 0.004 nats);
+        # a pre-removal checkpoint still carries the tensors.  They are simply
+        # unused now, so this is a note -- the warm start is otherwise exact.
+        if "net.sem_proj.weight" in state_dict:
+            print(f"NOTE: {source} carries the retired sentence-CLS channel "
+                  f"(net.sem_proj / net.sem_null); it was removed in V2.2 and "
+                  f"the weights are ignored.")
         tables = [("net.int_emb.weight", net.int_emb),
                   ("net.reg_emb.weight", net.reg_emb),
                   ("net.pitch_emb.weight", net.pitch_emb),

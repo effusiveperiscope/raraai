@@ -465,6 +465,34 @@ def load_pitch_anchors(path: str) -> Optional[int]:
         return None
 
 
+def load_word_bert_dim(path: str) -> Optional[int]:
+    """``hints.json`` -> ``words.word_bert.dim`` (the per-word state width).
+
+    Like the pitch-anchor count, the width is part of the checkpoint contract:
+    a projection trained on 768-d states cannot be fed 384-d ones, and a
+    *different* 768-d model would make every dimension mean something else, so
+    the file records both the width and the model id (see
+    ``load_word_bert_model``).
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        doc = json.load(f) or {}
+    node = (doc.get("words") or {}).get("word_bert") or {}
+    try:
+        dim = node.get("dim")
+        return int(dim) if dim is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def load_word_bert_model(path: str) -> Optional[str]:
+    """``hints.json`` -> ``words.word_bert.model`` (provenance, e.g. bert-base)."""
+    with open(path, "r", encoding="utf-8") as f:
+        doc = json.load(f) or {}
+    node = (doc.get("words") or {}).get("word_bert") or {}
+    model = node.get("model")
+    return str(model) if model else None
+
+
 def slot_bucket(slots, n_buckets: int = DEFAULT_SLOT_BUCKETS):
     """Log2 duration buckets for word slots (code frames); ``0`` = absent.
 
