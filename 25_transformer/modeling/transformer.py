@@ -1944,9 +1944,18 @@ class CodeTransformer(nn.Module):
                 "code_accs": accs,
                 "code_usage_entropy": entropies,
             })
-            if fim_den is not None:
+            # A mask that is *present but empty* -- every validation batch, since
+            # `dataset_codes` only draws spans on training items -- would report
+            # `0 / clamp_min(1e-6) = 0.0`, which is both indistinguishable from a
+            # perfect span and, via `_log_step_metrics`'s `on_epoch=True`,
+            # written to the very tags `_log_fim_probe` writes the real numbers
+            # to (Lightning flushes its epoch mean last, so
+            # `val_fim_middle_loss` read as 0 in TensorBoard).  Emitting nothing
+            # when there is no middle keeps "absent" and "zero" distinct.
+            # `float(fim_den)` is one deliberate device sync: this block is
+            # diagnostics-only (val, plus `train.log_interval` steps).
+            if fim_den is not None and float(fim_den) > 0:
                 out["fim_middle_loss"] = fim_num / fim_den.clamp_min(1e-6)
-            if fim_acc_den is not None:
                 out["fim_middle_acc"] = (fim_acc_num
                                          / fim_acc_den.clamp_min(1e-6))
                 for name, num, den in zip(("early", "mid", "late"),

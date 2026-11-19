@@ -863,7 +863,11 @@ hole.
   `fim_middle_acc` and `fim_middle_acc_{early,mid,late}` (teacher-forced top-1 by
   third of the span — a profile that only looks good at the *end* means the
   model wraps up rather than paces) and `fim_frac` (fraction of the batch that
-  was FIM), all on diagnostics steps only.
+  was FIM), all on diagnostics steps only. The `fim_middle_*` keys exist only
+  when the batch has at least one middle target: validation items are plain AR
+  and their all-False mask used to yield a literal `0.0`, which Lightning then
+  wrote to the same tag the probe uses (see §5's diagnostics list —
+  `val_fim_middle_loss` read as 0 for a whole run).
 - **`train.fim_probe_batches`** (default 2) runs the epoch-level FIM diagnostics
   on the first N *validation* batches. Val items are plain AR, so the probe
   synthesises one split for the whole batch (`p = m = T//3`, `T =
@@ -873,7 +877,9 @@ hole.
   `val_fim_region_delta` / `val_fim_length_delta` (`ablate_region` /
   `ablate_length`, which zero that side channel for the call only). Plus
   `val_fim_middle_loss` / `val_fim_middle_acc` (+ `/early|mid|late`) for the base
-  arm. This is the number that answers "is FIM working, and on which input?" —
+  arm — **the only writer of those `val_fim_*` tags** (the plain validation pass
+  no longer emits them for its AR batches; see §5). This is the number that
+  answers "is FIM working, and on which input?" —
   `sample/fim_middle_code_match_{j}` cannot: free-running code match at 100 Hz is
   at chance even for a healthy model (measured 0.025-0.069 vs 0.35 teacher-forced
   on `transformer_fim.ckpt`), so it reads "broken" for good and bad runs alike.
@@ -1572,7 +1578,18 @@ and `test_pitch_anchors.py` guard all of it.
   `val_fim_middle_acc` (+ `/early|mid|late`) and the four control-arm deltas
   `val_fim_{text,suffix,region,length}_delta` — see §4's FIM section. Per-step
   FIM scalars (`{train,val}_fim_middle_loss`, `_fim_middle_acc*`, `_fim_frac`)
-  come from `code_loss` on diagnostics steps. Every `train.sample_interval`
+  come from `code_loss` on diagnostics steps. **`code_loss` emits the
+  `fim_middle_*` keys only when the mask actually contains a middle**
+  (`float(fim_den) > 0`, the one deliberate sync in that diagnostics-only
+  block): validation items are plain AR, so their `fim` mask is all-False and a
+  `0 / clamp_min(1e-6) = 0.0` would both look like a perfect span and be written
+  by Lightning's `on_epoch=True` flush to the same tags the probe writes — the
+  zero landed ~4 ms *after* the probe's real number at the same step, so
+  `val_fim_middle_loss` read as 0 in TensorBoard for a whole run (measured on
+  `transformer_hints_v2.1_wordsem`; the `val_fim_middle_acc_{early,mid,late}`
+  underscore twins were all 0.0 for the same reason). `fim_frac` is still
+  reported on every batch with a mask, i.e. `val_fim_frac` is honestly 0.
+  `test_fim.py` guards the empty-mask case. Every `train.sample_interval`
   epochs (and at train start) it also samples
   `sample_count` val items with `sample_temperature`/`sample_top_k` and logs
   `codes{tag}/{spec,pitch}_*` (target-vs-generated codebook heatmaps) plus the

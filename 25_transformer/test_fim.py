@@ -129,6 +129,19 @@ def test_loss(model):
     check(torch.isfinite(out2["loss"]), "loss (no diag) not finite")
     check("fim_middle_loss" not in out2, "fim_middle_loss leaked w/o diagnostics")
 
+    # An all-False mask -- i.e. every *validation* batch, since
+    # `dataset_codes._sample_fim` is gated on `is_train` -- has no middle to
+    # score, so it must emit no FIM scalars at all.  Reporting 0.0 there both
+    # looked like a perfect span and, through the trainer's `on_epoch=True`
+    # logging, overwrote the real `val_fim_middle_loss`/`_acc` the FIM probe
+    # writes at the same step (the tag then read as 0 in TensorBoard).
+    ar = model.compute_batch_loss(make_batch(model, [False, False]), epoch=0,
+                                  diagnostics=True)
+    leaked = sorted(k for k in ar if k.startswith("fim_middle"))
+    check(not leaked, f"empty FIM mask emitted {leaked}")
+    check("fim_frac" in ar and float(ar["fim_frac"]) == 0.0,
+          "fim_frac should still report 0.0 for an all-AR batch")
+
     # Ablation arms (the FIM probe's controls): identical span/targets, one side
     # channel zeroed.  They must stay finite and must not crash the batch.
     memory, memory_mask = model.encode(batch["phone_ids"],
