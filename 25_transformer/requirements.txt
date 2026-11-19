@@ -64,4 +64,4 @@ PyQt5==5.15.11            # ultimate_xc (imported for its excepthook side effect
 scikit-learn==1.9.1       # hints/dsp_intensity.py (HistGradientBoostingRegressor)
 joblib==1.6.0             # model (de)serialisation
 pandas==3.0.6             # DSPIntensityModel.predict takes a DataFrame
-parselmouth==0.4.7        # Praat f0/voicing for the tier-1 DSP features
+praat-parselmouth==0.4.7        # Praat f0/voicing for the tier-1 DSP features
