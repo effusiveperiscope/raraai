@@ -114,7 +114,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from commons import load_state_dict_mismatch  # noqa: E402
-from modeling.transformer import CodeTransformer  # noqa: E402
+from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
 
 
 # ---------------------------------------------------------------------- #
@@ -721,8 +721,14 @@ class Stage2REPL:
         self._word_cache: dict = {}
 
 
-        self.frame_rate = (int(config.data.sampling_rate)
-                           // int(config.data.hop_length))
+        # Code frames, not decoder frames: `Generator(down_factor=4)` decimates
+        # the 100 Hz mel frames to 25 Hz, which is the rate the transformer
+        # actually predicts at.  Getting this wrong made every printed duration
+        # 4x too short (a 512-frame "5.1 s" request is really 20.5 s).
+        self.frame_rate = (
+            int(config.data.sampling_rate)
+            // int(config.data.hop_length)
+            // int(config.data.get("code_down_factor", 4) or 4))
         # Decoding defaults come from the config's sampling block, so the REPL
         # starts at the same operating point 2_training.py samples with.
         self.text: str = ""
@@ -890,6 +896,13 @@ class Stage2REPL:
         if bool(tcfg.get("length_cond")) != length:
             print(f"NOTE: length_cond={length} in {source}; using that.")
             tcfg.length_cond = length
+        # RoPE is parameter-free, so a checkpoint can only record it with the
+        # persistent ``rope_marker`` buffer.  A model built with the wrong flag
+        # would load *every* tensor and silently score positions differently.
+        rope = uses_rope(state)
+        if bool(tcfg.get("rope", False)) != rope:
+            print(f"NOTE: rope={rope} in {source}; using that.")
+            tcfg.rope = rope
         # Conditioning-hint layout.  These are *not* shape-compatible: a hint
         # model loaded into a non-hint config silently drops every hint tensor,
         # and a monotone/FiLM checkpoint loaded into the table model loses the

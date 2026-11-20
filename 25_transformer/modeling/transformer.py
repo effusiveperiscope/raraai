@@ -158,6 +158,153 @@ class SinusoidalPositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)].to(dtype=x.dtype)
 
 
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """``[x1, x2] -> [-x2, x1]`` over the last (head-dim) axis."""
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+class RotaryEmbedding(nn.Module):
+    """Rotary position embedding (RoPE) applied inside attention.
+
+    Unlike :class:`SinusoidalPositionalEncoding` this is *not* added to the
+    embeddings: it rotates the per-head queries and keys, so the attention
+    score depends on the **relative** offset of the two positions and there is
+    no lookup table whose rows the model may never have trained on.  That is
+    exactly the failure this exists to remove: the absolute encoding made every
+    decoder column past ``train.max_frames + K - 1`` effectively a different
+    function (measured: CE 2.0 -> 3.6 nats and text conditioning -> 0 at the
+    first unseen column, and shifting the table by +128 on a *short* item alone
+    reproduced it).
+
+    No parameters and only a non-persistent ``inv_freq`` buffer, so the
+    checkpoint layout is unchanged.
+    """
+
+    def __init__(self, dim: int, base: float = 10000.0):
+        super().__init__()
+        if dim % 2:
+            raise ValueError(f"RoPE needs an even head dim, got {dim}")
+        inv_freq = 1.0 / (
+            float(base) ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, x: torch.Tensor):
+        """``x``: (B, H, L, D) -> ``(cos, sin)`` each (1, 1, L, D)."""
+        length = x.size(-2)
+        pos = torch.arange(length, device=x.device, dtype=torch.float32)
+        freqs = torch.outer(pos, self.inv_freq.to(x.device))  # (L, D/2)
+        emb = torch.cat((freqs, freqs), dim=-1)               # (L, D)
+        return (emb.cos().to(x.dtype)[None, None, :, :],
+                emb.sin().to(x.dtype)[None, None, :, :])
+
+
+class RotaryMultiheadAttention(nn.MultiheadAttention):
+    """``nn.MultiheadAttention`` with RoPE applied to the queries and keys.
+
+    Kept as a subclass so the state dict stays *exactly* the parent's
+    (``in_proj_weight`` / ``in_proj_bias`` / ``out_proj.*``): a checkpoint
+    written by the sinusoidal model loads into this one with no key or shape
+    change, which is what makes a warm start (``--transfer_from``) possible.
+
+    The attention itself is computed explicitly (projection -> per-head split ->
+    RoPE -> SDPA), because the rotary transform has to sit between the
+    projection and the score.  ``_qkv_same_embed_dim`` is forced to ``False``
+    only to stop ``TransformerEncoderLayer``'s fused eval fast path, which
+    bypasses ``forward`` entirely and would silently drop the rotation outside
+    training.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0,
+                 rope_base: float = 10000.0, **kwargs):
+        kwargs.setdefault("batch_first", True)
+        super().__init__(embed_dim, num_heads, dropout=dropout, **kwargs)
+        if embed_dim % num_heads:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) must be divisible by num_heads "
+                f"({num_heads})")
+        self.rope = RotaryEmbedding(embed_dim // num_heads, base=rope_base)
+        self._qkv_same_embed_dim = False  # see the class docstring
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_padding_mask=None,
+        need_weights: bool = True,
+        attn_mask=None,
+        average_attn_weights: bool = True,
+        is_causal: bool = False,
+    ):
+        if not self.batch_first:
+            query, key, value = (t.transpose(0, 1) for t in (query, key, value))
+        B, L, E = query.shape
+        S = key.shape[1]
+        H = self.num_heads
+        D = E // H
+        dev, dt = query.device, query.dtype
+
+        w, b = self.in_proj_weight, self.in_proj_bias
+        q = F.linear(query, w[:E], None if b is None else b[:E])
+        k = F.linear(key, w[E:2 * E], None if b is None else b[E:2 * E])
+        v = F.linear(value, w[2 * E:], None if b is None else b[2 * E:])
+        q = q.view(B, L, H, D).transpose(1, 2)
+        k = k.view(B, S, H, D).transpose(1, 2)
+        v = v.view(B, S, H, D).transpose(1, 2)
+
+        cos, sin = self.rope(q)
+        q = q * cos + _rotate_half(q) * sin
+        cos, sin = self.rope(k)
+        k = k * cos + _rotate_half(k) * sin
+
+        mask = attn_mask
+        if is_causal and mask is None:
+            mask = torch.full((L, S), float("-inf"), device=dev, dtype=dt)
+            mask = torch.triu(mask, diagonal=1)
+        if mask is not None and mask.dtype == torch.bool:
+            # SDPA convention: True == allowed to attend.
+            mask = torch.zeros((1, 1, L, S), device=dev, dtype=dt).masked_fill(
+                ~mask.view(1, 1, L, S), float("-inf"))
+        if key_padding_mask is not None:
+            pad = torch.zeros((B, 1, 1, S), device=dev, dtype=dt).masked_fill(
+                key_padding_mask.to(torch.bool).view(B, 1, 1, S), float("-inf"))
+            mask = pad if mask is None else mask.view(1, 1, L, S) + pad
+
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=mask,
+            dropout_p=float(self.dropout) if self.training else 0.0,
+            is_causal=bool(is_causal and mask is None),
+        )
+        out = out.transpose(1, 2).reshape(B, L, E)
+        out = self.out_proj(out)
+
+        weights = None
+        if need_weights:
+            score = (q @ k.transpose(-2, -1)) / math.sqrt(D)
+            if mask is not None:
+                score = score + mask
+            weights = torch.softmax(score.float(), dim=-1).to(dt)
+            if average_attn_weights:
+                weights = weights.mean(dim=1)
+        if not self.batch_first:
+            out = out.transpose(0, 1)
+        return out, weights
+
+
+def uses_rope(state_dict) -> bool:
+    """Whether a checkpoint was trained with ``transformer.rope: true``.
+
+    RoPE adds no parameters, so the persistent ``rope_marker`` buffer is the
+    only trace it leaves in ``state_dict``.  Accepts both raw and ``net.``-
+    prefixed keys.
+    """
+    return any(k == "rope_marker" or k.endswith(".rope_marker")
+               for k in state_dict)
+
+
 class _OmitHints(dict):
     """Marker for "pass **no** hint vectors at all" (the pre-Phase-0 path).
 
@@ -390,6 +537,8 @@ class DelayCodebookDecoder(nn.Module):
         length_cond: bool = False,
         n_len_buckets: int = 9,
         hint_postnorm: bool = False,
+        rope: bool = False,
+        rope_base: float = 10000.0,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -474,6 +623,21 @@ class DelayCodebookDecoder(nn.Module):
             norm_first=True,
         )
         self.decoder = nn.TransformerDecoder(layer, n_layers, norm=nn.LayerNorm(hidden_size))
+        # RoPE (``transformer.rope``): replace the decoder's *self*-attention
+        # with the rotary variant and stop adding the sinusoidal table.  The
+        # cross-attention is deliberately left alone -- the encoder memory
+        # carries the (absolute) phone positions, and a relative decoder->phone
+        # rotation would not mean "this phone at this time".  Done before the
+        # residual scaling below, so the new ``out_proj`` gets the same init
+        # scaling as every other layer.  No parameters are added: the subclass
+        # keeps ``nn.MultiheadAttention``'s state-dict keys exactly.
+        self.rope = bool(rope)
+        self.rope_base = float(rope_base)
+        if self.rope:
+            for dec_layer in self.decoder.layers:
+                dec_layer.self_attn = RotaryMultiheadAttention(
+                    hidden_size, n_heads, dropout=dropout,
+                    rope_base=self.rope_base)
         self.heads = nn.ModuleList(
             [nn.Linear(hidden_size, c) for c in self.num_classes]
         )
@@ -532,7 +696,11 @@ class DelayCodebookDecoder(nn.Module):
         """
         B, K, L = codes.shape
         x = self.embed(codes)
-        x = self.pos(x)
+        if not self.rope:
+            # With RoPE the position information lives inside self-attention;
+            # adding the absolute table as well would reintroduce exactly the
+            # unseen-position cliff RoPE exists to remove.
+            x = self.pos(x)
         if self.spk_emb is not None:
             if sid is None:
                 raise ValueError(
@@ -642,6 +810,15 @@ class CodeTransformer(nn.Module):
         # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
         memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
         residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
+        # Rotary position embedding in the *decoder self-attention* (see
+        # ``RotaryMultiheadAttention``).  It replaces the sinusoidal table
+        # instead of adding to it, adds no parameters (checkpoint keys are
+        # unchanged), and is recorded by a ``rope_marker`` buffer so a
+        # checkpoint can be matched to the flag: a model trained with RoPE
+        # loaded into a sinusoidal build (or vice versa) would silently score
+        # every position differently while every tensor shape still matches.
+        rope = bool(_get_cfg(tcfg, "rope", False))
+        rope_base = float(_get_cfg(tcfg, "rope_base", 10000.0) or 10000.0)
 
         # Coarse conditioning hints (v0.8).  The tables are built below; the
         # level counts come from the *same* ``hints.json`` the dataset used, so
@@ -757,11 +934,22 @@ class CodeTransformer(nn.Module):
             length_cond=length_cond,
             n_len_buckets=self.n_len_buckets,
             hint_postnorm=hint_postnorm,
+            rope=rope,
+            rope_base=rope_base,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
         self.hint_film_memory = hint_film
         self.hint_decoder_proj = hint_postnorm
+        self.rope = rope
+        self.rope_base = rope_base
+        if self.rope:
+            # Persistent marker (a buffer is the only thing a checkpoint can
+            # carry for a parameter-free functional flag).  Readers detect it
+            # with ``"rope_marker" in state``; see ``stage2_repl`` and
+            # ``2_training.check_special_layout``.
+            self.register_buffer("rope_marker", torch.ones(1),
+                                 persistent=True)
 
 
         # ---- conditioning-hint tables (v0.8) ------------------------------- #
@@ -2516,6 +2704,8 @@ class CodeTransformer(nn.Module):
             f"length_cond={self.length_cond}"
             + (f" (n_len_buckets={self.n_len_buckets})"
                if self.length_cond else "")
+            + (f", rope(decoder, base={self.rope_base:g})" if self.rope
+               else ", pos=sinusoidal")
             + hints
             + f", params={n / 1e6:.2f}M)"
         )

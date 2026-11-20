@@ -753,6 +753,72 @@ Notes:
 - Setting `memory_norm: temporal` needs **no** re-preprocessing: it only
   changes how the encoder output is normalised at train time.
 
+### Training window and word-boundary text crop (stage 2, v2.2)
+
+`train.max_frames` is a **code-frame** budget at 25 Hz (48 kHz / hop 480 /
+`Generator(down_factor=4)`), so the historical 256 was 10.2 s. Measured on
+`transformer_hints_v2.1_wordsem_b`, the decoder's teacher-forced CE is normal
+(~2.0-2.5 nats, text delta +0.2-0.5) up to column 255 and then jumps to
+3.55-3.67 with text conditioning at ~0 -- exactly one column past
+`max_frames + K - 1`. The shipped 512 (20.5 s) covers 99.0 % of items (93.7 % of
+frames; p99 clip = 528), and at batch 16 on a 16 GB 5060 Ti is 527 ms/step /
+7.4 GB (24 items at 512 would be 804 ms / 10.7 GB -- same items/hour, so 16 is
+the safer point). No re-preprocessing: the codes do not change.
+
+For a clip longer than `max_frames` the old dataset cropped only the audio and
+kept the **whole transcript** (`_crop_frames`), i.e. for 23.9 % of training
+frames most of the text had no corresponding audio. That teaches the model
+that the start of the text need not be voiced, which is the "skips the first
+few words / Traveler!" symptom. `train.word_crop` (default true) now snaps the
+window **inwards to whole words** using the `.cond` fields written by
+`hints/build.py --words` (`phone_word_idx`, `word_start_f`, `word_slot_f`;
+`word_slot_f` is start-to-start, so word `i` ends where word `i+1` starts and
+the last word ends at the clip end). The returned phone slice therefore
+contains exactly the words in the audio, and all per-phone hint arrays are
+sliced by the same span. Partial boundary words are dropped rather than kept
+(a word of audio without text is the same disease); losing < 1 word at each
+edge is deliberate. A missing/stale `.cond` (stale = `n_phone` mismatch, i.e.
+the phonemizer changed after it was built) falls back to the old crop and is
+counted in `n_word_crop_fallback`; a stale file still keeps its clip-level
+intensity/register channels, only the per-word fields are dropped.
+
+The crop is applied *before* FIM's `apply_fim`, so FIM remains a fully labelled
+permutation inside a text-matched window. Keeping `fim_rate: 0.2` is fine; with
+the crop fixed it is the only path that trains "start in the middle of the
+text" (plain AR now always starts where its audio starts). A `fim_rate: 0.0`
+control needs no shape change and can warm-start from the same checkpoint
+(keep `transformer.fim: true`; `apply_fim` then sees an all-False mask).
+
+### Decoder RoPE (stage 2, v2.2)
+
+`transformer.rope: true` replaces the decoder self-attention's absolute
+sinusoidal table with RoPE (`modeling/transformer.py:RotaryMultiheadAttention`)
+and stops adding the table there. It adds **no parameters** -- the subclass
+keeps `nn.MultiheadAttention`'s `in_proj_weight` / `in_proj_bias` /
+`out_proj.*` keys exactly -- so a checkpoint loads with no shape change. The
+only trace is a persistent `rope_marker` buffer, which `uses_rope(state)`,
+`stage2_repl`, `eval_stage2_checkpoints.py`, `eval_stage2_wer.py` and
+`test_stage2_conditioning.py` read from the checkpoint (a parameter-free flag
+cannot be inferred from tensor shapes). `2_training.check_special_layout`
+refuses `--resume_from` across the flag in both directions and prints a NOTE
+for `--transfer_from` (the weights transfer, the positional function has to be
+relearned).
+
+The encoder deliberately **keeps** the sinusoidal encoding: its memory is what
+carries absolute phone order into cross-attention, and rotating the
+decoder->phone axis would not mean "this phone at this time". Only the decoder
+self-attention needs translation invariance. The motivation is measured, not
+speculative: shifting the decoder table by +128 on a *short*, in-distribution
+item already raised CE 2.31 -> 3.09 and killed the text delta (+0.34 -> +0.01),
+and +256 reproduced the long-context cliff. Note `TransformerEncoderLayer`'s
+fused **eval** fast path bypasses `forward()` entirely (which would silently
+drop the rotation outside training); `RotaryMultiheadAttention` forces
+`_qkv_same_embed_dim = False` to disable it. The decoder has no such path.
+
+The REPL's duration display was also wrong (`sampling_rate // hop_length` = 100
+Hz, but codes are 25 Hz), so every printed length and every `f` request was 4x
+off; it now reads `data.code_down_factor: 4`.
+
 ### End-of-utterance token (stage 2, v0.5)
 
 By default the decoder can only ever be asked for a fixed number of frames, so

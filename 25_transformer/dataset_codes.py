@@ -27,6 +27,20 @@ reorders those items to ``prefix <SUF> suffix <MID> middle`` at loss time.  A
 plain AR item (``fim=False``) is left untouched, so AR and FIM samples share a
 batch.
 
+Word-boundary cropping (``train.word_crop``)
+--------------------------------------------
+A clip longer than ``train.max_frames`` used to be cut to a random audio window
+while its **whole** transcript stayed in the sample, so most of its text had no
+audio at all and the model learned to skip utterance-initial words (measured at
+23.9 % of training frames for ``max_frames: 256``).  The crop is now snapped
+inwards to whole words: ``.cond`` carries ``phone_word_idx`` /
+``word_start_f`` / ``word_slot_f`` (``hints/build.py --words``), so the window
+starts at a word onset and ends where the first dropped word starts, and the
+returned phone slice contains exactly the words in the audio.  The per-phone
+hint arrays are sliced by the same span.  A clip whose ``.cond`` has no word
+timings (or one whose whole-word window would be empty) falls back to the old
+behaviour and is counted in ``n_word_crop_fallback``.
+
 Conditioning hints (``transformer.hints``)
 ------------------------------------------
 ``hints/build.py`` writes a sibling ``<base>.cond`` next to each
@@ -126,10 +140,22 @@ class CodeDataset(Dataset):
         hint_null_all: float = 0.0,
         hint_pitch_edges=None,
         n_slot_buckets: int = DEFAULT_SLOT_BUCKETS,
+        word_crop: bool = True,
     ):
         self.is_train = is_train
         self.max_frames = max_frames
         self.max_phone_length = max_phone_length
+        # Crop the *text* in lock-step with a random audio window (see
+        # ``_crop_frames``).  Only matters for clips longer than ``max_frames``;
+        # without it those items pair a random 10 s window with the whole
+        # transcript, which teaches the model that the start of the text does
+        # not have to be voiced (measured: 24 % of training frames).  Needs the
+        # ``phone_word_idx`` / ``word_start_f`` / ``word_slot_f`` fields that
+        # ``hints/build.py --words`` writes into the sibling ``.cond``; a clip
+        # without them falls back to the old behaviour and is counted in
+        # ``n_word_crop_fallback``.
+        self.word_crop = bool(word_crop)
+        self.n_word_crop_fallback = 0
         self.rng = random.Random(random_seed)
         # Fill-in-the-middle span sampling (see ``modeling/transformer.py``).
         # Per train item, ``fim_rate`` is the probability of returning a
@@ -242,14 +268,41 @@ class CodeDataset(Dataset):
     def speaker_ids(self) -> List[int]:
         return [it["sid"] for it in self.items]
 
-    def _load_hints(self, phone_ids_path: str, n_phone: int,
-                    sid: Optional[int] = None) -> Dict[str, object]:
+    def _read_cond(self, phone_ids_path: str,
+                   n_phone: int) -> "tuple[Optional[Dict[str, object]], bool]":
+        """Load the sibling ``.cond`` for one item, plus its staleness.
+
+        Counts the two "not usable" cases so a mismatched corpus prints a
+        diagnosis instead of silently training without hints (or without
+        word-aligned cropping).  A *stale* file (``n_phone`` differs from this
+        phone sequence, i.e. the phonemizer changed since it was built) is
+        still returned: its clip-level channels stay valid, only the per-word
+        fields and the word-boundary crop must be dropped.
+        """
+        path = cond_path_for(phone_ids_path)
+        if not os.path.exists(path):
+            self.n_cond_missing += 1
+            return None, False
+        try:
+            cond = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            self.n_cond_stale += 1
+            return None, False
+        stale = int(cond.get("n_phone", -1)) != int(n_phone)
+        if stale:
+            self.n_cond_stale += 1
+        return cond, stale
+
+    def _load_hints(self, cond: Optional[Dict[str, object]], n_phone: int,
+                    sid: Optional[int] = None,
+                    stale: bool = False) -> Dict[str, object]:
         """Bucketed hints for one item, plus per-channel dropout.
 
-        A missing or stale ``<base>.cond`` degrades to "no hints" (every level
-        ``0``) instead of raising -- one un-built clip must not kill a run -- but
-        the ``n_cond_missing`` / ``n_cond_stale`` counters make it visible
-        (``2_training.py`` prints them after the first epoch).
+        ``cond`` is the ``.cond`` from :meth:`_read_cond` (``None`` = missing or
+        unreadable -> every level ``0``), so one item loads the file once even
+        when it is needed for both the hints and the word-boundary crop.  With
+        ``stale=True`` the per-word fields are dropped but the clip-level
+        channels are kept (they do not depend on the phonemizer).
 
         ``sid`` is the item's *raw* (pre-``sid_map``) speaker id, used only by
         the relative-register path: the speaker's mean offset is looked up from
@@ -272,14 +325,7 @@ class CodeDataset(Dataset):
             # Hints V2.1 per-word BERT state, repeated over the word's phones.
             "hint_word": None, "hint_word_valid": None,
         }
-        path = cond_path_for(phone_ids_path)
-        if not os.path.exists(path):
-            self.n_cond_missing += 1
-            return out
-        try:
-            cond = torch.load(path, map_location="cpu", weights_only=True)
-        except Exception:
-            self.n_cond_stale += 1
+        if cond is None:
             return out
 
         if "intensity" in cond:
@@ -292,22 +338,21 @@ class CodeDataset(Dataset):
                     register_rel_st(value, sid, self.register_speaker_means),
                     self.register_edges)
         # Word-level span: only usable if it describes *this* phone sequence.
-        if "phone_word_idx" in cond:
-            if int(cond.get("n_phone", -1)) != int(n_phone):
-                self.n_cond_stale += 1
-            else:
-                word = cond["phone_word_idx"].long().reshape(-1)
-                if word.numel() == n_phone:
-                    pitch_w = word_pitch_levels(
-                        cond["pitch_word_st"].float(),
-                        cond["pitch_word_voiced"].bool(), self.pitch_edges)
-                    slot_w = slot_bucket(cond["word_slot_f"].float(),
-                                         self.n_slot_buckets)
-                    idx = word.numpy()
-                    out["hint_pitch"] = torch.as_tensor(pitch_w[idx].astype(np.int64))
-                    out["hint_slot"] = torch.as_tensor(slot_w[idx].astype(np.int64))
-                    self._load_pitch_anchors(cond, idx, out)
-                    self._load_word_bert(cond, idx, out)
+        # A stale file keeps its clip-level channels (intensity/register) --
+        # those are a whole-clip property and do not depend on the phonemizer.
+        if "phone_word_idx" in cond and not stale:
+            word = cond["phone_word_idx"].long().reshape(-1)
+            if word.numel() == n_phone:
+                pitch_w = word_pitch_levels(
+                    cond["pitch_word_st"].float(),
+                    cond["pitch_word_voiced"].bool(), self.pitch_edges)
+                slot_w = slot_bucket(cond["word_slot_f"].float(),
+                                     self.n_slot_buckets)
+                idx = word.numpy()
+                out["hint_pitch"] = torch.as_tensor(pitch_w[idx].astype(np.int64))
+                out["hint_slot"] = torch.as_tensor(slot_w[idx].astype(np.int64))
+                self._load_pitch_anchors(cond, idx, out)
+                self._load_word_bert(cond, idx, out)
 
         if self.is_train:
             self._dropout_hints(out)
@@ -412,35 +457,109 @@ class CodeDataset(Dataset):
             # the channel back on is free.
             out["hint_word_valid"] = torch.zeros_like(out["hint_word_valid"])
 
-    def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor):
+    def _word_spans(self, cond: Optional[Dict[str, object]], n_frames: int,
+                    n_phone: int, stale: bool = False):
+        """Word boundaries for the crop, or ``None`` when the file cannot say.
+
+        Returns ``(starts, ends, phone_word_idx)`` as numpy arrays in code
+        frames / phone indices.  ``ends[i]`` is the start of the next word (the
+        last word ends at the clip end), which is exactly the ``word_slot_f``
+        meaning -- "start-to-start slot", not a duration.  The fields are
+        written by ``hints/build.py --words``; a pre-words ``.cond`` simply has
+        no ``word_start_f`` and the caller falls back to the old crop.
+        """
+        if cond is None or stale:
+            return None
+        need = ("phone_word_idx", "word_start_f", "word_slot_f")
+        if any(k not in cond for k in need):
+            return None
+        pwi = cond["phone_word_idx"].long().reshape(-1).numpy()
+        starts = cond["word_start_f"].long().reshape(-1).numpy()
+        slots = cond["word_slot_f"].long().reshape(-1).numpy()
+        n_word = int(starts.size)
+        if (n_word == 0 or slots.size != n_word or pwi.size != n_phone
+                or pwi.min() < 0 or pwi.max() >= n_word
+                or np.any(np.diff(pwi) < 0) or np.any(np.diff(starts) < 0)):
+            return None
+        ends = np.empty(n_word, dtype=np.int64)
+        if n_word > 1:
+            ends[:-1] = starts[1:]
+        ends[-1] = int(n_frames)
+        # A start-to-start slot can be 0 after rounding on adjacent words; clamp
+        # the geometry so the crop never picks a zero-length window.
+        starts = np.clip(starts, 0, n_frames)
+        ends = np.clip(np.maximum(ends, starts), 0, n_frames)
+        del slots  # only used as a validity hint (the slot array's length)
+        return starts, ends, pwi
+
+    def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor,
+                     word_spans=None):
         """Cut the item to ``max_frames`` and report whether its end survived.
 
-        Returns ``(spec, pitch, complete)``.  ``complete`` is ``True`` when the
-        kept window still contains the last frame of the clip, i.e. the segment
-        is the true end of the utterance rather than a mid-clip random crop.
-        The transformer only places an end-of-utterance target on ``complete``
-        items (see ``CodeTransformer._append_eos``): an EOS in the middle of a
-        clip would teach the model to fall silent after ``max_frames``.
+        Returns ``(spec, pitch, start, complete, phone_span)``.  ``complete`` is
+        ``True`` when the kept window still contains the last frame of the clip,
+        i.e. the segment is the true end of the utterance rather than a mid-clip
+        random crop.  The transformer only places an end-of-utterance target on
+        ``complete`` items (see ``CodeTransformer._append_eos``): an EOS in the
+        middle of a clip would teach the model to fall silent after
+        ``max_frames``.
+
+        With ``word_crop`` and word timings available, the window is snapped
+        **inwards to whole words**: it starts at a word onset and ends where the
+        next (dropped) word starts, so the returned ``phone_span`` contains
+        exactly the words that are in the audio.  Without this, a clip longer
+        than ``max_frames`` was trained on a random audio window paired with the
+        *whole* transcript -- i.e. most of its text had no corresponding audio,
+        which teaches the model to skip utterance-initial words.  Losing up to
+        one word of audio at each edge is deliberate: the alternative (keeping
+        partial words) reintroduces text with no audio.  The tail of a clip is
+        kept whenever the last word fits, so ``complete`` stays meaningful.
+
+        ``phone_span`` is ``(p0, p1)`` into the original phone sequence, or
+        ``None`` when the item was not cropped / had no usable word timings.
         """
         n = min(spec.shape[1], pitch.shape[1])
         spec, pitch = spec[:, :n], pitch[:, :n]
-        complete = True
-        if self.max_frames is not None and n > self.max_frames:
-            if self.is_train:
-                # ``random.Random.randint`` is inclusive on both ends, so this
-                # can start at ``n - max_frames`` -- the one window that still
-                # contains the clip's last frame, and therefore the only one that
-                # yields ``complete=True``.  (It is 1/(n-max_frames+1) likely, so
-                # a clip much longer than ``max_frames`` contributes an EOS
-                # target rarely; 92 % of the corpus is <= 256 frames, so that is
-                # a long-tail effect, not a hole.)
-                start = self.rng.randint(0, n - self.max_frames)
-            else:
-                start = 0
-            spec = spec[:, start : start + self.max_frames]
-            pitch = pitch[:, start : start + self.max_frames]
-            complete = start + self.max_frames >= n
-        return spec, pitch, complete
+        if self.max_frames is None or n <= self.max_frames:
+            return spec, pitch, 0, True, None
+
+        if self.is_train:
+            # ``random.Random.randint`` is inclusive on both ends, so this can
+            # start at ``n - max_frames`` -- the one window that still contains
+            # the clip's last frame (and therefore the only ``complete=True``
+            # one).  Snapping to a word boundary afterwards can move it slightly
+            # forward, but the window still ends at the last word.
+            start = self.rng.randint(0, n - self.max_frames)
+        else:
+            start = 0
+        end = start + self.max_frames
+        phone_span = None
+
+        if self.word_crop and word_spans is not None:
+            starts, ends, pwi = word_spans
+            # First whole word at/after ``start`` and last whole word ending
+            # at/before ``end`` (searchsorted on the start/end arrays).
+            i0 = int(np.searchsorted(starts, start, side="left"))
+            i1 = int(np.searchsorted(ends, end, side="right"))
+            while i0 < i1 and ends[i0] <= starts[i0]:
+                i0 += 1
+            while i1 > i0 and ends[i1 - 1] <= starts[i0]:
+                i1 -= 1
+            if i1 > i0:
+                w0, w1 = int(starts[i0]), int(ends[i1 - 1])
+                if w1 > w0:
+                    p0 = int(np.searchsorted(pwi, i0, side="left"))
+                    p1 = int(np.searchsorted(pwi, i1, side="left"))
+                    if p1 > p0:
+                        start, end = w0, w1
+                        phone_span = (p0, p1)
+            if phone_span is None:
+                self.n_word_crop_fallback += 1
+
+        spec = spec[:, start:end]
+        pitch = pitch[:, start:end]
+        complete = end >= n
+        return spec, pitch, start, complete, phone_span
 
     def __getitem__(self, index: int) -> dict:
         item = self.items[index]
@@ -449,23 +568,35 @@ class CodeDataset(Dataset):
         pitch = torch.load(item["pitch_codes"], weights_only=True).long()
         spec = spec.reshape(spec.shape[0], -1)
         pitch = pitch.reshape(pitch.shape[0], -1)
-        spec, pitch, complete = self._crop_frames(spec, pitch)
 
         n_phone = int(phone_ids.numel())
-        if self.max_phone_length is not None and n_phone > self.max_phone_length:
+        # One ``.cond`` read serves both the conditioning hints and the
+        # word-boundary crop.  ``None`` = missing/stale, i.e. neither is usable.
+        cond, cond_stale = self._read_cond(item["phone_ids"], n_phone)
+        word_spans = (self._word_spans(cond, min(spec.shape[1], pitch.shape[1]),
+                                       n_phone, stale=cond_stale)
+                      if self.word_crop else None)
+        spec, pitch, _start, complete, phone_span = self._crop_frames(
+            spec, pitch, word_spans)
+
+        p0, p1 = phone_span if phone_span is not None else (0, n_phone)
+        phone_ids = phone_ids[p0:p1]
+        if (self.max_phone_length is not None
+                and phone_ids.numel() > self.max_phone_length):
             phone_ids = phone_ids[: self.max_phone_length]
 
         hint: Dict[str, object] = {}
         if self.hints:
-            hint = self._load_hints(item["phone_ids"], n_phone,
-                                    sid=item.get("sid_raw", item["sid"]))
+            hint = self._load_hints(
+                cond, n_phone, sid=item.get("sid_raw", item["sid"]),
+                stale=cond_stale)
             # Per-phone hint arrays must be cropped in lockstep with the phones,
             # otherwise they would describe a different text than the model sees.
             for key in ("hint_pitch", "hint_slot", "hint_pitch_val",
                         "hint_pitch_pos", "hint_pitch_n", "hint_pitch_state",
                         "hint_phone_frac", "hint_word", "hint_word_valid"):
                 if hint.get(key) is not None:
-                    hint[key] = hint[key][: phone_ids.numel()]
+                    hint[key] = hint[key][p0:p1][: phone_ids.numel()]
 
         fim_flag, prefix_len, mid_len = self._sample_fim(spec.shape[1])
         return {

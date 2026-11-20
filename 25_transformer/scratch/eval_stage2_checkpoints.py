@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from commons import load_submodule_prefix  # noqa: E402
 from dataset_codes import CodeCollator, CodeDataset  # noqa: E402
-from modeling.transformer import CodeTransformer  # noqa: E402
+from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
 
 SCALARS = ("loss", "spec_loss", "pitch_loss", "acc", "spec_acc", "pitch_acc")
 
@@ -56,6 +56,12 @@ def build_model(config, device):
     net = CodeTransformer(config).to(device)
     net.eval()
     return net
+
+
+def peek_rope(path) -> bool:
+    """Whether ``path`` was trained with ``transformer.rope`` (no weights load)."""
+    ck = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    return uses_rope(ck.get("state_dict", ck))
 
 
 def load_checkpoint(net, path):
@@ -241,8 +247,18 @@ def main():
           f"{args.sample_items} sampled items\n")
 
     net = build_model(config, device)
+    current_rope = bool(config.transformer.get("rope", False))
     results = []
     for path in args.checkpoints:
+        # RoPE is parameter-free (`rope_marker` only), so a mixed comparison
+        # would otherwise score one of the two arms with the wrong positional
+        # function while every weight loads cleanly.
+        rope = peek_rope(path)
+        if rope != current_rope:
+            config.transformer.rope = rope
+            print(f"NOTE: {path} uses rope={rope}; rebuilding the model.")
+            net = build_model(config, device)
+            current_rope = rope
         epoch, step = load_checkpoint(net, path)
         tf = teacher_forced(net, loader, args.batches, device)
         fim = fim_probe(net, loader, args.batches, device)

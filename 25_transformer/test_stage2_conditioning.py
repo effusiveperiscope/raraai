@@ -44,15 +44,21 @@ from omegaconf import OmegaConf
 
 import commons
 from dataset_codes import CodeCollator, CodeDataset
-from modeling.transformer import CodeTransformer
+from modeling.transformer import CodeTransformer, uses_rope
 
 
 def load_model(checkpoint: str, config, device: str) -> CodeTransformer:
     """Build ``CodeTransformer`` from `config` and load `checkpoint`."""
-    net = CodeTransformer(config)
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
+    # RoPE is parameter-free (only the `rope_marker` buffer), so take the flag
+    # from the checkpoint rather than trusting a possibly newer config.
+    rope = uses_rope(state)
+    if bool(config.transformer.get("rope", False)) != rope:
+        print(f"NOTE: checkpoint uses rope={rope}; using that.")
+        config.transformer.rope = rope
+    net = CodeTransformer(config)
     if any(k.startswith("net.") for k in state):
         commons.load_submodule_prefix(net, "net.", state)
     else:

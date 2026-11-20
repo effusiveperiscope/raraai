@@ -989,11 +989,17 @@ class TrainModule(pl.LightningModule):
             return
         loader = getattr(self.trainer, "train_dataloader", None)
         ds = getattr(loader, "dataset", None)
-        if ds is None or not getattr(ds, "hints", False):
+        if ds is None:
             return
         self._hints_reported = True
         miss = int(getattr(ds, "n_cond_missing", 0))
         stale = int(getattr(ds, "n_cond_stale", 0))
+        fallback = int(getattr(ds, "n_word_crop_fallback", 0))
+        if fallback:
+            print(f"Word crop: {fallback} long clip(s) had no usable word "
+                  f"timings and kept the full transcript")
+        if not getattr(ds, "hints", False):
+            return
         print(f"Hints: {miss} clip(s) without a .cond, {stale} stale "
               f"(n_phone mismatch or unreadable .cond)")
         if miss or stale:
@@ -2071,6 +2077,29 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                 f"or start a fresh exp_name.")
         print(f"NOTE: {message}")
 
+    # ``transformer.rope`` changes no tensor shape (the rotary embeddings have
+    # no parameters), so a mismatched checkpoint would load *completely* and
+    # silently score every position differently.  The persistent
+    # ``rope_marker`` buffer is the only trace it leaves.
+    has_rope = "net.rope_marker" in state_dict
+    if has_rope and not net.rope:
+        raise SystemExit(
+            f"ERROR: {source} was trained with transformer.rope: true (it has "
+            f"net.rope_marker), but this model was built with rope: false.  "
+            f"Set transformer.rope: true; the sinusoidal model is a different "
+            f"function and would otherwise load with no shape error.")
+    if net.rope and not has_rope:
+        message = (f"{source} has no net.rope_marker, i.e. it was trained with "
+                   f"the absolute sinusoidal encoding, but this model is built "
+                   f"with transformer.rope: true.  The attention weights "
+                   f"transfer, but positional behaviour (and hence the "
+                   f"length-extrapolation fix) has to be learned from scratch.")
+        if strict:
+            raise SystemExit(
+                f"ERROR: {message}  Use --transfer_from {source} instead of "
+                f"--resume_from, or start a fresh exp_name.")
+        print(f"NOTE: {message}")
+
     # ``transformer.hints`` adds its own tables (no class-count change), so it
     # needs the same treatment -- plus one extra check that length_cond does not
     # need: the *widths* come from hints_json, so a different hints.json would
@@ -2323,6 +2352,11 @@ def train(config, resume_from=None, transfer_from=None):
         fim_rate=float(config.train.get("fim_rate", 0.0) or 0.0),
         fim_min_frames=int(config.transformer.get("fim_min_frames", 8) or 8),
         fim_mid_frac=float(config.transformer.get("fim_mid_frac", 0.5) or 0.5),
+        # Crop the phonemes in lockstep with a random training window (see
+        # dataset_codes._crop_frames).  On by default; needs the word timings
+        # written by `hints/build.py --words`, otherwise it falls back to the
+        # historical "full transcript + random audio window" pairing.
+        word_crop=bool(config.train.get("word_crop", True)),
         # Conditioning hints: the level edges come from the same hints.json the
         # model reads, so dataset and model cannot disagree about a level id.
         **hint_kwargs,
@@ -2333,6 +2367,7 @@ def train(config, resume_from=None, transfer_from=None):
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
+        word_crop=bool(config.train.get("word_crop", True)),
         # Validation never applies hint dropout (`is_train=False`), so the val
         # loss is measured with the hints fully present -- and `val_loss_nohint`
         # gives the same batches with every channel dropped.

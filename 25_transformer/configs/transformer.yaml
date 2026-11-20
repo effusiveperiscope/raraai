@@ -15,10 +15,13 @@
 # hints v1.0 post-norm hint injection + guidance (ablations, off), v1.1 monotone
 # hint encoding + counterfactual margin (recipe: scratch/hints_v1_runs/),
 # hints v2.0 per-word pitch anchors (HINTS_PLAN.md §10).
-# The exp_name is deliberately *not* a v1 run's: 2_training.py auto-resumes
-# checkpoints_stage2/{exp_name}/last.ckpt, and a v1 (table) checkpoint cannot
-# be resumed into the anchor layout.
-exp_name: transformer_hints_v2.1_wordsem_b
+# v2.2 = decoder RoPE + 2x training window + word-boundary text crop (see the
+# `rope`, `max_frames` and `word_crop` keys).  The exp_name is deliberately new:
+# 2_training.py auto-resumes checkpoints_stage2/{exp_name}/last.ckpt, and RoPE
+# changes positional behaviour without changing a single tensor shape, so a
+# resume would silently continue with the wrong function.  Warm-start it with
+# `--transfer_from checkpoints_stage2/transformer_hints_v2.1_wordsem_b/last.ckpt`.
+exp_name: transformer_hints_v2.2_rope
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -163,6 +166,22 @@ transformer:
   # only: no extra parameters, no state_dict change.
   residual_scale: true
 
+  # Rotary position embedding (RoPE) in the *decoder self-attention*, replacing
+  # the absolute sinusoidal table there.  Measured on
+  # transformer_hints_v2.1_wordsem_b: teacher-forced CE 2.0 -> 3.6 nats and text
+  # conditioning -> 0 at the first decoder column past train.max_frames (256),
+  # and simply shifting the sinusoidal table by +128 on a *short* item
+  # reproduced most of that.  RoPE makes the score depend on relative offsets,
+  # so there is no unseen table row to fall off, and adds no parameters (the
+  # state-dict keys are identical; a persistent ``rope_marker`` buffer records
+  # the flag).  The encoder keeps the sinusoidal encoding on purpose: its
+  # memory is what carries absolute phone order into cross-attention, and
+  # rotating the decoder->phone axis would not mean "this phone at this time".
+  # `--transfer_from` loads every weight, `--resume_from` is refused because the
+  # positional function changes (2_training.check_special_layout).
+  rope: true
+  rope_base: 10000.0
+
   # End-of-utterance class (v0.5)
   eos_token: true
 
@@ -266,6 +285,11 @@ data:
     target_db: -1.0   # dBFS the reference is scaled to (keep < 0: tanh decoder)
     max_gain_db: 30.0 # cap on boosting (a click/noise peak must not be +40 dB)
     frame_ms: 20.0    # window for mode: rms
+  # Code rate divisor: `Generator(down_factor=4)` (modeling/generator.py, not a
+  # config key) decimates the 100 Hz decoder frames to 25 Hz code frames.  Only
+  # read by tooling that reports durations (`scratch/stage2_repl.py`); the
+  # codec blocks above must still match the stage-1 checkpoint.
+  code_down_factor: 4
 
 # -------------------------------------------------------- stage-1 model ---
 # Only needed for the (optional) audio sampling during validation: the
@@ -291,8 +315,11 @@ gen:
 
 # -------------------------------------------------------------- train ----
 train:
-  # 48 on 5090, 24 on 5060Ti
-  batch_size: 24
+  # 48 on 5090, 24 on 5060Ti at max_frames 256.  At 512 the decoder is
+  # ~2.2x the FLOPs of 256 and 24 items need ~10.7 GB of activations alone
+  # (measured on a 16 GB 5060 Ti: 804 ms/step); 16 gives 527 ms/step at
+  # 7.4 GB and the same items/hour, so it is the safer point.
+  batch_size: 16
   lr: 5e-6
   betas:
   - 0.9
@@ -385,8 +412,23 @@ train:
   cosine_anneal_end: 300000
   max_steps: 300000
   max_epochs: -1
-  max_frames: 256          # code frames per training segment (25 Hz)
+  # Code frames per training segment.  Code rate is 25 Hz (48 kHz / hop 480 /
+  # Generator down_factor 4), so 512 frames = 20.5 s and covers 99.0 % of the
+  # corpus (the p99 clip is 528 frames).  The previous 256 (= 10.2 s) covered
+  # 91.7 % of items but only 76.1 % of frames, and every decoder column past it
+  # was outside the model's positional range (see `rope` above: CE 2.0 -> 3.6,
+  # text conditioning -> 0).  This is a training knob only: the code tensors do
+  # not change, so no re-preprocessing.
+  max_frames: 512
   max_phone_length: 512
+  # Crop the phonemes in lockstep with the audio window for clips longer than
+  # `max_frames`: snap the window inwards to whole words (the `.cond` word
+  # timings from `hints/build.py --words`), so the text always matches the
+  # audio.  Without it a random 10 s window was paired with the full transcript
+  # for 23.9 % of training frames, which teaches the model to skip
+  # utterance-initial words.  Clips without word timings fall back and are
+  # counted (`Word crop: N ...` after the first epoch).  No re-preprocessing.
+  word_crop: true
   # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
   # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
   # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run
@@ -520,10 +562,11 @@ train:
   speaker_probe: 2
   # Out-of-distribution text probe (OOD). Every sampling pass also
   # autoregressively generates `ood_samples` held-out sentence(s) for
-  # `ood_frames` code frames -- deliberately *longer* than the val items
-  # above, which are capped at their own `code_len` (<= sample_frames), so the
-  # decoder has to extrapolate past the length it ever saw (repetition and
-  # spectral/pitch drift show up there first). There is no ground truth for
+  # `ood_frames` code frames -- deliberately *longer* than both the val items
+  # above (<= sample_frames) and `train.max_frames: 512`, so the decoder still
+  # has to extrapolate past the length it ever saw (repetition and
+  # spectral/pitch drift show up there first). Code frames are 25 Hz, so 768
+  # = 30.7 s. There is no ground truth for
   # unseen text, so only the generated side is logged:
   #   ood/text_*            the transcript (TensorBoard text tab)
   #   ood/{i}/codes_*       generated spec/pitch codebook heatmaps
@@ -532,6 +575,6 @@ train:
   # ASR/aligner weights) and cached after the first pass; failures are logged
   # and never interrupt training. Set ood_samples: 0 to disable.
   ood_samples: 1
-  ood_frames: 512           # 512 code frames = 5.12 s (100 Hz frame rate)
+  ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
   ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
   ood_sid: 612             # null -> speaker of the first sampled val item

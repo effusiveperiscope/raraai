@@ -89,7 +89,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from commons import load_state_dict_mismatch, load_submodule_prefix  # noqa: E402
 from dataset_codes import CodeDataset  # noqa: E402
-from modeling.transformer import CodeTransformer  # noqa: E402
+from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
 
 # Preprocessed tensors are named by the source basename plus one of these.
 TENSOR_SUFFIXES = (".phone_ids", ".spec_codes", ".pitch_codes")
@@ -212,6 +212,12 @@ def build_transformer(config, device):
     net = CodeTransformer(config).to(device)
     net.eval()
     return net
+
+
+def peek_rope(path) -> bool:
+    """Whether ``path`` was trained with ``transformer.rope`` (no weights load)."""
+    ck = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    return uses_rope(ck.get("state_dict", ck))
 
 
 def sd_own(sd, prefix):
@@ -665,7 +671,17 @@ def main():
                 "the checkpoint); this config has hints disabled.")
         collator = CodeCollator(config=config)
     rows = []
+    current_rope = bool(config.transformer.get("rope", False))
     for path in (args.checkpoints if "generated" in arms else []):
+        # RoPE adds no parameters (only the `rope_marker` buffer), so a mixed
+        # list would otherwise load every weight and still score one arm with
+        # the wrong positional function.
+        rope = peek_rope(path)
+        if rope != current_rope:
+            config.transformer.rope = rope
+            print(f"NOTE: {path} uses rope={rope}; rebuilding the transformer.")
+            net = build_transformer(config, device)
+            current_rope = rope
         epoch, step = load_transformer_weights(net, path)
         # Same draws for every checkpoint: the comparison is then paired, so a
         # WER difference is the weights and not the sampling noise.
