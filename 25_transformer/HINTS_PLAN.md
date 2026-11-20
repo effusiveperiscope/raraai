@@ -167,9 +167,13 @@ with a batched array — `write_cond` clones and refuses that (see §5).
 
 M5 (REPL ergonomics) is **done**: `scratch/stage2_repl.py` has per-channel
 controls (`e` intensity, `r` register, `j` word pitch, `u` word slot,
-`d` semantic), one-shot `--hint_*` overrides, reads a loaded val item's `.cond`
-as the `cond` base, and derives the hint/monotone/FiLM layout from the
-checkpoint. It also has `--seed` so paired A/B draws are comparable.
+`d` per-word BERT semantics), one-shot `--hint_*` overrides, reads a loaded val
+item's `.cond` as the `cond` base, and derives the hint/monotone/FiLM/word-BERT
+layout from the checkpoint. `d text` BERT-encodes the current sentence's words
+(one state per word, repeated over its phones) via
+`features.FeatureExtractor.hint_word_bert`, and `d <sentence>` swaps those
+states in; `cond`/`null` are the item's own states / `word_null`. It also has
+`--seed` so paired A/B draws are comparable.
 
 ### Semantic-only on OOD text (measured 2026-11-15)
 

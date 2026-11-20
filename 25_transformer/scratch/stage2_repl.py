@@ -133,7 +133,7 @@ LINE_ALIASES = {
     "intensity": "e", "effort": "e", "register": "r",
     "pitch": "j", "word_pitch": "j",
     "slot": "u", "timing": "u", "duration": "u",
-    "semantic": "d", "sem": "d",
+    "word": "d", "words": "d", "word_sem": "d", "word_semantic": "d",
     "quit": "q", "exit": "q",
     "memory": "z", "mem": "z", "vram": "z", "gpu": "z", "usage": "z",
 }
@@ -227,8 +227,26 @@ def split_arpabet_braces(text: str):
     return segments
 
 
+def _bert_word(token):
+    """The aligner's own token form, for the BERT encoder (``None`` if empty).
+
+    ``hints/build.py --word-bert`` feeds ``features.transcript_words(text)``,
+    i.e. the token *reduced* exactly like the forced aligner's ``clean_token``
+    (letters, digits and ``'``; ``top-notch`` -> ``topnotch``, punctuation
+    stripped).  Inference must see the same string, or the 768-d state has a
+    different meaning for the same word.  A token with no kept characters
+    (a lone ``--`` / ``...``) has no semantic state -- it goes through the
+    trained ``word_null`` rather than embedding punctuation.
+    """
+    if token is None:
+        return None
+    from features import _aligner_keeps
+    word = "".join(ch for ch in str(token) if _aligner_keeps(ch))
+    return word or None
+
+
 def phonemize_with_arpabet(fe, text: str):
-    """``(phones, ids)`` for ``text``, with ``{...}`` ARPAbet spliced in.
+    """``(phones, ids, word_index, word_texts)`` for ``text`` with ``{...}``.
 
     Ordinary text is phonemized with the same sentence-level POS tagging
     `FeatureExtractor.phonemize_text` uses (so heteronyms still resolve from
@@ -237,12 +255,19 @@ def phonemize_with_arpabet(fe, text: str):
     then tokenized **once**, which is what keeps the result compatible with
     ids produced by phonemizing the same sentence normally.
 
+    ``word_index`` maps every phone id to its word (via the same
+    `FeatureExtractor.tokenize_with_word_spans` the dataset path uses) and
+    ``word_texts`` is one entry per word: the source token, or ``None`` for a
+    ``{...}`` group.  Those two are what let the REPL attach a per-word BERT
+    state (`hint_word_bert`) to an arbitrary sentence.
+
     Args:
         fe: A `FeatureExtractor` (only ``hphzr`` / ``tokenizer_g2p`` used).
         text: Transcript, optionally containing ``{HH AH0 L OW1}`` groups.
 
     Returns:
-        ``(phones, ids)``; both empty when the text has no phonemes.
+        ``(phones, ids, word_index, word_texts)``; all empty when the text has
+        no phonemes.
 
     Raises:
         ValueError: malformed braces (see `split_arpabet_braces`).
@@ -251,27 +276,26 @@ def phonemize_with_arpabet(fe, text: str):
     words = [w for kind, chunk in segments if kind == "text"
              for w in chunk.split()]
     tags = fe.hphzr.tag_words(words)
-    chunks = []
+    phone_words, word_texts = [], []
     cursor = 0
     for kind, chunk in segments:
         if kind == "arpabet":
-            chunks.append(chunk)
+            phone_words.append(chunk)
+            word_texts.append(None)
             continue
-        n_words = len(chunk.split())
-        phones = fe.hphzr.phonemize_sentence(chunk,
-                                             tags=tags[cursor:cursor + n_words])
-        cursor += n_words
-        if phones:
-            chunks.append(phones)
-    phones = " ".join(chunks)
-    if not phones:
-        return "", []
-    tokenizer = fe.tokenizer_g2p
-    ids = tokenizer(phones)["input_ids"]
-    if tokenizer.unk_token_id in ids:
+        chunk_words = chunk.split()
+        for word, tag in zip(chunk_words, tags[cursor:cursor + len(chunk_words)]):
+            phone_words.append(fe.hphzr.phonemize(word, tag=tag))
+            word_texts.append(word)
+        cursor += len(chunk_words)
+    phones = " ".join(p for p in phone_words if p)
+    if not phones.strip():
+        return "", [], [], []
+    ids, word_index = fe.tokenize_with_word_spans(phone_words)
+    if fe.tokenizer_g2p.unk_token_id in ids:
         print("warning: the tokenizer mapped part of the input to [UNK]; "
               "check the symbols in your {...} groups")
-    return phones, ids
+    return phones, ids, word_index, word_texts
 
 
 class KeyReader:
@@ -678,21 +702,23 @@ class Stage2REPL:
         #                                    (2 st per bucket, rounded)
         #   hint_slot_shift                  per-word log2 duration shift
         #                                    (+1 = twice as long)
-        #   hint_semantic                    null | text | cond
-        #   hint_semantic_text               sentence whose vector is injected
-        #                                    instead of the current text's
+        #   hint_word_mode                   cond | text | null
+        #   hint_word_text                   sentence whose per-word BERT states
+        #                                    are injected (the swap test)
         self.hint_intensity: Optional[int] = None
         self.hint_register: Optional[int] = None
         self.hint_pitch_st: float = 0.0
         self.hint_slot_shift: int = 0
-        self.hint_semantic: str = "cond"
-        self.hint_semantic_text: Optional[str] = None
-        # Compatibility width for the retired sentence-CLS channel.  The model
-        # has no such parameters since V2.2, so every semantic control below is
-        # a no-op, kept only so old scripts/flags do not crash.
-        self.semantic_dim: int = 0
+        self.hint_word_mode: str = "cond"
+        self.hint_word_text: Optional[str] = None
         self._base_hints: Optional[dict] = None   # last val item's levels
-        self._sem_cache: dict = {}
+        # Per-phone word index and the source token of every word for the
+        # *current* text (None = a {...} ARPAbet group).  Set by `set_text`;
+        # a val item (`v`) has no text, so they stay empty and the word channel
+        # can only come from its own `.cond`.
+        self.word_index: Optional[list] = None
+        self.word_texts: list = []
+        self._word_cache: dict = {}
 
 
         self.frame_rate = (int(config.data.sampling_rate)
@@ -717,7 +743,8 @@ class Stage2REPL:
             k: config.transformer.get(k, None)
             for k in ("eos_token", "fim", "region_cond", "length_cond",
                       "hints", "decoder_hints", "hint_monotone",
-                      "hint_film_memory", "hint_decoder_proj")}
+                      "hint_film_memory", "hint_decoder_proj",
+                      "hint_word_sem", "hint_word_dim")}
         self._fe = None            # FeatureExtractor (lazy: g2p + tokenizer)
         self._net_g = None         # stage-1 Generator (lazy)
         self._net_g_failed = False
@@ -878,6 +905,10 @@ class Stage2REPL:
         if bool(tcfg.get("hints", False)) != hints:
             print(f"NOTE: hints={hints} in {source}; using that.")
             tcfg.hints = hints
+        if not hints:
+            # A hints-less checkpoint has no `word_proj`; leaving the config's
+            # flag on would make `_word_hint` project through a `None`.
+            tcfg.hint_word_sem = False
         if hints:
             dec_hints = has("dec_int_emb.weight") or has("dec_int_dir")
             if bool(tcfg.get("decoder_hints", False)) != dec_hints:
@@ -895,6 +926,23 @@ class Stage2REPL:
             if bool(tcfg.get("hint_decoder_proj", False)) != proj:
                 print(f"NOTE: hint_decoder_proj={proj} in {source}; using that.")
                 tcfg.hint_decoder_proj = proj
+            # V2.1 per-word BERT state.  Its width is a parameter dimension and
+            # its *presence* is a trained projection, so both come from the
+            # checkpoint -- a config that disagrees would silently drop the
+            # trained table (hint_word_sem=false) or build a zero one.
+            word = has("word_proj.weight")
+            if bool(tcfg.get("hint_word_sem", False)) != word:
+                print(f"NOTE: hint_word_sem={word} in {source}; using that.")
+                tcfg.hint_word_sem = word
+            if word:
+                for k in keys:
+                    if k == "word_proj.weight" or k.endswith(".word_proj.weight"):
+                        dim = int(state[k].shape[1])
+                        if int(tcfg.get("hint_word_dim", 768) or 768) != dim:
+                            print(f"NOTE: hint_word_dim={dim} in {source}; "
+                                  f"using that.")
+                            tcfg.hint_word_dim = dim
+                        break
             # Hints V2 pitch representation.  The anchor count is a parameter
             # dimension, so a config that disagrees would fail to load; take it
             # from the checkpoint like everything else here.
@@ -1026,6 +1074,10 @@ class Stage2REPL:
         self.last_codes = self.last_sid = None
         self.last_audio = self.last_f0 = None
         self._base_hints = None
+        # A new checkpoint may have been trained with a different BERT encoder
+        # (the id is part of its contract), so cached word states no longer
+        # mean the same thing.
+        self._word_cache = {}
         self.clear_fill()
         self.frames = self._clamp_frames(self.frames)
         print("Last codes/audio cleared (they came from the old checkpoint).")
@@ -1047,7 +1099,7 @@ class Stage2REPL:
             return False
         fe = self._extractor()
         try:
-            phones, ids = phonemize_with_arpabet(fe, text)
+            phones, ids, word_index, word_texts = phonemize_with_arpabet(fe, text)
         except Exception as exc:
             print(f"Phonemization failed: {exc}")
             return False
@@ -1056,11 +1108,12 @@ class Stage2REPL:
             print(f"{text!r} produced no phonemes; text left unchanged.")
             return False
         self.text, self.phone_ids = text, ids
+        self.word_index, self.word_texts = list(word_index), list(word_texts)
         # A new sentence has no `.cond` (and no word timings), so the item's
         # captured levels must not leak into it.
         self._base_hints = None
         print(f"text: {text}")
-        print(f"phones: {phones!r}  ({len(ids)} ids)")
+        print(f"phones: {phones!r}  ({len(ids)} ids, {len(word_texts)} words)")
         return True
 
     def _clamp_frames(self, frames: int) -> int:
@@ -1095,35 +1148,88 @@ class Stage2REPL:
         return {k: (v[0].detach().cpu() if torch.is_tensor(v) else v)
                 for k, v in batch.items()}
 
-    def _semantic_vector(self):
-        """The sentence vector this generation should carry, or ``None``.
+    @staticmethod
+    def _word_slots(text: str) -> list:
+        """One entry per word of ``text`` (``None`` for a ``{...}`` group).
 
-        ``hint_semantic`` decides: ``text`` embeds the current text,
-        ``hint_semantic_text`` overrides the source (the swap test), ``cond``
-        keeps the val item's own vector (``None`` for arbitrary text), and
-        ``null`` always returns ``None`` so ``sem_null`` is used.
+        The word list the *phonemizer* uses, not ``text.split()``: a brace
+        group is one word with no text to embed, so keeping the ``None``
+        placeholder means later words keep their index instead of shifting.
         """
-        if self.hint_semantic == "null":
-            return None
-        # `text` embeds the current sentence; `cond` only embeds an explicit
-        # override sentence, otherwise it keeps whatever the item's .cond
-        # carried (None here -> the base vector stays untouched / sem_null).
-        if self.hint_semantic_text:
-            src = self.hint_semantic_text
-        elif self.hint_semantic == "text":
-            src = self.text
+        slots = []
+        for kind, chunk in split_arpabet_braces(text):
+            if kind == "arpabet":
+                slots.append(None)
+            else:
+                slots.extend(chunk.split())
+        return slots
+
+    def _word_bert_model(self) -> str:
+        """The encoder id this checkpoint was trained with, when it recorded it."""
+        return (getattr(self.net, "_word_bert_model", None)
+                or "bert-base-uncased")
+
+    def _word_bert_vectors(self):
+        """``(vecs, row_valid)`` for the word-semantic source, or ``(None, None)``.
+
+        ``hint_word_mode`` decides the source: ``text`` embeds the current
+        sentence's words, ``hint_word_text`` overrides it (the swap test), and
+        ``cond`` returns nothing here because the val item's own vectors are
+        already in ``_base_hints``.
+        """
+        if self.hint_word_text is not None:
+            src = str(self.hint_word_text)
+        elif self.hint_word_mode == "text":
+            src = str(self.text or "")
         else:
-            src = None
-        if not src or not str(src).strip():
-            return None
-        key = str(src)
-        if key not in self._sem_cache:
+            return None, None
+        if not src.strip():
+            return None, None
+        key = src
+        if key not in self._word_cache:
             try:
-                self._sem_cache[key] = self._extractor().hint_semantic(key)
+                words = (list(self.word_texts) if self.hint_word_text is None
+                         else self._word_slots(src))
+                words = [_bert_word(w) for w in words]
+                vec = self._extractor().hint_word_bert(
+                    words, model_name=self._word_bert_model(), device="cpu")
             except Exception as exc:
-                print(f"  semantic hint unavailable: {exc}")
-                self._sem_cache[key] = None
-        return self._sem_cache[key]
+                print(f"  word hint unavailable: {exc}")
+                vec, words = None, []
+            valid = torch.tensor([bool(str(w or "").strip()) for w in words],
+                                 dtype=torch.bool)
+            self._word_cache[key] = ((vec, valid) if vec is not None
+                                     else (None, None))
+        return self._word_cache[key]
+
+    def _word_vectors_for(self, n_phone: int):
+        """Per-phone ``(hint_word, hint_word_valid)`` for the current text.
+
+        A word's vector is repeated over its phones; a word with no vector
+        (``{...}`` group, a shorter swap sentence, a BERT failure) goes through
+        the model's trained ``word_null`` via the mask instead of ``proj(0)``.
+        """
+        vecs, row_valid = self._word_bert_vectors()
+        if vecs is None:
+            return None, None
+        if self.word_index is None or len(self.word_index) != int(n_phone):
+            print("  word hints: no word-aligned phone sequence for this text "
+                  "(set it with `t`/`y`); using word_null")
+            return None, None
+        want = int(getattr(self.net, "hint_word_dim", vecs.shape[1]))
+        if int(vecs.shape[1]) != want:
+            print(f"  word hints: encoder gives {int(vecs.shape[1])} dims but "
+                  f"the model wants {want}; using word_null")
+            return None, None
+        nrow = int(vecs.shape[0])
+        if nrow == 0:
+            return None, None
+        idx = torch.tensor([int(i) for i in self.word_index], dtype=torch.long)
+        safe = idx.clamp(0, nrow - 1)
+        valid = (idx < nrow) & row_valid[safe]
+        out = torch.zeros((int(n_phone), want), dtype=torch.float32)
+        out[valid] = vecs[idx[valid]].to(torch.float32)
+        return out, valid
 
     @staticmethod
     def _shift_levels(levels, delta: int, n_levels: int):
@@ -1178,27 +1284,44 @@ class Stage2REPL:
             base["hint_phone_frac"] = resize(base.get("hint_phone_frac"))
         if getattr(self.net, "hint_word_sem", False):
             wdim = int(self.net.hint_word_dim)
-            base["hint_word"] = resize(base.get("hint_word"), (wdim,))
-            v = base.get("hint_word_valid")
-            if v is None:
-                base["hint_word_valid"] = torch.zeros(n_phone,
-                                                     dtype=torch.bool)
+            if self.hint_word_mode == "null":
+                base["hint_word"] = torch.zeros((n_phone, wdim),
+                                                dtype=torch.float32)
+                base["hint_word_valid"] = torch.zeros(n_phone, dtype=torch.bool)
+            elif (self.hint_word_mode == "text"
+                  or self.hint_word_text is not None):
+                vec, valid = self._word_vectors_for(n_phone)
+                if vec is None:
+                    base["hint_word"] = torch.zeros((n_phone, wdim),
+                                                    dtype=torch.float32)
+                    base["hint_word_valid"] = torch.zeros(
+                        n_phone, dtype=torch.bool)
+                else:
+                    base["hint_word"] = vec
+                    base["hint_word_valid"] = valid
             else:
-                # A val item's own vectors are usable only when the phone
+                # `cond`: the val item's own BERT states, resized like every
+                # other per-phone array.  They are usable only when the phone
                 # sequence is unchanged; a shorter/different text falls back to
                 # the trained null state rather than a misaligned word.
-                keep = torch.zeros(n_phone, dtype=torch.bool)
-                m = min(n_phone, int(v.shape[0]))
-                if m == n_phone and int(v.numel()) == n_phone:
-                    keep[:m] = v[:m].bool()
-                base["hint_word_valid"] = keep
+                hw = base.get("hint_word")
+                if hw is not None and int(hw.shape[-1]) != wdim:
+                    hw = None
+                base["hint_word"] = resize(hw, (wdim,))
+                v = base.get("hint_word_valid")
+                if v is None:
+                    base["hint_word_valid"] = torch.zeros(n_phone,
+                                                         dtype=torch.bool)
+                else:
+                    keep = torch.zeros(n_phone, dtype=torch.bool)
+                    m = min(n_phone, int(v.shape[0]))
+                    if m == n_phone and int(v.numel()) == n_phone:
+                        keep[:m] = v[:m].bool()
+                    base["hint_word_valid"] = keep
         if base.get("hint_int") is None:
             base["hint_int"] = torch.zeros((), dtype=torch.long)
         if base.get("hint_reg") is None:
             base["hint_reg"] = torch.zeros((), dtype=torch.long)
-        if not self.semantic_dim:
-            base.pop("hint_sem", None)
-            base.pop("hint_sem_valid", None)
 
         # Absolute level overrides.
         if self.hint_intensity is not None and n_int:
@@ -1241,22 +1364,6 @@ class Stage2REPL:
             base["hint_slot"] = self._shift_levels(
                 base["hint_slot"], int(self.hint_slot_shift), n_slot)
 
-        # Semantic channel (removed in V2.2): only meaningful for a model that
-        # still has the parameters, which the current one never does.
-        if self.semantic_dim:
-            vec = self._semantic_vector()
-            if vec is not None:
-                v = torch.as_tensor(vec, dtype=torch.float32).reshape(-1)
-                if v.numel() != self.semantic_dim:
-                    raise ValueError(
-                        f"semantic vector has {v.numel()} dims, model wants "
-                        f"{self.semantic_dim}")
-                base["hint_sem"] = v
-                base["hint_sem_valid"] = torch.tensor(True)
-            elif self.hint_semantic == "null":
-                base["hint_sem"] = torch.zeros(self.semantic_dim)
-                base["hint_sem_valid"] = torch.tensor(False)
-
         return {k: (v.unsqueeze(0) if torch.is_tensor(v) else v)
                 for k, v in base.items()}
 
@@ -1268,12 +1375,15 @@ class Stage2REPL:
         inten = ("base" if self.hint_intensity is None
                  else str(self.hint_intensity))
         reg = ("base" if self.hint_register is None else str(self.hint_register))
-        sem = "removed" if not self.semantic_dim else self.hint_semantic
-        if self.semantic_dim and self.hint_semantic_text:
-            sem = f"text({self.hint_semantic_text!r})"
+        if getattr(self.net, "hint_word_sem", False):
+            word = self.hint_word_mode
+            if self.hint_word_text is not None:
+                word = f"text({self.hint_word_text!r})"
+        else:
+            word = "n/a"
         return (f"base={self.hint_mode}, intensity={inten}/{n_int}, "
                 f"register={reg}/{n_reg}, pitch={self.hint_pitch_st:+.1f}st, "
-                f"slot={self.hint_slot_shift:+d}, semantic={sem}")
+                f"slot={self.hint_slot_shift:+d}, word={word}")
 
     def _hint_arg(self):
         """Kept for call sites that only need the base mode (no controls)."""
@@ -1334,24 +1444,35 @@ class Stage2REPL:
         print(f"word slot shift: {self.hint_slot_shift:+d} "
               f"(x{2.0 ** self.hint_slot_shift:.2f} duration)")
 
-    def set_hint_semantic(self, raw) -> None:
+    def set_hint_word(self, raw, announce: bool = True) -> None:
         text = str(raw or "").strip()
         if not text:
             return
         low = text.lower()
-        if low in ("cond", "item"):
-            self.hint_semantic, self.hint_semantic_text = "cond", None
+        if low.startswith("swap:"):
+            # One-token form of the swap test: `d swap:<a sentence>`.
+            self.hint_word_mode = "text"
+            self.hint_word_text = text.split(":", 1)[1].strip() or None
+        elif low in ("cond", "item"):
+            self.hint_word_mode, self.hint_word_text = "cond", None
         elif low in ("text", "current"):
-            self.hint_semantic, self.hint_semantic_text = "text", None
+            self.hint_word_mode, self.hint_word_text = "text", None
         elif low in ("null", "off", "none"):
-            self.hint_semantic, self.hint_semantic_text = "null", None
+            self.hint_word_mode, self.hint_word_text = "null", None
         elif low in ("clear", "-"):
-            self.hint_semantic, self.hint_semantic_text = "cond", None
+            self.hint_word_mode, self.hint_word_text = "cond", None
         else:
-            # A literal sentence: inject *its* vector instead of the current
-            # text's (the semantic swap test).
-            self.hint_semantic, self.hint_semantic_text = "text", text
-        print(f"semantic: {self.hint_state()}")
+            # A literal sentence: inject *its* per-word BERT states instead of
+            # the current text's (the word-semantics swap test).  Word i of the
+            # current sentence gets word i of this one; words it does not cover
+            # go through word_null.
+            self.hint_word_mode, self.hint_word_text = "text", text
+        if (announce and self.hint_word_mode == "text"
+                and self.word_index is None):
+            print("  note: no word-aligned phone sequence yet (press t/y first); "
+                  "the channel stays word_null until then.")
+        if announce:
+            print(f"word semantics: {self.hint_state()}")
 
     def generate(self, frames: Optional[int] = None) -> bool:
         """Sample codes for the current text and decode them to audio."""
@@ -1675,6 +1796,9 @@ class Stage2REPL:
         """Set the conditioning *without* phonemizing (val items carry ids)."""
         self.phone_ids = [int(i) for i in ids]
         self.text = ""
+        # No source tokens, hence no word-aligned BERT state: `cond` uses the
+        # item's own `.cond` vectors, `text`/a swap sentence fall back to null.
+        self.word_index, self.word_texts = None, []
 
     def _phones_text(self) -> str:
         """ARPAbet string for the current ids (never raises)."""
@@ -1895,15 +2019,16 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
   r  register level   (prompt: 0-5, blank = keep)
   j  word pitch shift (prompt: semitones, e.g. +2 / -4; 2 st per bucket)
   u  word slot shift  (prompt: log2 duration, +1 = twice as long)
-  d  semantic source  (prompt: cond | text | null | `<a sentence>`)
+  d  word semantics   (prompt: cond | text | null | swap:<sentence>)
 
-  `cond` uses the loaded val item's own `.cond` hints; arbitrary text has no
-  `.cond`, so it falls back to the trained null state.  `d <sentence>` embeds
-  that sentence instead of the current text (the semantic swap test), and
-  `d text` embeds the current text -- with every other channel at level 0 this
-  is the "semantic only, OOD text" probe (`--hint_semantic text`).  Word-pitch
-  and slot shifts act on the present per-word buckets; on OOD text they fill
-  every phone uniformly.
+  `cond` uses the loaded val item's own `.cond` per-word BERT states; arbitrary
+  text has no `.cond`, so it falls back to the trained word_null state.  `d
+  text` embeds the current sentence's words with the corpus's BERT encoder
+  (one vector per word, repeated over that word's phones), and `d <sentence>`
+  (or `d swap:<sentence>`) swaps in that sentence's word vectors instead (word
+  i of the current sentence gets word i of the swap; words it does not cover
+  are word_null) -- the word-level swap test.  Word-pitch and slot shifts act
+  on the present per-word buckets; on OOD text they fill every phone uniformly.
 
   Blank at a prompt keeps the current value; blank at a wav/codes prompt
   writes into the output directory with a generated name.  `s` rebuilds the
@@ -2090,9 +2215,9 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
             repl.set_hint_slot(raw)
         elif key == "d":
             raw = rest or repl.reader.read_line(
-                "Semantic source: cond | text | null | <a sentence> "
-                f"[{repl.hint_semantic}]: ")
-            repl.set_hint_semantic(raw)
+                "Word-semantics source: cond | text | null | <a sentence> "
+                f"[{repl.hint_word_mode}]: ")
+            repl.set_hint_word(raw)
         elif key == "a":
             if repl.current_codes is None:
                 print("Nothing sampled yet -- press g (generate).")
@@ -2211,7 +2336,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="base hint state: 'cond' = the loaded val item's "
                              "own .cond hints (arbitrary text has none and "
                              "falls back to null), 'null' = the trained "
-                             "'not provided' state (level 0 / sem_null), "
+                             "'not provided' state (level 0 / word_null), "
                              "'omit' = send no vectors at all (pre-Phase-0, "
                              "out of distribution). Default: train.sample_hints.")
     parser.add_argument("--hint_intensity", type=int, default=None,
@@ -2223,14 +2348,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "bucket; applied to present word hints)")
     parser.add_argument("--hint_slot", type=int, default=None,
                         help="per-word log2 duration shift (+1 = twice as long)")
-    parser.add_argument("--hint_semantic", default=None,
-                        choices=("cond", "text", "null"),
-                        help="semantic channel: 'cond' = the item's own vector, "
-                             "'text' = embed the current text (the "
-                             "semantic-only OOD probe), 'null' = sem_null")
-    parser.add_argument("--hint_semantic_text", default=None,
-                        help="inject this sentence's vector instead of the "
-                             "current text's (the semantic swap test)")
+    parser.add_argument("--hint_word", default=None,
+                        help="per-word BERT channel: 'cond' = the loaded val "
+                             "item's own states, 'text' = embed the current "
+                             "sentence's words, 'null' = word_null, or "
+                             "'swap:<a sentence>' to inject that sentence's "
+                             "states (the word-swap test)")
+    parser.add_argument("--hint_word_text", default=None,
+                        help="inject this sentence's per-word BERT states "
+                             "instead of the current text's (word-swap test)")
     parser.add_argument("--seed", type=int, default=None,
                         help="torch seed, so paired A/B draws are comparable")
     return parser.parse_args(argv)
@@ -2282,11 +2408,11 @@ def main(argv=None) -> int:
         repl.hint_pitch_st = float(args.hint_pitch)
     if args.hint_slot is not None:
         repl.hint_slot_shift = int(args.hint_slot)
-    if args.hint_semantic is not None:
-        repl.hint_semantic = str(args.hint_semantic)
-    if args.hint_semantic_text is not None:
-        repl.hint_semantic = "text"
-        repl.hint_semantic_text = str(args.hint_semantic_text)
+    if args.hint_word is not None:
+        repl.set_hint_word(str(args.hint_word), announce=False)
+    if args.hint_word_text is not None:
+        repl.hint_word_mode = "text"
+        repl.hint_word_text = str(args.hint_word_text)
     if args.seed is not None:
         torch.manual_seed(int(args.seed))
         if torch.cuda.is_available():

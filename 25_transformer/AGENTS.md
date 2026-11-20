@@ -1232,9 +1232,10 @@ missing -- that is a data difference, not a tokenization one.
 
 **Two ways in, one implementation.** `hints/build.py` is the offline/bulk path
 (parallel, no source audio needed); `features.py` exposes the same helpers as
-`hint_intensity` / `hint_register` / `hint_semantic` / `hint_words` /
-`extract_hints` (+ `hint_level` / `load_hint_levels` for bucketing and
-`write_hints` for saving), which is the entry point for an inference UI. Those
+`hint_intensity` / `hint_register` / `hint_semantic` / `hint_word_bert` /
+`hint_words` / `extract_hints` (+ `hint_level` / `load_hint_levels` for
+bucketing and `write_hints` for saving), which is the entry point for an
+inference UI. Those
 wrappers import `hints/` **lazily**, because it adds parselmouth (Praat) and
 loads the DSP / bge models -- scikit-learn and pandas are already pulled in by
 `g2p_en`, so they are not the reason. `test_hints.py` asserts that
@@ -2158,15 +2159,19 @@ python -c "import torch; sd = torch.load('checkpoints_stage2/<exp>/last.ckpt', m
 #
 # Hint controls (hint-enabled checkpoints; `p` shows the state): `e` intensity
 # level, `r` register level, `j` word-pitch shift (semitones, 2 st/bucket),
-# `u` word-slot shift (log2 duration), `d` semantic source (`cond|text|null` or
-# a literal sentence = inject *its* vector).  `cond` uses the loaded val item's
-# own `.cond`; arbitrary text has none, so it falls back to the trained null
-# state.  One-shot equivalents: `--hint_intensity/--hint_register/--hint_pitch/
-# --hint_slot/--hint_semantic/--hint_semantic_text`, plus `--seed` for paired
-# A/B draws.  `--hint_semantic text` with the other channels at level 0 is the
-# semantic-only OOD probe (result: HINTS_PLAN.md §7).  The hint/monotone/FiLM
-# layout is also re-derived from the checkpoint, so a v1.1 (monotone) run loads
-# correctly against the shipped table-model config.
+# `u` word-slot shift (log2 duration), `d` word-semantics source
+# (`cond|text|null` or a literal sentence / `swap:<sentence>` = inject *its*
+# per-word BERT states).
+# `cond` uses the loaded val item's own `.cond`; arbitrary text has none, so it
+# falls back to the trained null state.  `text` embeds the current sentence's
+# words with the corpus's BERT encoder, repeated over each word's phones; a
+# literal sentence swaps word i of the current text for word i of that sentence
+# (words it does not cover go through `word_null`).  One-shot equivalents:
+# `--hint_intensity/--hint_register/--hint_pitch/--hint_slot/--hint_word/
+# --hint_word_text`, plus `--seed` for paired A/B draws.  The hint/monotone/FiLM
+# and word-BERT layouts are also re-derived from the checkpoint, so a v1.1
+# (monotone) or pre-V2.1 (no word projection) run loads correctly against the
+# shipped config.
 python scratch/stage2_repl.py
 python scratch/stage2_repl.py --checkpoint checkpoints_stage2/hints_v1_p4_final_mono1/last.ckpt
 python scratch/stage2_repl.py --checkpoint checkpoints_stage2/transformer_v0.5a/last.ckpt --no_audio
@@ -2174,7 +2179,7 @@ python scratch/stage2_repl.py --list_checkpoints            # just list the runs
 python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \
     --frames 200 --out scratch/repl_out/hello.wav      # one-shot
 python scratch/stage2_repl.py --text "Hello there, traveller." --sid 12 \
-    --no_audio --hints null --hint_semantic text --seed 7   # semantic-only OOD
+    --no_audio --hints null --hint_word text --seed 7   # word-semantics OOD
 
 # Ad-hoc smoke tests (many modules have an `if __name__ == "__main__"` block)
 python modeling/transformer.py    # constructs a CodeTransformer, runs fwd + generate

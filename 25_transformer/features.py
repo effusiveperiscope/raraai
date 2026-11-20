@@ -6,8 +6,9 @@ Two roles:
   pitch, the HorsePhonemizer/G2P front end (`align`, `phonemize_items`,
   `extract_features_ac`, ...);
 * conditioning hints (`hint_intensity`, `hint_register`, `hint_semantic`,
-  `hint_words`, `extract_hints`) -- thin wrappers over the offline `hints/`
-  package, so an inference UI has a single place to ask for every hint.  Those
+  `hint_word_bert`, `hint_words`, `extract_hints`) -- thin wrappers over the
+  offline `hints/` package, so an inference UI has a single place to ask for
+  every hint.  Those
   imports are lazy: `hints/` adds parselmouth (Praat) and loads the DSP /
   sentence-embedding models, which stage 1/2 must not pay for unless a hint is
   actually requested.  (scikit-learn and pandas are already pulled in by
@@ -424,6 +425,9 @@ class FeatureExtractor:
         # ``phonemize_items`` / ``phonemize_text``. Build them on first use so a
         # phones-only pass does not pay for them.
         self._rmvpe_model = None
+        # Per-word BERT encoders, keyed by model id (see `hint_word_bert`).
+        # Lazily filled; inference-time only, so no other path pays for it.
+        self._word_bert_models = {}
         self.hphzr = HorsePhonemizer()
 
         # https://huggingface.co/therealvul/tokenizer_g2pen_v3/blob/main/tokenizer.json
@@ -846,6 +850,106 @@ class FeatureExtractor:
         out = hb.encode_semantics([str(text)], model_name or hb.DEFAULT_SEMANTIC_MODEL,
                                   device)
         return None if out is None else out[0]
+
+    def hint_word_bert(self, words, model_name=None, device=None):
+        """Per-word BERT last-hidden-state means: ``(n_word, dim)`` float32.
+
+        The inference-time counterpart of ``hints/build.py --word-bert``, and
+        the same recipe: tokenize the words with ``is_split_into_words=True``
+        and average the last hidden state over each word's wordpieces.  A
+        vector computed here is interchangeable with one stored in a ``.cond``,
+        which is what lets the REPL feed an arbitrary sentence's words to
+        ``transformer.hint_word_sem``.
+
+        The width is whatever the encoder emits (768 for ``bert-base-uncased``,
+        the corpus default); the model's ``hint_word_dim`` check catches a
+        mismatch.  Absence is *not* a zero vector in this channel -- the caller
+        carries it in ``hint_word_valid`` -- so a word with no wordpieces (or a
+        placeholder entry of ``None``, e.g. a ``{...}`` ARPAbet group) gets a
+        zero row that must be masked out.
+
+        The tokenizer/model pair is cached per encoder id, and this defaults to
+        CPU: one sentence is a few milliseconds, and a 768-wide encoder should
+        not compete with the stage-2 model for GPU memory.
+
+        Args:
+            words: whitespace-separated string, or a sequence of words.  A
+                ``None``/empty entry is a placeholder and leaves a zero row.
+            model_name: encoder id (default ``bert-base-uncased``).
+            device: torch device (default ``self.device``; the REPL passes
+                ``cpu``).
+
+        Returns:
+            ``torch.Tensor`` of shape ``(len(words), dim)`` and dtype float32,
+            or ``None`` when there is nothing to embed.
+        """
+        if isinstance(words, str):
+            words = words.split()
+        else:
+            words = list(words)
+        if not words:
+            return None
+        model_name = str(model_name or "bert-base-uncased")
+        device = str(device or self.device)
+        cache = self._word_bert_models.setdefault(model_name, {})
+        if "tok" not in cache:
+            from transformers import AutoModel
+            cache["tok"] = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModel.from_pretrained(model_name).to(device).eval()
+            cache["model"] = model
+        tok, model = cache["tok"], cache["model"]
+
+        rows = [i for i, w in enumerate(words)
+                if w is not None and str(w).strip()]
+        if not rows:
+            return None
+        enc = tok([[str(words[i]) for i in rows]], is_split_into_words=True,
+                  return_tensors="pt", padding=True, truncation=True,
+                  max_length=256).to(device)
+        with torch.no_grad():
+            hidden = model(**enc).last_hidden_state.float().cpu()
+        vec = torch.zeros((len(rows), hidden.shape[-1]), dtype=torch.float32)
+        buckets = {}
+        for j, wid in enumerate(enc.word_ids(batch_index=0)):
+            if wid is not None:
+                buckets.setdefault(wid, []).append(j)
+        for w, js in buckets.items():
+            if w < vec.shape[0]:
+                vec[w] = hidden[0, js].mean(0)
+
+        out = torch.zeros((len(words), vec.shape[1]), dtype=torch.float32)
+        out[rows] = vec
+        return out
+
+    def tokenize_with_word_spans(self, phone_words):
+        """Tokenize per-word phone strings once, with a per-id word index.
+
+        Mirrors `phonemize_items`: the words' phone strings are joined and the
+        g2pen tokenizer is called **once**, then `_token_spans` slices the
+        sequence.  Tokenizing each word separately cannot be concatenated back
+        (the tokenizer merges across spaces), so word boundaries have to be
+        derived from the sentence-level call.
+
+        Args:
+            phone_words: per-word ARPAbet strings (``""`` for a word with no
+                phones; it keeps its index rather than shifting later words).
+
+        Returns:
+            ``(ids, word_index)`` -- the same token ids a whole-sentence
+            phonemization produces, and a list of length ``len(ids)`` giving
+            each position's word index.
+        """
+        phone_words = [str(p) for p in phone_words]
+        joined = " ".join(phone_words)
+        if not joined.strip():
+            return [], []
+        ids = self.tokenizer_g2p(joined)["input_ids"]
+        pieces = self.tokenizer_g2p.convert_ids_to_tokens(ids)
+        spans = _token_spans(pieces, joined, [len(p) for p in phone_words])
+        word_index = []
+        for w, (start, end) in enumerate(spans):
+            word_index.extend([w] * int(end - start))
+        return [int(i) for i in ids], word_index
 
     @staticmethod
     def hint_level(value, edges):
