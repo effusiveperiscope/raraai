@@ -237,6 +237,9 @@ def main():
         max_frames=config.train.get("max_frames", None),
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
+        # Match 2_training's val set when an alignment blocklist is configured
+        # (otherwise the same run reports a slightly different val_loss here).
+        alignment_blocklist=config.train.get("alignment_blocklist", None),
         **hint_kwargs,
     )
 

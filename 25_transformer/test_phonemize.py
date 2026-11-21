@@ -387,6 +387,28 @@ def run_regressions(fe: FeatureExtractor, checks: Checks) -> None:
                          f'{needle!r}', '' if ok else f'got {got!r}')
 
 
+def run_stage_direction_checks(fe: FeatureExtractor, checks: Checks) -> None:
+    """``*sigh*``-style annotations are removed; ``*word*`` emphasis is kept."""
+    print_header('STAGE DIRECTIONS / EMPHASIS')
+    base = fe.phonemize_text("You're still resolved.")
+    got = fe.phonemize_text("*sigh* You're still resolved.")
+    checks.check(got == base,
+                 'a stage direction is removed (*sigh*)',
+                 '' if got == base else f'{got!r} != {base!r}')
+    emph = fe.phonemize_text("There's *no* libel.")
+    plain = fe.phonemize_text("There's no libel.")
+    checks.check(emph == plain,
+                 'an emphasis word survives (*no*)',
+                 '' if emph == plain else f'{emph!r} != {plain!r}')
+    empty = fe.phonemize_text("*panting*")
+    checks.check(empty == [],
+                 'annotation-only text produces no ids',
+                 '' if empty == [] else f'got {empty!r}')
+    checks.check(fe.tokenizer_g2p.unk_token_id not in emph,
+                 'emphasis leaves no [UNK]',
+                 '' if fe.tokenizer_g2p.unk_token_id not in emph else f'{emph!r}')
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     device = args.device or ('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -424,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.regress:
         run_regressions(fe, checks)
+    run_stage_direction_checks(fe, checks)
 
     if args.expect:
         print_header('EXPECT CHECKS (text path)')

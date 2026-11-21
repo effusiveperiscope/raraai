@@ -429,6 +429,37 @@ train:
   # utterance-initial words.  Clips without word timings fall back and are
   # counted (`Word crop: N ...` after the first epoch).  No re-preprocessing.
   word_crop: true
+  # Optional blocklist of clips whose forced alignment gave the FIRST word fewer
+  # than 1 code frame per *phone* with >= 3 phones (40 ms/phone -- physically
+  # impossible; "Traveler!"/"Paimon," given 1-2 frames).  Those clips teach the
+  # model to swallow the initial word.  Generated on this corpus with
+  #   python scratch/audit_word_alignment.py \
+  #       --filelist data/genshin_plus_extras/train_stage2.txt \
+  #                  data/genshin_plus_extras/val_stage2.txt \
+  #       --source-filelist filelists_2/genshin_full_eng_text.txt \
+  #           filelists_2/mlp_linux.txt filelists_2/vctk_linux.txt \
+  #           filelists_2/expresso_read_linux.txt \
+  #       --first-word-only --min-word-phones 3 \
+  #       --blocklist data/genshin_plus_extras/degenerate_word_alignments.txt
+  # = 477 clips (0.3 %), i.e. ~0.3 % of train and val.  `--source-filelist` is
+  # required for *real* phone counts: `phone_word_idx` indexes BPE tokens, which
+  # merge phones, and the token proxy flags 3.7 % of clips (7 % of which are
+  # real).  `data/` is gitignored, so regenerate the file on a fresh box (~1 min)
+  # or set this to null.  A broader rule (any word, not just the first) flags
+  # ~20 % because the aligner gives adjacent function words the same start frame
+  # ("to a the"); the crop groups equal starts, so those are not dropped.
+  alignment_blocklist: data/genshin_plus_extras/degenerate_word_alignments.txt
+  # Genshin writes nonverbal sounds as stage directions: *sigh*, *panting*,
+  # *clears throat* (~1.2 % of clips, 1 763 train / 81 val).  This corpus was
+  # phonemized before `features.strip_stage_directions` existed, so they are
+  # real words in `phone_ids` (*sigh* -> SAY1, *ahem* -> AH0 HHIY1 M) and the
+  # model is being trained to pronounce a sigh.  The text pipeline now strips
+  # them (and keeps Expresso/Genshin *emphasis* words), but the tensors need a
+  # rebuild to benefit: `2_preprocess.py --only phones --phones_from transcript`
+  # (cheap) + `hints/build.py --words` (the expensive part, ~hours).
+  # Until then, the blocklist from scratch/find_stage_directions.py drops those
+  # clips.  Set this to null when the corpus has been rebuilt.
+  stage_direction_blocklist: null
   # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
   # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
   # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run

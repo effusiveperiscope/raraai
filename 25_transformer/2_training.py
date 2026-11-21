@@ -2357,6 +2357,12 @@ def train(config, resume_from=None, transfer_from=None):
         # written by `hints/build.py --words`, otherwise it falls back to the
         # historical "full transcript + random audio window" pairing.
         word_crop=bool(config.train.get("word_crop", True)),
+        # Optional list of clips whose forced alignment gave a word an
+        # impossible duration (see scratch/audit_word_alignment.py).  Those
+        # teach the model to swallow the word; dropping them is the cheap fix.
+        alignment_blocklist=config.train.get("alignment_blocklist", None),
+        stage_direction_blocklist=config.train.get(
+            "stage_direction_blocklist", None),
         # Conditioning hints: the level edges come from the same hints.json the
         # model reads, so dataset and model cannot disagree about a level id.
         **hint_kwargs,
@@ -2368,11 +2374,21 @@ def train(config, resume_from=None, transfer_from=None):
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
         word_crop=bool(config.train.get("word_crop", True)),
+        # A blocklist built from the whole corpus may also hit val items; if it
+        # was built from train only this is a no-op.
+        alignment_blocklist=config.train.get("alignment_blocklist", None),
+        stage_direction_blocklist=config.train.get(
+            "stage_direction_blocklist", None),
         # Validation never applies hint dropout (`is_train=False`), so the val
         # loss is measured with the hints fully present -- and `val_loss_nohint`
         # gives the same batches with every channel dropped.
         **hint_kwargs,
     )
+    n_block = int(getattr(train_dataset, "n_blocklisted", 0))
+    n_block_val = int(getattr(val_dataset, "n_blocklisted", 0))
+    if n_block or n_block_val:
+        print(f"Blocklists: dropped {n_block} train / {n_block_val} val clip(s) "
+              f"(alignment + stage-direction; see train.*_blocklist)")
     if train_dataset.hints:
         reg_mode = ("relative to the speaker median "
                     f"({len(train_dataset.register_speaker_means)} offsets)"

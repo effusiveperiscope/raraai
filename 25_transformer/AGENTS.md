@@ -782,12 +782,71 @@ the phonemizer changed after it was built) falls back to the old crop and is
 counted in `n_word_crop_fallback`; a stale file still keeps its clip-level
 intensity/register channels, only the per-word fields are dropped.
 
+**Equal start frames are grouped.** `word_start_f` comes from the aligner and
+`word_slot_f` is start-to-start, but the aligner gives two adjacent words the
+**same** start frame for ~6 % of word pairs (114 225 words over the 151 653-clip
+corpus). The first of such a pair gets a zero-length "slot", and a crop that
+started at it would drop its phones while keeping its audio. `_word_spans`
+therefore collapses runs of equal starts into one crop segment; `bounds[g]` maps
+the group to its first word index, so the phone span stays contiguous. The
+timing hint is repaired too: `_load_hints` sets `hint_slot` to **absent** (level
+0, a trained state) for the first word of an equal-start pair instead of the
+bogus 1-frame bucket. Pitch/word-semantics hints are untouched (they do not
+depend on the boundary).
+
+**Degenerate per-word durations are audited, not guessed.**
+`scratch/audit_word_alignment.py` reports `word_slot_f / phones_in_word` and can
+write a blocklist consumed by `train.alignment_blocklist` (paths are dropped at
+filelist-build time, counted in `n_blocklisted`, printed at startup).
+**`--source-filelist` is required for the real metric**: `phone_word_idx` indexes
+g2pen **BPE tokens**, and the tokenizer merges phones (`FAY1N` = F AY1 N) and
+attaches boundary markers, so `slot / token_count` is not frames/phone. With the
+token proxy, 3.7 % of clips look like a degenerate first word; with real phones
+it is **0.3 %** (477 clips over the full corpus; 69 % of them are also
+equal-start pairs). The flagged words are overwhelmingly **vocatives, names and
+interjections at the start of a line** — "Paimon," "Traveler!", "Alright",
+"Forget", "Lyneyyyy" — which is exactly the "skips the first word" symptom.
+Mid-sentence there are more (≈0.8 % of words with ≥3 phones < 1 f/phone), but
+two thirds of those are the equal-start artefact; the non-equal-start remainder
+is again dominated by names/vocatives ("Paimon", "Traveler") and a few adverbs
+("about", "even", "always"). That is why the shipped blocklist targets the
+*first* word only — dropping clips on "any word" would remove ~8-20 % of the
+corpus for what is mostly a boundary artefact.
+The shipped rule is `--first-word-only --min-word-phones 3` and the file is the
+gitignored `data/genshin_plus_extras/degenerate_word_alignments.txt`. The audit
+is ~1 min (`.cond` + transcripts, CPU), so regenerate on a fresh box; set
+`alignment_blocklist: null` to disable. A broader rule (any word, not just the
+first) flags ~20 %, almost all the equal-start function-word artefact above —
+do not drop on that rule.
+
 The crop is applied *before* FIM's `apply_fim`, so FIM remains a fully labelled
 permutation inside a text-matched window. Keeping `fim_rate: 0.2` is fine; with
 the crop fixed it is the only path that trains "start in the middle of the
 text" (plain AR now always starts where its audio starts). A `fim_rate: 0.0`
 control needs no shape change and can warm-start from the same checkpoint
 (keep `transformer.fim: true`; `apply_fim` then sees an all-False mask).
+
+### Non-speech annotations (stage directions)
+
+The Genshin transcripts write nonverbal sounds as `*sigh*`, `*panting*`,
+`*clears throat*`, ... — **1 845 clips (1.2 %), 1 143 with the annotation first
+and 75 annotation-only**. `features.strip_stage_directions` removes a `*...*`,
+`( ... )` or `[...]` span only when its lowercased text is in
+`STAGE_DIRECTION_ANNOTATIONS`; anything else (Expresso's `*no*`, Genshin's
+`*are*`/`*some*`) is **emphasis**, so only the asterisks go and the word stays.
+Do not add real words to that set. Both phone paths apply it (`align` +
+`phonemize_items` and `phonemize_text`), so the aligner and transcript corpora
+stay identical; the inference REPL gets it for free via `phonemize_text`.
+
+The published corpus was phonemized *before* this existed, so those spans are
+real words in `phone_ids` (`*sigh*` -> `SAY1`, `*ahem*` -> `AH0 HHIY1 M`) and the
+model is being trained to pronounce a sigh over sigh audio. A rebuild is
+`2_preprocess.py --only phones --phones_from transcript` (cheap, no audio/ASR),
+then `hints/build.py --words` (the expensive part — the `.cond` word timings must
+match the new phone sequence). Until then, `train.stage_direction_blocklist`
+drops the affected clips; `scratch/find_stage_directions.py --out-blocklist`
+regenerates it. The shipped v2.2 config uses both blocklists (2 188 train / 100
+val clips, 1.5 % / 1.9 %). Set that key to `null` once the corpus is rebuilt.
 
 ### Decoder RoPE (stage 2, v2.2)
 
@@ -2100,6 +2159,20 @@ python merge_pitch_codec.py \
 # (auto-detects stage-1, stage-2 and raw-audio filelists; --json for scripting)
 python dataset_duration.py data/base2/train_stage2.txt data/base2/val_stage2.txt \
     --per-speaker --hist
+
+# Per-word alignment audit: frames per phone from the .cond word timings.
+# `--source-filelist` gives real phones; without it the denominator is BPE
+# tokens (merges phones, so it over-flags by ~10x).  Writes a blocklist for
+# train.alignment_blocklist; the shipped rule targets the utterance-initial
+# word (< 1 frame/phone, >= 3 phones -- impossible; Paimon/Traveler! cases).
+python scratch/audit_word_alignment.py \
+    --filelist data/genshin_plus_extras/train_stage2.txt \
+               data/genshin_plus_extras/val_stage2.txt \
+    --source-filelist filelists_2/genshin_full_eng_text.txt \
+        filelists_2/mlp_linux.txt filelists_2/vctk_linux.txt \
+        filelists_2/expresso_read_linux.txt \
+    --first-word-only --min-word-phones 3 \
+    --blocklist data/genshin_plus_extras/degenerate_word_alignments.txt
 
 # Speaker map bootstrap
 python speaker_map.py --filelist filelists_2/25_stage2_base1.txt \

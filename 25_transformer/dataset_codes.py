@@ -121,6 +121,11 @@ def cond_path_for(phone_ids_path: str) -> str:
     return phone_ids_path[: -len(".phone_ids")] + COND_SUFFIX
 
 
+def _norm_path(path: str) -> str:
+    """Path key for blocklists: separators normalised, no trailing spaces."""
+    return os.path.normpath(str(path).strip()).replace("\\", "/")
+
+
 class CodeDataset(Dataset):
     def __init__(
         self,
@@ -141,6 +146,8 @@ class CodeDataset(Dataset):
         hint_pitch_edges=None,
         n_slot_buckets: int = DEFAULT_SLOT_BUCKETS,
         word_crop: bool = True,
+        alignment_blocklist: Optional[str] = None,
+        stage_direction_blocklist: Optional[str] = None,
     ):
         self.is_train = is_train
         self.max_frames = max_frames
@@ -156,6 +163,22 @@ class CodeDataset(Dataset):
         # ``n_word_crop_fallback``.
         self.word_crop = bool(word_crop)
         self.n_word_crop_fallback = 0
+        # Optional blocklists, dropped at filelist-build time.  The first comes
+        # from ``scratch/audit_word_alignment.py`` (a word given < 1 code frame
+        # per phone => ~40 ms/phone, which teaches the model to swallow it);
+        # the second from ``scratch/find_stage_directions.py`` (``*sigh*``-style
+        # annotations phonemized as words until the corpus is rebuilt with
+        # ``features.strip_stage_directions``).
+        self.n_blocklisted = 0
+        blocklist = set()
+        for path in (alignment_blocklist, stage_direction_blocklist):
+            if not path:
+                continue
+            with open(str(path), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        blocklist.add(_norm_path(line))
         self.rng = random.Random(random_seed)
         # Fill-in-the-middle span sampling (see ``modeling/transformer.py``).
         # Per train item, ``fim_rate`` is the probability of returning a
@@ -241,6 +264,9 @@ class CodeDataset(Dataset):
                     continue
                 parts = line.split("|")
                 if len(parts) < 4:
+                    continue
+                if blocklist and _norm_path(parts[0]) in blocklist:
+                    self.n_blocklisted += 1
                     continue
                 sid = int(parts[3])
                 if self.speaker_map is not None:
@@ -348,6 +374,21 @@ class CodeDataset(Dataset):
                     cond["pitch_word_voiced"].bool(), self.pitch_edges)
                 slot_w = slot_bucket(cond["word_slot_f"].float(),
                                      self.n_slot_buckets)
+                # ``word_slot_f`` is start-to-start, and the aligner gives
+                # adjacent words the same start for ~5.5 % of words (mostly
+                # "to/a/the").  The first of such a pair then carries a
+                # 1-frame "slot", which is a boundary artefact, not a 40 ms
+                # word: report it as *absent* (level 0, a trained state) rather
+                # than as the fastest timing bucket.  The crop groups equal
+                # starts separately (``_word_spans``); this only affects the
+                # per-phone hint channel.
+                starts = cond.get("word_start_f")
+                if (starts is not None and slot_w.ndim == 1
+                        and starts.numel() == slot_w.size and slot_w.size > 1):
+                    same = (starts.long().reshape(-1).numpy()[1:]
+                            == starts.long().reshape(-1).numpy()[:-1])
+                    slot_w = slot_w.copy()
+                    slot_w[:-1][same] = 0
                 idx = word.numpy()
                 out["hint_pitch"] = torch.as_tensor(pitch_w[idx].astype(np.int64))
                 out["hint_slot"] = torch.as_tensor(slot_w[idx].astype(np.int64))
@@ -461,12 +502,23 @@ class CodeDataset(Dataset):
                     n_phone: int, stale: bool = False):
         """Word boundaries for the crop, or ``None`` when the file cannot say.
 
-        Returns ``(starts, ends, phone_word_idx)`` as numpy arrays in code
-        frames / phone indices.  ``ends[i]`` is the start of the next word (the
-        last word ends at the clip end), which is exactly the ``word_slot_f``
-        meaning -- "start-to-start slot", not a duration.  The fields are
-        written by ``hints/build.py --words``; a pre-words ``.cond`` simply has
-        no ``word_start_f`` and the caller falls back to the old crop.
+        Returns ``(starts, ends, word_bounds, phone_word_idx)`` in code frames /
+        word indices / phone indices.  ``ends[g]`` is the start of the next
+        *group*, the last group ends at the clip end.
+
+        The aligner occasionally gives two adjacent words the **same** start
+        frame (measured: ~20 % of Genshin clips have at least one such pair).
+        ``word_slot_f`` is start-to-start, so the first of the pair gets a
+        zero-length span.  Treating a run of equal starts as one segment is
+        what keeps the audio/phone partition contiguous: otherwise the crop
+        could start at word ``i`` and drop its phones because its "end" equals
+        its own start, while the audio for that word is still in the window.
+        Grouping changes *crop boundaries only* -- the per-word hint channels
+        still see the original individual words.
+
+        The fields are written by ``hints/build.py --words``; a pre-words
+        ``.cond`` has no ``word_start_f`` and the caller falls back to the old
+        crop.
         """
         if cond is None or stale:
             return None
@@ -481,16 +533,20 @@ class CodeDataset(Dataset):
                 or pwi.min() < 0 or pwi.max() >= n_word
                 or np.any(np.diff(pwi) < 0) or np.any(np.diff(starts) < 0)):
             return None
-        ends = np.empty(n_word, dtype=np.int64)
-        if n_word > 1:
-            ends[:-1] = starts[1:]
-        ends[-1] = int(n_frames)
-        # A start-to-start slot can be 0 after rounding on adjacent words; clamp
-        # the geometry so the crop never picks a zero-length window.
         starts = np.clip(starts, 0, n_frames)
-        ends = np.clip(np.maximum(ends, starts), 0, n_frames)
-        del slots  # only used as a validity hint (the slot array's length)
-        return starts, ends, pwi
+        # Collapse runs of equal starts into one crop segment.  ``bounds[g]`` is
+        # the first word index of group g; ``bounds[g + 1]`` is the exclusive
+        # end, so the phone span of a group is a contiguous slice of pwi.
+        uniq, gid = np.unique(starts, return_inverse=True)
+        bounds = np.searchsorted(gid, np.arange(uniq.size + 1), side="left")
+        bounds[-1] = n_word
+        ends = np.empty(uniq.size, dtype=np.int64)
+        if uniq.size > 1:
+            ends[:-1] = uniq[1:]
+        ends[-1] = int(n_frames)
+        ends = np.clip(np.maximum(ends, uniq), 0, n_frames)
+        del slots  # only checked for length; the crop derives ends from starts
+        return uniq, ends, bounds, pwi
 
     def _crop_frames(self, spec: torch.Tensor, pitch: torch.Tensor,
                      word_spans=None):
@@ -536,9 +592,9 @@ class CodeDataset(Dataset):
         phone_span = None
 
         if self.word_crop and word_spans is not None:
-            starts, ends, pwi = word_spans
-            # First whole word at/after ``start`` and last whole word ending
-            # at/before ``end`` (searchsorted on the start/end arrays).
+            starts, ends, bounds, pwi = word_spans
+            # First group at/after ``start`` and last group ending at/before
+            # ``end`` (searchsorted on the group start/end arrays).
             i0 = int(np.searchsorted(starts, start, side="left"))
             i1 = int(np.searchsorted(ends, end, side="right"))
             while i0 < i1 and ends[i0] <= starts[i0]:
@@ -548,8 +604,11 @@ class CodeDataset(Dataset):
             if i1 > i0:
                 w0, w1 = int(starts[i0]), int(ends[i1 - 1])
                 if w1 > w0:
-                    p0 = int(np.searchsorted(pwi, i0, side="left"))
-                    p1 = int(np.searchsorted(pwi, i1, side="left"))
+                    # ``bounds`` maps group -> first word index, so the phone
+                    # span covers every word of every kept group (equal-start
+                    # runs stay together).
+                    p0 = int(np.searchsorted(pwi, int(bounds[i0]), side="left"))
+                    p1 = int(np.searchsorted(pwi, int(bounds[i1]), side="left"))
                     if p1 > p0:
                         start, end = w0, w1
                         phone_span = (p0, p1)

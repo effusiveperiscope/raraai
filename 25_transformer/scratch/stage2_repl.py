@@ -272,6 +272,11 @@ def phonemize_with_arpabet(fe, text: str):
     Raises:
         ValueError: malformed braces (see `split_arpabet_braces`).
     """
+    # Drop `*sigh*`-style stage directions (and unwrap emphasis) before the
+    # word list is built, so `word_index` / `word_texts` still describe the
+    # phones that `phonemize_text` would produce for this text.
+    from features import strip_stage_directions
+    text = strip_stage_directions(text)
     segments = split_arpabet_braces(text)
     words = [w for kind, chunk in segments if kind == "text"
              for w in chunk.split()]

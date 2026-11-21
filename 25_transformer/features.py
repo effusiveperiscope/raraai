@@ -17,6 +17,7 @@ Two roles:
 
 import bisect
 import math
+import re
 import unicodedata
 import numpy as np
 import torch
@@ -264,6 +265,187 @@ def _aligner_keeps(ch):
         return True
     cat = unicodedata.category(ch)
     return cat.startswith('L') or cat.startswith('N')
+
+
+#: ``*...*`` spans that describe a **non-speech** sound in the Genshin
+#: transcripts (``*sigh*``, ``*panting*``, ``*clears throat*`` ...).  They are
+#: stage directions, not words: the audio contains a sigh/cough, so phonemizing
+#: the span teaches the model to *say* "sigh".  These are removed from the text
+#: before alignment/phonemization.  **Do not add real words**: Genshin also uses
+#: ``*are*`` / ``*some*`` for emphasis and Expresso marks emphasis with
+#: ``*word*`` throughout -- those keep the inner word and only lose the
+#: asterisks (see `strip_stage_directions`).
+STAGE_DIRECTION_ANNOTATIONS = frozenset(
+    line.strip().lower() for line in """
+ahem
+beep
+blagggh
+blowing
+blubbering noises
+burp
+catches breath
+choking
+chuckle
+chuckles
+clears throat
+click click
+cough
+cough cough
+coughing
+coughing violently
+coughs
+cries
+crying
+deep breath
+deep breaths
+dozing off
+drooling
+exhale
+fanfare
+frustrated grumble
+gasp
+gasping for air
+giggle
+giggles
+glug
+glug-glug
+grimace
+groan
+groans
+growl
+grr
+grumble
+grunt
+grunts
+gulp
+gurgle
+guttural growling
+heave
+hic
+hiccup
+hiss
+howls
+huffing
+humming
+hums
+hums a tune
+inhale
+inhales
+inhales and exhales
+laugh
+laughs
+laughing
+licks popsicle
+long exhale
+mumbles
+mumbling
+munch
+munching
+nom
+nom nom
+om nom nom
+pained breathing
+pant
+panting
+pants
+pouting
+purr
+randomly humming innocently
+retch
+retching
+roars
+scoff
+shivering
+shivers
+shocked
+shrieking
+shudder
+shudders
+sigh
+sighing
+sighs
+sip
+sleeps
+smirk
+sniff
+sniff, sniff
+sniffle
+sniffles
+sniffs
+snore
+snores
+snoring
+sob
+sobbing
+sobs
+spitting noise
+spitting sounds
+spluttering
+squeal
+stammers
+stretching
+tearful whimper
+thinking
+tut-tut
+violent coughing
+whimper
+whimpering
+whimpers
+whine
+whisper
+whispering
+whistle
+whistles
+woof
+yawn
+yawns
+""".splitlines() if line.strip())
+
+_STAGE_DIRECTION_RE = re.compile(r"\*([^*\n]{1,60})\*")
+_PAREN_ANNOTATION_RE = re.compile(r"[\(\[]([^\)\]\n]{1,60})[\)\]]")
+
+
+def strip_stage_directions(text):
+    """Remove ``*sigh*``-style non-speech annotations; unwrap emphasis.
+
+    Two kinds of markup share the asterisks in this corpus:
+
+    * Genshin *stage directions* (``*sigh*``, ``*panting*``, ``*clears
+      throat*``): the audio is a nonverbal sound, so the span is **deleted**.
+      Keeping it would phonemize the English word and train the model to say
+      "sigh" over a sigh; at inference the same phonemes mean the real word.
+    * Emphasis (Expresso ``*no*``, Genshin ``*are*``): the word **is** spoken,
+      so only the asterisks are removed.
+    * ``(sigh)`` / ``[sigh]`` are also removed *only* when the inner text is in
+      `STAGE_DIRECTION_ANNOTATIONS`, so a legitimate parenthetical survives.
+
+    Used by `align`/`extract` (so a `--words`/`hints/build.py` run and a
+    `2_preprocess.py` run see the same text) and by `phonemize_text` (the
+    ``--phones_from transcript`` path and the inference REPL).  Both phone
+    paths must clean the text or their ``phone_ids`` diverge.
+
+    Args:
+        text: transcript string (``None``/empty passes through).
+
+    Returns:
+        The cleaned transcript, with runs of whitespace collapsed.
+    """
+    if not text:
+        return text
+
+    def sub_star(match):
+        inner = match.group(1).strip()
+        key = inner.lower().strip(" .,!?:;'\"")
+        return "" if key in STAGE_DIRECTION_ANNOTATIONS else inner
+
+    def sub_paren(match):
+        inner = match.group(1).strip()
+        key = inner.lower().strip(" .,!?:;'\"")
+        return "" if key in STAGE_DIRECTION_ANNOTATIONS else match.group(0)
+
+    out = _STAGE_DIRECTION_RE.sub(sub_star, str(text))
+    out = _PAREN_ANNOTATION_RE.sub(sub_paren, out)
+    return re.sub(r"\s+", " ", out).strip()
 
 
 def transcript_words(text):
@@ -544,6 +726,13 @@ class FeatureExtractor:
             raise RuntimeError(
                 "align() needs the Qwen3-ASR / forced-aligner weights; "
                 "construct FeatureExtractor(..., load_qwen=True).")
+        # Stage directions are not spoken, so they must not become aligner
+        # tokens either: remove `*sigh*`-style spans (but keep emphasis words)
+        # before the aligner sees the text.  `extract` cleans once and passes
+        # the same string to `phonemize_items`, so the item/word mapping stays
+        # consistent; `phonemize_text` applies the identical rule.
+        if transcription is not None:
+            transcription = strip_stage_directions(transcription)
         # (text the items were aligned against, aligner items) per utterance.
         # The text -- not the items -- is what carries the punctuation: both
         # the caller's transcript and the ASR output keep it, while the
@@ -644,6 +833,11 @@ class FeatureExtractor:
         texts = [str(it.get("text", "")) for it in items]
         use_transcript = False
         preset = None               # phones straight from the transcript's own tokens
+        if transcript is not None:
+            # Idempotent with `align`; needed because `extract` may pass the
+            # caller's original string.  Keeps the token indices aligned with
+            # the cleaned items.
+            transcript = strip_stage_directions(transcript)
         if transcript is not None and str(transcript).strip():
             if all(it.get("seg_idx") for it in items):
                 # ``align`` recorded which whitespace tokens of the transcript
@@ -731,6 +925,10 @@ class FeatureExtractor:
         Returns:
             List[int] phone ids (empty when the text has no phonemes).
         """
+        # Same stage-direction rule as the aligner path (`align` ->
+        # `phonemize_items`); otherwise `--phones_from transcript` and
+        # `--phones_from aligner` would disagree on `*sigh*`-style clips.
+        text = strip_stage_directions(text)
         phones = self.hphzr.phonemize_sentence(text)
         return self.tokenizer_g2p(phones)['input_ids']
 
