@@ -1,0 +1,597 @@
+# Stage-2 transformer: phonemes + speaker -> spec/pitch RVQ codes.
+#
+# Trains modeling/transformer.py ("CodeTransformer") on the codec codes
+# produced by 2_preprocess.py, using a MusicGen-style delay pattern across
+# the spec (codec) and pitch (pitch_codec) codebooks.
+#
+# Expected filelists (written by 2_preprocess):
+#   data/base/train_stage2.txt
+#   data/base/val_stage2.txt
+exp_name: transformer_mlp_v1
+tensorboard_version: 0
+
+# ---------------------------------------------------------------- model ---
+transformer:
+  hidden_size: 768
+  n_heads: 12
+  encoder_layers: 6
+  decoder_layers: 12
+  dim_feedforward: 2048
+  dropout: 0.05
+  max_positions: 4096
+  phone_vocab_size: 1024   # g2pen_tokenizer_clean vocab
+  phone_pad_id: 0
+  # Speaker ids are canonicalised into the stage-1 Generator id space, so
+  # this must be large enough to hold every stage-1 id you use
+  # (see speaker_map.py and train.speaker_map).
+  n_speakers: 4096
+  # ---- coarse conditioning hints (v0.8) -----------------------------------
+  # Five optional side channels built by hints/build.py (see HINTS_PLAN.md and
+  # hints/README.md).  Each continuous value is bucketed at load time with the
+  # edges in `hints_json`, so the level count is a config change, not a re-run.
+  # Level 0 = "not provided" (trained via hint_dropout/hint_null_all).  Enabling
+  # this changes the parameter set: fresh exp_name + --transfer_from.
+  #   intensity  perceptual effort 1-9, loudness-independent, clip-level
+  #   register   f0 level relative to the speaker's median, clip-level
+  #   pitch/slot per-word f0 and duration buckets (need the --words pass)
+  #   word_sem   per-word BERT state (V2.1), see hint_word_sem below
+  # The sentence-level bge CLS channel was *removed* in V2.2: it cost 0.004
+  # nats (better without it at every epoch of transformer_hints_v2) and only
+  # 1.5 % of it was recoverable from the codes, vs 50 % for intensity.  The
+  # `.cond` key may still exist (hints/build.py can compute it); nothing reads
+  # it.  Word-level states replace it (hint_word_sem).
+  hints: true
+  # hints/build.py output.  Dataset and model read the SAME file, so a level id
+  # cannot mean two things; it is part of the checkpoint contract.  v0.9+ uses
+  # the --relative-register file (levels.register.speaker_means).
+  hints_json: data/genshin_plus_extras/hints_rel.json
+  # Assert that the config and hints_json agree about the register scale (the
+  # level ids are identical either way, so no shape guard can catch it).
+  relative_register: true
+  # Feed the clip-level channel (intensity) to the decoder too.
+  # Off = encoder-only ablation.
+  decoder_hints: true
+  # Word-pitch cuts in semitones around the utterance's voiced median (fixed):
+  # 8 voiced bins, then one explicit "unvoiced" class, then 0 = "absent".
+  # Only read when hint_pitch_mode: table.
+  hint_pitch_edges: [-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0]
+  # ---- pitch representation (Hints V2) ------------------------------------
+  # table   -> v1: one level id per phone (8 voiced bins + unvoiced + absent).
+  # anchors -> up to `hint_pitch_anchors` (value, position) anchors per WORD,
+  #            repeated over the word's phones together with the phone's
+  #            position inside the word.  See HINTS_PLAN.md / dataset_codes.
+  # Why not one value per phone: measured on Genshin (words >= 8 code frames),
+  # the v1 word mean reconstructs the f0 contour to 2.1 st and 3 anchors to
+  # 0.7 st, but *projecting* 3 anchors onto one value per phone is no better
+  # than 2 (1.62 st) -- a 320-440 ms word has ~2.5 phones.  Hence the vector.
+  # The count is part of the checkpoint contract and must match the corpus.
+  # Changes the parameter set -> fresh exp_name + --transfer_from.
+  hint_pitch_mode: anchors
+  hint_pitch_anchors: 3
+  # ---- per-word semantic state (Hints V2.1) -------------------------------
+  # One `bert-base-uncased` last-hidden-state vector per WORD (mean over its
+  # wordpieces), repeated over the word's phones.  Measured on 30k words
+  # (HINTS_PLAN.md §12): +0.018 out-of-fold R2 on word duration/pitch/range
+  # *beyond* the phone sequence, where the sentence CLS and a lexical
+  # (hashed-spelling) control both sit at ~0.001.  POS is +0.010 and bge token
+  # states +0.007, so BERT-base is the best of the three.
+  # The full 768 dims are stored and `Linear(768, H)` learns what matters; the
+  # probe's numerical optimum was ~256 *at its 30k-word sample*, but a trained
+  # projection on 1.5M words has no reason to keep that cap (a 768-wide state
+  # is 1.5 KB/word).
+  # Needs the corpus rebuilt with `hints/build.py --word-bert`; the width is
+  # part of the checkpoint contract (hints.json -> words.word_bert.dim).
+  # New parameters -> fresh exp_name + --transfer_from.
+  hint_word_sem: true
+  hint_word_dim: 768
+  # Word-duration buckets: log2 of the slot length in code frames.
+  n_slot_buckets: 8
+  # Per-channel dropout (training items only); a dropped channel is level 0
+  # (word_sem: `hint_word_valid=False`, i.e. `word_null`).
+  hint_dropout:
+    intensity: 0.15
+    register: 0.10
+    pitch: 0.15
+    timing: 0.15
+    word_sem: 0.15
+  # Drop every channel for this fraction of items so the unconditional path is
+  # trained too (hint-free inference, and val_loss_nohint must mean something).
+  hint_null_all: 0.10
+  # ---- post-norm injection of the clip-level channels (v1.0, off) ----------
+  # The additive path above _temporal_norm cannot express a per-clip constant
+  # (the norm subtracts the temporal mean).  These add a zero-initialised path
+  # after the norm instead; measured to carry the signal but not improve the
+  # knob, so both ship off.  New parameters -> fresh exp_name.
+  #   hint_film_memory  -> encoder memory: mem * (1 + gamma(h)) + beta(h)
+  #   hint_decoder_proj -> decoder output, after the final norm, before heads
+  hint_film_memory: false
+  hint_decoder_proj: false
+  # ---- monotone encoding of the clip-level channels (v1.1) ----------------
+  # true replaces the free (n_levels+1, H) rows with one learned direction per
+  # channel times z(level) in [-1, 1] plus a trained "absent" vector.  This is
+  # what made intensity a monotone dial (HINTS_V1_PLAN.md §5.8).  New parameter
+  # set -> fresh exp_name.  V2 warms up from hints_v1_p4_final_mono1, which is
+  # monotone, so this must stay true for the transfer to load the directions.
+  hint_monotone: true
+  # ---- classifier-free guidance over the hints (v1.0, off) ----------------
+  # logits = uncond + w*(cond - uncond), uncond = the trained null state.
+  # w=1 is the identity.  Swept and negative (w=1 best), so it ships off.
+  hint_guidance: null
+  hint_guidance_books: null
+  # Also feed `sid` to the decoder (its own embedding table), not just to the
+  # phoneme encoder. Without this the voice can only reach the autoregressive
+  # model through cross-attention to the encoder memory, which is a weak,
+  # easily averaged-away channel (speaker bleed / identical prosody per
+  # voice). Set to false to load a checkpoint trained without the decoder
+  # embedding (e.g. transformer_v0.1, which also used encoder_layers=4 /
+  # decoder_layers=10 -- match those too or the load stays partial).
+  decoder_speaker_cond: true
+
+  # How the encoder memory handed to the decoder's cross-attention is
+  # normalised (v0.4.1).  This decides whether text conditioning works at all:
+  #   temporal -> standardise each memory dimension over the *time* axis
+  #               (masked instance norm + learnable gain/bias).  Each dimension
+  #               is divided by its own spread, so a runaway residual dimension
+  #               cannot suppress the others.  USE THIS.  In v0.4 the encoder
+  #               residual stream grew to ~4000 in one dimension; the stock
+  #               final LayerNorm divided by that dimension's magnitude, the
+  #               memory's variation over phoneme positions dropped to ~1% and
+  #               the cross-attention became uniform (entropy/log N ~0.99),
+  #               i.e. the model ignored the text entirely (val_text_delta
+  #               was +0.003 nats).
+  #   layer    -> historical single LayerNorm over the feature axis (the
+  #               collapse above).  Only for loading/evaluating <= v0.4
+  #               checkpoints.
+  #   none     -> raw residual stream.
+  memory_norm: temporal
+
+  # GPT-2 style residual scaling on the *initial* weights of the residual
+  # output projections (1/sqrt(2*n_layers) in the encoder, 1/sqrt(3*n_layers)
+  # in the decoder).  Keeps the residual stream from growing by >30x, which is
+  # what produced the runaway dimension in the first place.  Initialisation
+  # only: no extra parameters, no state_dict change.
+  residual_scale: true
+
+  # Rotary position embedding (RoPE) in the *decoder self-attention*, replacing
+  # the absolute sinusoidal table there.  Measured on
+  # transformer_hints_v2.1_wordsem_b: teacher-forced CE 2.0 -> 3.6 nats and text
+  # conditioning -> 0 at the first decoder column past train.max_frames (256),
+  # and simply shifting the sinusoidal table by +128 on a *short* item
+  # reproduced most of that.  RoPE makes the score depend on relative offsets,
+  # so there is no unseen table row to fall off, and adds no parameters (the
+  # state-dict keys are identical; a persistent ``rope_marker`` buffer records
+  # the flag).  The encoder keeps the sinusoidal encoding on purpose: its
+  # memory is what carries absolute phone order into cross-attention, and
+  # rotating the decoder->phone axis would not mean "this phone at this time".
+  # `--transfer_from` loads every weight, `--resume_from` is refused because the
+  # positional function changes (2_training.check_special_layout).
+  rope: true
+  rope_base: 10000.0
+
+  # End-of-utterance class (v0.5)
+  eos_token: true
+
+  # Fill-in-the-middle (v0.6-fim).  Adds two sentinel classes per codebook
+  # (SUF, MID) and, with train.fim_rate > 0, mixes prefix-suffix-middle
+  # reordered samples with plain AR samples.  The order is prefix <SUF> suffix
+  # <MID> middle, so the *middle* is generated last and its length is free --
+  # for "regenerate a bad span" we fix that length (see CodeTransformer.infill).
+  #
+  # It changes the codebook embedding/head shapes (+2 rows), so a pre-FIM
+  # checkpoint cannot be --resume_from'd: start a fresh exp_name and warm-start
+  # with --transfer_from (expand_state_dict_with_special zero-pads the new rows).
+  # No re-preprocessing: the codes are unchanged.
+  fim: true
+  # Region tag (prefix/suffix/middle) added to every decoder column, like the
+  # speaker embedding.  It is a dense side channel that tells the decoder the
+  # role of a position; the SUF/MID sentinels only mark the boundaries and are
+  # smeared across K columns by the delay pattern.  Independent of `fim` so the
+  # "sentinel-only" variant can be ablated (region_cond: false).
+  region_cond: true
+  # Span-length conditioning (v0.6-fim2).  Adds a second decoder-side embedding
+  # (decoder.len_emb, n_len_buckets rows) telling every column inside a middle
+  # span how many frames are *left* in it, as a log2 bucket (bucket 1 = 1 frame
+  # left, 2 = 2-3, 3 = 4-7, ... bucket 0 = "not in a span").  Training takes the
+  # tag from the drawn span, CodeTransformer.infill from the caller's
+  # middle_frames.  Without it the model has no length signal at all: the prompt,
+  # region tags and positions are identical for a 6-frame and a 72-frame hole, so
+  # it can only emit its best continuation and have it chopped -- which is what
+  # "infill ignores the span length" looked like.  Shape change (one
+  # (n_len_buckets, 768) table), so a fresh exp_name + --transfer_from is needed
+  # (2_training.py:check_special_layout refuses the mismatch).
+  length_cond: true
+  n_len_buckets: 9
+  # Span sampling for FIM items (training only; val stays plain AR so val_loss is
+  # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
+  fim_min_frames: 8
+  fim_mid_frac: 0.5
+
+  # Coarse-to-fine loss weighting over the K = 8 spec + 2 pitch codebooks
+  # (order: spec0..spec7, pitch8, pitch9).  The optimised loss is
+  #   sum_k w_k * CE_k / sum_k w_k
+  # so only the *relative* weights matter; per-codebook curves
+  # (train_loss/spec0 ...) stay unweighted for diagnostics.
+  # Rationale: spec0 carries the coarse spectral envelope, where an error
+  # costs intelligibility and can never be repaired by later codebooks; the
+  # higher spec books are ever finer residual detail (book 7 is nearly
+  # inaudible), and the pitch books have a 2x larger vocabulary so a much
+  # flatter cross-entropy (log 128 vs log 64).
+  # Set to [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] (or delete) for the old uniform mean.
+  codebook_weights: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.4, 0.7, 0.5]
+  # Soft curriculum: linearly interpolate the weights from uniform (epoch 0)
+  # to the list above (epoch >= N), so early training is not dominated by the
+  # fine books before the coarse structure exists.  0 = apply immediately.
+  # Validation always uses the full (final) weights, so val curves stay
+  # comparable across the warmup.
+  codebook_weight_warmup_epochs: 5
+
+# The codebook layout below must match the stage-1 Generator that produced
+# the codes (see configs/base.yaml).
+codec:
+  code_dim: 1024
+  codebook_size: 64
+  codebook_num: 8
+  # Must match configs/base.yaml (see AGENTS.md). Only affects EMA codebook
+  # updates in train mode, so it is irrelevant for validation-time sampling,
+  # but keeping the blocks identical avoids silent drift.
+  ema_decay: 0.99
+pitch_codec:
+  hidden_channels: 64
+  code_dim: 128
+  codebook_size: 128
+  codebook_num: 2
+  ema_decay: 0.99
+  # Must match configs/base.yaml exactly: validation-time sampling rebuilds the
+  # stage-1 Generator from this block.
+  downsample_kernel: 8
+  upsample_kernel: 16
+
+# --------------------------------------------------------------- data ----
+data:
+  filter_length: 1536
+  max_wav_value: 32768.0
+  mel_channels: 100
+  mel_fmax: 24000.0
+  mel_fmin: 50.0
+  sampling_rate: 48000
+  segment_size: 8000
+  win_length: 1536
+  hop_length: 480
+  # Per-clip level normalisation applied to the audio *before* the stage-1
+  # features and the stage-2 codes are computed (features.extract_features_ac).
+  # Must match configs/base.yaml: 2_preprocess.py loads this block from
+  # --config, and codes encoded from a different level than the codec was
+  # trained on decode at the wrong loudness. Genshin is already peak-normalised
+  # to ~0 dBFS (median peak -0.2 dBFS, 62 % of clips within 0.5 dB of full
+  # scale), so `peak` is ~a no-op there; it matters for quieter corpora (the
+  # MLP filelists sit ~10 dB lower). `none` reproduces the tensors and
+  # checkpoints produced before this key existed.
+  audio_norm:
+    mode: peak        # none | peak | rms
+    target_db: -1.0   # dBFS the reference is scaled to (keep < 0: tanh decoder)
+    max_gain_db: 30.0 # cap on boosting (a click/noise peak must not be +40 dB)
+    frame_ms: 20.0    # window for mode: rms
+  # Code rate divisor: `Generator(down_factor=4)` (modeling/generator.py, not a
+  # config key) decimates the 100 Hz decoder frames to 25 Hz code frames.  Only
+  # read by tooling that reports durations (`scratch/stage2_repl.py`); the
+  # codec blocks above must still match the stage-1 checkpoint.
+  code_down_factor: 4
+
+# -------------------------------------------------------- stage-1 model ---
+# Only needed for the (optional) audio sampling during validation: the
+# transformer samples codes, then Generator.infer_from_codes re-synthesises
+# audio so it can be logged to TensorBoard.
+vits:
+  filter_channels: 640
+  gin_channels: 256
+  hidden_channels: 192
+  inter_channels: 192
+  ppg_dim: 1280
+  spk_dim: 256
+  max_spk_count: 16384
+  vec_dim: 256
+gen:
+  resblock: '1'
+  resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
+  resblock_kernel_sizes: [3, 7, 11]
+  upsample_initial_channel: 512
+  upsample_kernel_sizes: [24, 20, 4, 4]
+  upsample_rates: [12, 10, 2, 2]
+  upsample_input: 192
+
+# -------------------------------------------------------------- train ----
+train:
+  # 48 on 5090, 24 on 5060Ti at max_frames 256.  At 512 the decoder is
+  # ~2.2x the FLOPs of 256 and 24 items need ~10.7 GB of activations alone
+  # (measured on a 16 GB 5060 Ti: 804 ms/step); 16 gives 527 ms/step at
+  # 7.4 GB and the same items/hour, so it is the safer point.
+  batch_size: 16
+  lr: 5e-6
+  betas:
+  - 0.9
+  - 0.98
+  eps: 1e-8
+  weight_decay: 0.01
+  # Stage 2 trains with TWO optimizers (Lightning manual optimization, see
+  # 2_training.py -> TrainModule.training_step): Muon on the 2-D *hidden*
+  # linear maps (attention / FFN / projection matrices) and AdamW on
+  # everything else (biases, LayerNorm gains, embedding tables and the
+  # per-codebook output heads -- see muon_include_* below). Both get
+  # `weight_decay` above; Muon's step is `lr * muon_lr_mult` because its
+  # update is orthogonalised, so it needs a much larger LR (~0.02 with
+  # lr=1e-4 is the usual recipe). Relative order is fixed:
+  # `self.optimizers()` -> [AdamW, Muon].
+  muon_lr_mult: 200.0
+  # Muon's Newton-Schulz iteration count. Its cost is *per step and
+  # independent of the batch size*: measured on this model (136 M params, 119
+  # two-dimensional tensors) ns_steps=5 is ~1.26 TMAC, i.e. ~75 % of the
+  # forward+backward FLOPs, issued as 5 iterations x 3 matmuls x 119 params in
+  # a per-parameter Python loop (torch.optim.Muon has no `foreach` path).
+  # 3 removes 40 % of that; < 3 degrades the orthogonalisation itself.
+  muon_ns_steps: 3
+  # Muon orthogonalises every 2-D parameter, which is right for the hidden
+  # linear maps and wrong for embedding tables (only a few rows have a
+  # gradient, and Muon scales their LR by sqrt(rows/cols) = 2.3x for the
+  # 4096x768 speaker tables) and for the per-codebook output heads (they are a
+  # CE projection, and reference Muon excludes loss heads). Both are routed to
+  # AdamW by default; set these to true to reproduce pre-v0.6 runs. Changing
+  # either changes the optimizer-state layout, so a --resume_from keeps the
+  # weights but drops the momentum/Adam moments (2_training.py says so).
+  muon_include_embeddings: false
+  muon_include_heads: false
+  # torch.compile the codebook decoder stack (12 x nn.TransformerDecoderLayer).
+  # Compiles `DelayCodebookDecoder._forward_impl` (never the module: an
+  # OptimizedModule renames every decoder key in state_dict()), dynamic=True
+  # because val/sampling use a different column count, with an eager fallback
+  # if compilation fails. See 2_training.py:_maybe_compile_decoder.
+  # MEASURED (batch 24, max_frames 256, fp32/TF32): ~1.0x -- median step
+  # 241.8 ms compiled vs 246.9 ms eager over 5 reps, i.e. inside the +/-6 %
+  # run-to-run spread, and the fwd+bwd part alone moved by less than the noise.
+  # The decoder is large-GEMM bound (FFN is ~8x the attention FLOPs at L=265),
+  # so there is no launch overhead left to recover. Off by default; turn it on
+  # if you change the model shape enough that launch overhead matters again.
+  compile_decoder: false
+  # Note: Trainer(accumulate_grad_batches > 1) is rejected by Lightning under
+  # manual optimization, so 2_training.py refuses to start if this key is > 1.
+  # Numerical precision for training/resume.
+  #   bf16-mixed (historical default) -> DO NOT USE for this model. Autocast
+  #       casts the LayerNorm / softmax elementwise maths to bf16, and the
+  #       backward then cannot resolve the cancellations it contains:
+  #       the decoder's `norm2.weight/bias` gradients come out ~1e4x too large
+  #       (0.015 instead of 1.5e-6) *even at a perfectly healthy checkpoint*.
+  #       Adam is scale-free, so it turns that rounding noise into a full-lr
+  #       random walk on the LayerNorm gains; those gains set the scale of the
+  #       cross-attention inputs, and once activations grow the bf16 backward is
+  #       wrong on every batch (1e3-1e6x) and the run can never recover.
+  #       This is what killed transformer_v0.2 at step 18.8k and v0.2.1
+  #       immediately. Grad clipping does not help (it normalises the noise to a
+  #       unit step); neither does skipping spiky steps (the noise is on every
+  #       step); neither does an fp32 warm-up (bf16 starts walking back at once).
+  #   32-true -> fp32 activations + fp32 master weights. Pair it with
+  #       torch.set_float32_matmul_precision("high") (set in 2_training.py's
+  #       __main__) so the GEMMs still use TF32 tensor cores: ~1.15x slower than
+  #       bf16 autocast, but gradient error vs true fp32 drops from 4.6% to
+  #       0.13% total and from ~1e4x to ~4x on the near-zero LayerNorm grads.
+  precision: 32-true
+  # Gradient clipping, applied by 2_training.py in `_clip_and_log_grads`,
+  # called from `training_step` right before the (manual) optimizer steps.
+  #   norm  -> torch.nn.utils.clip_grad_norm_  (clip the *total* grad norm,
+  #            the usual choice for transformers)
+  #   value -> torch.nn.utils.clip_grad_value_ (clip each element separately)
+  # 0 disables clipping; the pre-clip norm is still logged either way.
+  # Reference: at init with batch_size 8 / max_frames 256 the total grad norm
+  # sits around 0.7-1.0, so 1.0 only bites on genuine spikes. Raising it (e.g.
+  # 5.0) makes clipping rarer; watch train_grad_clip_frac in TensorBoard.
+  # Do NOT also pass gradient_clip_val to pl.Trainer: Lightning forbids it
+  # with manual optimization (and it would clip twice).
+  # Only this loss/clip pair is affected, so changing it needs no
+  # re-preprocessing and old checkpoints resume normally.
+  grad_clip_val: 1.0
+  grad_clip_algorithm: norm
+  # LR schedule.  CosineAnnealingLR is *periodic* (period 2 * cosine_anneal_end):
+  # past `cosine_anneal_end` the LR does not sit at eta_min, it climbs back to
+  # `lr` at step 2 * cosine_anneal_end.  So `max_steps` must not exceed
+  # `cosine_anneal_end` unless re-warming is intended -- with 1 M vs 300 k
+  # (the historical values) the run spends 700 k steps un-annealing and is back
+  # at full LR by step 600 k.  2_training.py now warns once when a run crosses
+  # `cosine_anneal_end` (see TrainModule._check_anneal_end).
+  cosine_anneal_end: 300000
+  max_steps: 300000
+  max_epochs: -1
+  # Code frames per training segment.  Code rate is 25 Hz (48 kHz / hop 480 /
+  # Generator down_factor 4), so 512 frames = 20.5 s and covers 99.0 % of the
+  # corpus (the p99 clip is 528 frames).  The previous 256 (= 10.2 s) covered
+  # 91.7 % of items but only 76.1 % of frames, and every decoder column past it
+  # was outside the model's positional range (see `rope` above: CE 2.0 -> 3.6,
+  # text conditioning -> 0).  This is a training knob only: the code tensors do
+  # not change, so no re-preprocessing.
+  max_frames: 512
+  max_phone_length: 512
+  # Crop the phonemes in lockstep with the audio window for clips longer than
+  # `max_frames`: snap the window inwards to whole words (the `.cond` word
+  # timings from `hints/build.py --words`), so the text always matches the
+  # audio.  Without it a random 10 s window was paired with the full transcript
+  # for 23.9 % of training frames, which teaches the model to skip
+  # utterance-initial words.  Clips without word timings fall back and are
+  # counted (`Word crop: N ...` after the first epoch).  No re-preprocessing.
+  word_crop: true
+  # Optional blocklist of clips whose forced alignment gave the FIRST word fewer
+  # than 1 code frame per *phone* with >= 3 phones (40 ms/phone -- physically
+  # impossible; "Traveler!"/"Paimon," given 1-2 frames).  Those clips teach the
+  # model to swallow the initial word.  Generated on this corpus with
+  #   python scratch/audit_word_alignment.py \
+  #       --filelist data/genshin_plus_extras/train_stage2.txt \
+  #                  data/genshin_plus_extras/val_stage2.txt \
+  #       --source-filelist filelists_2/genshin_full_eng_text.txt \
+  #           filelists_2/mlp_linux.txt filelists_2/vctk_linux.txt \
+  #           filelists_2/expresso_read_linux.txt \
+  #       --first-word-only --min-word-phones 3 \
+  #       --blocklist data/genshin_plus_extras/degenerate_word_alignments.txt
+  # = 477 clips (0.3 %), i.e. ~0.3 % of train and val.  `--source-filelist` is
+  # required for *real* phone counts: `phone_word_idx` indexes BPE tokens, which
+  # merge phones, and the token proxy flags 3.7 % of clips (7 % of which are
+  # real).  `data/` is gitignored, so regenerate the file on a fresh box (~1 min)
+  # or set this to null.  A broader rule (any word, not just the first) flags
+  # ~20 % because the aligner gives adjacent function words the same start frame
+  # ("to a the"); the crop groups equal starts, so those are not dropped.
+  alignment_blocklist: data/genshin_plus_extras/degenerate_word_alignments.txt
+  # Genshin writes nonverbal sounds as stage directions: *sigh*, *panting*,
+  # *clears throat* (~1.2 % of clips, 1 763 train / 81 val).  This corpus was
+  # phonemized before `features.strip_stage_directions` existed, so they are
+  # real words in `phone_ids` (*sigh* -> SAY1, *ahem* -> AH0 HHIY1 M) and the
+  # model is being trained to pronounce a sigh.  The text pipeline now strips
+  # them (and keeps Expresso/Genshin *emphasis* words), but the tensors need a
+  # rebuild to benefit: `2_preprocess.py --only phones --phones_from transcript`
+  # (cheap) + `hints/build.py --words` (the expensive part, ~hours).
+  # Until then, the blocklist from scratch/find_stage_directions.py drops those
+  # clips.  Set this to null when the corpus has been rebuilt.
+  stage_direction_blocklist: null
+  # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
+  # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
+  # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run
+  # that spent half its gradient on FIM degenerated into a repetition attractor
+  # (WER 42 % vs 15 % for the checkpoint it was warm-started from, 24 paired
+  # utterances): "continue from a given context" is not the same skill as
+  # "advance monotonically through the text", and plain AR is what free-running
+  # generation does.  0.0 disables it (leaving only transformer.fim's extra
+  # classes, unused).  Validation is always plain AR, so val_loss/val_text_delta
+  # stay comparable.
+  fim_rate: 0.2
+  # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a synthetic
+  # prefix/middle/suffix split on the first N validation batches and log the
+  # middle-only CE / teacher-forced accuracy (split into span thirds) plus three
+  # control-arm deltas in nats: val_fim_{text,suffix,region,length}_delta.  This
+  # is the "is FIM actually working, and on which input?" signal --
+  # sample/fim_middle_code_match_* cannot provide it (free-running code match is
+  # at chance even for a healthy model).  Costs N * 5 teacher-forced forwards per
+  # epoch, no sampling.  0 disables the probe.
+  fim_probe_batches: 2
+  val_interval: 1
+  # Optional cap on the number of *training batches per epoch* (Lightning's
+  # `limit_train_batches`).  Absent/null = the natural epoch length.  Only
+  # needed for deliberately short runs: validation and the per-epoch
+  # checkpoints fire on epoch end, so a run that stops at `max_steps` inside
+  # its first epoch validates zero times and writes no `last.ckpt`.  Set this
+  # equal to `max_steps` for a "one short epoch" ablation (the 2 k-step wiring
+  # arms in scratch/HINTS_V1_PLAN.md Phase 2 do exactly that); it also makes
+  # `val_hint_channel_delta/*` observable on such a run.
+  # limit_train_batches: null
+  # TensorBoard step logging. Also gates the per-codebook *diagnostics* in
+  # training_step: code_loss only computes accuracy / usage entropy (a second
+  # full softmax over every codebook, plus a device sync each) on the steps
+  # whose values are written anyway. train_loss still logs every step.
+  log_interval: 50
+  keep_ckpts: 2
+  # Stage-2 TensorBoard root (`logs_stage2/{exp_name}/version_0`). Stage 1 writes
+  # to `logs_stage1/` so the two stages never share a tree: wiping stage 2's
+  # logs must not touch a months-long stage-1 run. 2_training.py's fallback is
+  # the same value, so keeping this key set correctly only matters if you point
+  # it somewhere else (e.g. a bigger disk).
+  log_dir: logs_stage2
+  num_workers: 6
+  train_filelist: data/mlp_main/train_stage2.txt
+  val_filelist: data/mlp_main/val_stage2.txt
+  # Optional speaker map (see speaker_map.py). Stage-1 and stage-2 speaker
+  # ids are NOT guaranteed to line up, but the stage-1 Generator's speaker
+  # embedding is what determines the synthesized voice. Canonicalise the
+  # stage-2 ids into the stage-1 space (via `2_preprocess --speaker_map`)
+  # so a single id is correct for both conditioning and synthesis. If the
+  # filelist was preprocessed without a map, the map's `sid_map` is still
+  # applied here without re-running preprocessing.
+  speaker_map: null
+  # Optional: stage-1 Generator checkpoint used to turn sampled codes into
+  # audio for TensorBoard. Set to null to disable audio logging.
+  # This is a *stage-1* run, so it lives in checkpoints_stage1/ (stage 2 writes
+  # to checkpoints_stage2/ -- see AGENTS.md §4/§6).
+  generator_checkpoint: checkpoints_stage1/mlp_main/last.ckpt
+  # Voicing decision threshold used by Generator.infer_from_codes when no
+  # external mask is supplied (sigmoid(uv_logit) >= threshold => voiced).
+  pitch_uv_threshold: 0.5
+  # Text-conditioning diagnostic (v0.4.1), logged every epoch as
+  # `val_text_delta` = CE(with the batch's phonemes shuffled across samples)
+  # - CE(with the real ones), plus `val_text_delta/spec` and `/pitch`.
+  # It is computed on the first N validation batches (0 disables).  A value
+  # near 0 means the decoder ignores the phoneme memory: the run is then an
+  # unconditional code LM + speaker, and no amount of data/parameters helps.
+  # Reference: ~3.0 nats is the marginal entropy of a spec codebook, so a
+  # healthy run should show an O(0.1-1.0) nat gap; < 0.05 is effectively dead.
+  text_delta_batches: 4
+  # Hint-oracle probe (v0.8): every epoch, re-score the first N validation
+  # batches with *every* conditioning hint dropped and log `val_loss_nohint`
+  # plus `val_hint_gap` (= that loss - the real `val_loss`).  The hints are
+  # derived from the target audio, so this is the number that says whether the
+  # model is using the oracle or leaning on it; `val_loss` alone cannot.
+  # Costs one extra forward pass per probed batch. 0 disables the probe.
+  hint_probe_batches: 2
+  # Per-channel hint liveness probe: re-score the first N validation batches
+  # with each hint channel dropped *separately* and log
+  # `val_hint_channel_delta/{int,reg,sem,pitch,slot,all,omit}` (CE with that
+  # channel at level 0 minus CE with all hints, in nats).  Costs N*7 extra
+  # forwards per epoch.  This is the number that distinguishes "the model uses
+  # this knob" from "the table is decorative" -- `val_hint_gap` drops every
+  # channel at once, so one live channel hides four dead ones.  `omit` is the
+  # pre-Phase-0 "no hint vectors" path, so `all - omit` is that bug's cost.
+  hint_channel_probe: 1
+  # Guidance weight for the TensorBoard *samples* (`null` = the model's
+  # transformer.hint_guidance).  Phase 3 sweeps it offline; a training run
+  # should leave it off so the logged audio stays the honest conditional one.
+  sample_hint_guidance: null
+
+  # ---- counterfactual hint margin (v1.1) -----------------------------------
+  # Clip-level levels are nearly loss-irrelevant under plain CE, so also score
+  # the batch with each sample's level replaced by a different one and add
+  #   relu(margin - (CE_shifted - CE_true))
+  # i.e. "moving the level must cost `margin` nats" -- the cheapest objective
+  # that rewards dependence on the hint.  Runs as a SECOND backward after the
+  # main one (two live graphs OOM at the shipped batch size).  Keep
+  # counterfactual_weight well below 1 (~5 % averaged at 0.2 x rate 0.25).
+  # Watch train_cf_gap rise towards `margin` (HINTS_V1_PLAN.md §5.7-5.8).
+  # V2 uses the v1.1 recipe's values (the run this one warm-starts from).
+  counterfactual_margin: 0.05
+  counterfactual_weight: 0.2
+  counterfactual_rate: 0.25
+  # Which clip-level channels to shift (they have a level to move).
+  counterfactual_channels: "intensity,register"
+
+  # Hint state for *generation* (TensorBoard samples, FIM/speaker/OOD probes,
+  # the REPL default).  None is NOT "no hints": the trained null state (level 0)
+  # is the only hint-free state the model saw.  "cond" = the item's real .cond
+  # (OOD falls back to null); "omit" = no vectors (pre-Phase-0, ablation only).
+  # Every log tag carries the state; sample/hints_mode is 0/1/2.
+  sample_hints: "cond"
+
+  # TensorBoard logging of "what the model actually produces". Every
+  # `sample_interval` epochs (and once at the start of training) 2_training.py
+  # greedily/sampling-decodes `sample_count` val items and logs:
+  #   codes/{spec,pitch}_*  target-vs-generated codebook heatmaps
+  #   audio/{target,generated}_* / mel/* / pitch/*  re-synthesised samples
+  #   probe/*               same phonemes across speakers (speaker conditioning)
+  sample_interval: 1
+  sample_count: 2
+  sample_frames: 128
+  # Decoding for these samples: lower temperature sharpens, top_k truncates.
+  # Sampling (rather than greedy) matters: greedy decoding tends to collapse
+  # into repeated code frames and looks worse than the model really is.
+  sample_temperature: 0.9
+  sample_top_k: 20
+  # Number of *other* speakers to re-render each sample with. 0 disables the
+  # speaker-conditioning probe; requires >= 2 distinct sids in the val set.
+  speaker_probe: 2
+  # Out-of-distribution text probe (OOD). Every sampling pass also
+  # autoregressively generates `ood_samples` held-out sentence(s) for
+  # `ood_frames` code frames -- deliberately *longer* than both the val items
+  # above (<= sample_frames) and `train.max_frames: 512`, so the decoder still
+  # has to extrapolate past the length it ever saw (repetition and
+  # spectral/pitch drift show up there first). Code frames are 25 Hz, so 768
+  # = 30.7 s. There is no ground truth for
+  # unseen text, so only the generated side is logged:
+  #   ood/text_*            the transcript (TensorBoard text tab)
+  #   ood/{i}/codes_*       generated spec/pitch codebook heatmaps
+  #   ood/audio_* ood/pitch_* ood/mel_*   decoded by the stage-1 Generator
+  # Phonemisation is CPU-only (FeatureExtractor with load_qwen=False, i.e. no
+  # ASR/aligner weights) and cached after the first pass; failures are logged
+  # and never interrupt training. Set ood_samples: 0 to disable.
+  ood_samples: 1
+  ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
+  ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
+  ood_sid: 612             # null -> speaker of the first sampled val item
