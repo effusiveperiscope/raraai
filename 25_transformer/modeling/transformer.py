@@ -552,6 +552,7 @@ class DelayCodebookDecoder(nn.Module):
         hint_postnorm: bool = False,
         rope: bool = False,
         rope_base: float = 10000.0,
+        input_dropout: float = 0.0,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -565,6 +566,11 @@ class DelayCodebookDecoder(nn.Module):
         self.fim = bool(fim)
         self.num_classes = [v + 1 + int(self.eos) + 2 * int(self.fim)
                             for v in self.vocab_sizes]
+        # Training-only input-token dropout (``transformer.input_dropout``).
+        # A plain float, so ``state_dict`` is unchanged and a checkpoint can be
+        # resumed with the knob on or off (it changes the *function* during
+        # training, like ``dropout``, not the parameter set).
+        self.input_dropout = float(input_dropout)
 
         # Decoder-side speaker conditioning.  The encoder already puts `sid`
         # into the memory, but relying on cross-attention alone is fragile:
@@ -709,6 +715,20 @@ class DelayCodebookDecoder(nn.Module):
         """
         B, K, L = codes.shape
         x = self.embed(codes)
+        # Input-token dropout (``transformer.input_dropout``): zero the code
+        # embedding of a random subset of positions, so the next-token target
+        # has to be predicted from a *partially missing* history.  This is the
+        # cheap analogue of scheduled sampling -- no sampling loop, no new
+        # parameters, no state_dict change -- and it targets the failure mode a
+        # purely teacher-forced AR model has in free-running decoding: one bad
+        # frame is an input the model has never seen.  Only the code content is
+        # dropped; position, speaker, FIM region/length and the hint vectors are
+        # added afterwards and stay intact.  Column 0 is the start-of-sequence
+        # column (always real at inference), so it is never masked.
+        if self.input_dropout > 0.0 and self.training:
+            keep_pos = torch.arange(L, device=x.device).view(1, L, 1) > 0
+            drop = (torch.rand(B, L, 1, device=x.device) < self.input_dropout)
+            x = x.masked_fill(drop & keep_pos, 0.0)
         if not self.rope:
             # With RoPE the position information lives inside self-attention;
             # adding the absolute table as well would reintroduce exactly the
@@ -846,6 +866,15 @@ class CodeTransformer(nn.Module):
         # every position differently while every tensor shape still matches.
         rope = bool(_get_cfg(tcfg, "rope", False))
         rope_base = float(_get_cfg(tcfg, "rope_base", 10000.0) or 10000.0)
+        # Training-only input-token dropout on the decoder (see
+        # ``DelayCodebookDecoder._forward_impl``).  Zero keeps the historical
+        # teacher-forced behaviour bit-identically; it adds no parameters, so it
+        # needs neither a fresh ``exp_name`` nor re-preprocessing.
+        input_dropout = float(_get_cfg(tcfg, "input_dropout", 0.0) or 0.0)
+        if not 0.0 <= input_dropout < 1.0:
+            raise ValueError(
+                "transformer.input_dropout must be in [0, 1), got "
+                f"{input_dropout}")
 
         # Coarse conditioning hints (v0.8).  The tables are built below; the
         # level counts come from the *same* ``hints.json`` the dataset used, so
@@ -969,11 +998,13 @@ class CodeTransformer(nn.Module):
             hint_postnorm=hint_postnorm,
             rope=rope,
             rope_base=rope_base,
+            input_dropout=input_dropout,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
         self.hint_film_memory = hint_film
         self.hint_decoder_proj = hint_postnorm
+        self.input_dropout = input_dropout
         self.rope = rope
         self.rope_base = rope_base
         if self.rope:
@@ -3164,6 +3195,8 @@ class CodeTransformer(nn.Module):
                if self.fim and self.fim_lookahead > 0 else "")
             + (f", rope(decoder, base={self.rope_base:g})" if self.rope
                else ", pos=sinusoidal")
+            + (f", input_dropout={self.input_dropout:g}"
+               if self.input_dropout > 0 else "")
             + hints
             + (f", finetune=lora(r{self.lora_config['rank']})"
                if self.lora_enabled else "")

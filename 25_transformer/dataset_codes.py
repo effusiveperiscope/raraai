@@ -92,17 +92,26 @@ Dropout is what keeps this from becoming an oracle/voice-conversion renderer:
 ``hint_dropout`` zeroes each channel independently per item and
 ``hint_null_all`` zeroes *all* of them, both only on training items.  Level 0 is
 therefore a genuinely trained "no hint" state, not an untrained row.
+
+Length bucketing
+----------------
+``LengthBucketBatchSampler`` (used by ``2_training.py`` via
+``train.bucket_batches``) orders the epoch so a batch contains similarly long
+clips and is therefore padded only to *its own* width.  ``compute_lengths``
+provides the per-item frame counts (cached in ``<filelist>.lengths.npz``, keyed
+by tensor path).  See the class docstring for the measurements: ~60 % of the
+historical step was padding.
 """
 
 from __future__ import annotations
 
 import os
 import random
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 import speaker_map as speaker_map_lib
 from hints.levels import (DEFAULT_PITCH_EDGES, DEFAULT_SLOT_BUCKETS,
@@ -180,6 +189,10 @@ class CodeDataset(Dataset):
                     if line and not line.startswith("#"):
                         blocklist.add(_norm_path(line))
         self.rng = random.Random(random_seed)
+        # Length table for the batch sampler (see ``compute_lengths``): the
+        # filelist is kept because the cache path is derived from it.
+        self.filelist = str(filelist)
+        self._lengths: Optional[List[int]] = None
         # Fill-in-the-middle span sampling (see ``modeling/transformer.py``).
         # Per train item, ``fim_rate`` is the probability of returning a
         # prefix/suffix/middle split instead of the plain AR sample.  Spans are
@@ -293,6 +306,74 @@ class CodeDataset(Dataset):
 
     def speaker_ids(self) -> List[int]:
         return [it["sid"] for it in self.items]
+
+    def compute_lengths(self, cache: bool = True) -> List[int]:
+        """Per-item frame count (post-``max_frames`` clamp) for length bucketing.
+
+        The value is what the item contributes to the collated batch width, so
+        ``min(spec_frames, max_frames)``.  It is an upper bound when
+        ``word_crop`` trims a long clip inwards to a word boundary (the crop
+        only ever shortens), which is exactly what a batch sampler wants:
+        grouping by the bound keeps every batch's true width close to its
+        group's length.
+
+        Two ways to read it, and the expensive one is only used for items not
+        already in the cache: ``torch.load(..., mmap=True)`` opens the header
+        and reads the shape without paging the payload (measured 0.23 ms/item,
+        ~13 s for the 146 k-item corpus), versus ``os.path.getsize`` which is
+        ~200x faster but would encode the container's header size as a magic
+        constant.
+
+        The cache is ``<filelist>.lengths.npz`` and is keyed by **tensor path**,
+        not by filelist position: it stores the *raw* spec frame count per
+        ``.spec_codes`` path, and the ``max_frames`` clamp is applied on read.
+        That makes it independent of everything the dataset filters on
+        (``max_frames``, the alignment/stage-direction blocklists, the speaker
+        map) -- a dataset that drops 456 clips and one that keeps them both hit
+        the same cache instead of invalidating each other on every start.  A
+        path that is missing from the cache is loaded and added, so extending a
+        filelist only pays for the new items.
+
+        It is *not* invalidated by re-running ``2_preprocess.py`` over the same
+        paths with different content: that would also leave ``phone_ids``
+        describing different audio, i.e. it is a corpus replacement, not a
+        cache problem.
+        """
+        if self._lengths is not None:
+            return self._lengths
+        cache_path = f"{self.filelist}.lengths.npz"
+        raw: Dict[str, int] = {}
+        if cache:
+            try:
+                with np.load(cache_path, allow_pickle=False) as z:
+                    paths = z["paths"].tolist()
+                    values = z["frames"].tolist()
+                raw = {str(p): int(v) for p, v in zip(paths, values)}
+            except (OSError, ValueError, KeyError):
+                raw = {}
+        need = [it["spec_codes"] for it in self.items
+                if str(it["spec_codes"]) not in raw]
+        for path in need:
+            raw[str(path)] = int(torch.load(
+                path, weights_only=True, mmap=True).shape[-1])
+        lengths = [raw[str(it["spec_codes"])] for it in self.items]
+        if self.max_frames is not None:
+            lengths = [min(n, int(self.max_frames)) for n in lengths]
+        self._lengths = lengths
+        if cache and need:
+            # Rewrite only when something was actually missing, so a normal
+            # start is one np.load and no write.
+            try:
+                np.savez(cache_path,
+                         paths=np.asarray([str(it["spec_codes"])
+                                           for it in self.items]),
+                         frames=np.asarray([raw[str(it["spec_codes"])]
+                                            for it in self.items],
+                                           dtype=np.int32))
+            except OSError as exc:      # read-only corpus dir: just don't cache
+                print(f"Length cache: could not write {cache_path} ({exc}); "
+                      "lengths will be recomputed on the next start.")
+        return lengths
 
     def _read_cond(self, phone_ids_path: str,
                    n_phone: int) -> "tuple[Optional[Dict[str, object]], bool]":
@@ -693,6 +774,105 @@ class CodeDataset(Dataset):
         mid_len = min(mid_len, n_frames - 1)  # leave >= 1 frame for prefix+suffix
         prefix_len = self.rng.randint(0, n_frames - mid_len)
         return True, prefix_len, mid_len
+
+
+class LengthBucketBatchSampler(Sampler[List[int]]):
+    """Batch sampler that groups similarly long clips, so batches stay narrow.
+
+    Why: the collator pads every batch to its longest item, and stage-2 clips
+    are very uneven -- mean 124 code frames, median 99, p90 234, max 512 on
+    ``data/genshin_plus_extras``.  A uniformly shuffled batch of 16 therefore
+    has a *mean* max of ~330 frames, i.e. **60 % of every forward, backward and
+    cross-entropy is computed on padding** (the loss masks it, but the decoder
+    still runs over it).  Measured on this repo's real step (fwd+bwd -> clip ->
+    AdamW -> Muon):
+
+    =========================  ========  =========  =========
+    ordering                   mean T    step       items/h
+    =========================  ========  =========  =========
+    ``shuffle=True``, bs=16    ~316      358 ms     161 k
+    bucketed, pool=8, bs=16    ~142      146 ms     396 k
+    bucketed, pool=8, bs=24    ~151      186 ms     464 k
+    =========================  ========  =========  =========
+
+    The Muon step is batch-independent (~49 ms), which is why the larger batch
+    gains more than the FLOP ratio suggests.  Nothing about *what* is trained
+    changes: same items, same crops, same FIM draws, same optimiser; only the
+    order (so ``max_steps`` / the LR schedule keep their meaning).
+
+    How: shuffle the index list, cut it into pools of ``pool_batches`` batches,
+    sort each pool by length and emit ``batch_size`` chunks (shuffled inside the
+    batch).  A pool is a sliver of the corpus (128-192 items at the shipped
+    values), so every training epoch still mixes all lengths; it only means a
+    given batch is length-homogeneous.  Pools are re-drawn every epoch from a
+    seed + epoch RNG, so epoch-to-epoch ordering does not repeat.
+
+    ``drop_last`` drops the partial pool tail (a few dozen items), exactly like
+    ``DataLoader(drop_last=True)`` does for a partial batch.
+    """
+
+    def __init__(
+        self,
+        lengths,
+        batch_size: int,
+        pool_batches: int = 8,
+        drop_last: bool = True,
+        seed: int = 42,
+    ):
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        if pool_batches < 1:
+            raise ValueError(f"pool_batches must be >= 1, got {pool_batches}")
+        self.lengths = lengths
+        self.batch_size = int(batch_size)
+        self.pool_batches = int(pool_batches)
+        self.drop_last = bool(drop_last)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.n_items = len(lengths)
+        pool = self.batch_size * self.pool_batches
+        full_pools, rem = divmod(self.n_items, pool)
+        n = full_pools * self.pool_batches
+        if not self.drop_last:
+            n += -(-rem // self.batch_size)   # ceil: the tail is a short batch
+        if n < 1:
+            raise ValueError(
+                f"LengthBucketBatchSampler produced 0 batches from "
+                f"{self.n_items} items (batch_size={self.batch_size}, "
+                f"pool_batches={self.pool_batches}, drop_last={self.drop_last})")
+        self.n_batches = n
+        self.n_full = full_pools * pool
+
+    def set_epoch(self, epoch: int) -> None:
+        """Pick a different (reproducible) ordering for the next epoch."""
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        return self.n_batches
+
+    def __iter__(self) -> Iterator[List[int]]:
+        rng = random.Random(self.seed + self.epoch)
+        self.epoch += 1
+        idx = list(range(self.n_items))
+        rng.shuffle(idx)
+        get = self.lengths.__getitem__
+        step = self.batch_size * self.pool_batches
+        for p in range(0, self.n_full, step):
+            chunk = idx[p:p + step]
+            # Long clips together, short clips together: the batch's padded
+            # width is then whatever its own group needs, not the corpus max.
+            chunk.sort(key=get)
+            for b in range(0, len(chunk) - self.batch_size + 1, self.batch_size):
+                batch = chunk[b:b + self.batch_size]
+                rng.shuffle(batch)
+                yield batch
+        if not self.drop_last:
+            # Partial last pool: same treatment, then a possibly short batch.
+            chunk = sorted(idx[self.n_full:], key=get)
+            for b in range(0, len(chunk), self.batch_size):
+                batch = chunk[b:b + self.batch_size]
+                rng.shuffle(batch)
+                yield batch
 
 
 class CodeCollator:

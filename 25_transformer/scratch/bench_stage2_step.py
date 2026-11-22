@@ -12,29 +12,35 @@ different scaling behaviour and a single "ms/step" hides that:
 Usage (from the repo root, in the raraai25 env):
 
     python scratch/bench_stage2_step.py                    # shipped config
+    python scratch/bench_stage2_step.py --no_bucket        # pre-v2.3 order
+    python scratch/bench_stage2_step.py --batch_size 24 --pool_batches 8
     python scratch/bench_stage2_step.py --ns_steps 5 --muon_all   # pre-v0.6
     python scratch/bench_stage2_step.py --compile
-    python scratch/bench_stage2_step.py --batch_size 32
     python scratch/bench_stage2_step.py --diagnostics_per_step  # no gating
+
+``--bucket`` (the default) measures the length-bucketed batch order that
+``train.bucket_batches`` uses, ``--no_bucket`` the historical uniform shuffle.
+Same items, different padded width, so the two are directly comparable.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import random
 import statistics
 import sys
 import time
 from importlib import import_module
 
 import torch
-from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from omegaconf import OmegaConf  # noqa: E402
 
-from dataset_codes import CodeCollator, CodeDataset  # noqa: E402
+from dataset_codes import (CodeCollator, CodeDataset,
+                           LengthBucketBatchSampler)  # noqa: E402
 from modeling.transformer import CodeTransformer  # noqa: E402
 
 
@@ -53,6 +59,15 @@ def main():
                     help="compute per-codebook acc/entropy on every step")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--clip", type=float, default=1.0)
+    ap.add_argument("--bucket", dest="bucket", action="store_true",
+                    default=True,
+                    help="length-bucketed batches (the training default; "
+                         "this changes the batch width, so it is what you want "
+                         "to measure)")
+    ap.add_argument("--no_bucket", dest="bucket", action="store_false",
+                    help="uniform shuffle, the historical/pre-v2.3 order")
+    ap.add_argument("--pool_batches", type=int, default=8,
+                    help="pools per bucket (train.bucket_pool_batches)")
     args = ap.parse_args()
 
     config = OmegaConf.load(args.config)
@@ -75,15 +90,34 @@ def main():
                      max_frames=frames,
                      max_phone_length=config.train.get("max_phone_length"),
                      speaker_map=config.train.get("speaker_map"))
-    dl = DataLoader(ds, batch_size=bs, shuffle=True, drop_last=True,
-                    collate_fn=CodeCollator(config=config), num_workers=2,
-                    persistent_workers=True)
-    batches = []
-    for b in dl:
+    # Batch order matters here: the collator pads to the batch's longest item,
+    # so the bucketed order (the training default, see
+    # dataset_codes.LengthBucketBatchSampler) runs on ~half the width of the
+    # uniform shuffle.  Report which one produced the numbers.
+    #
+    # The probe batches are spread evenly across a whole epoch instead of being
+    # the first few produced: with bucketing, the first batches of an epoch come
+    # from the shortest pool (a band is emitted short -> long), so the first N
+    # would understate the width -- optimistically, which is exactly the wrong
+    # direction for a benchmark.
+    coll = CodeCollator(config=config)
+    if args.bucket:
+        plan = list(LengthBucketBatchSampler(
+            ds.compute_lengths(), bs, pool_batches=args.pool_batches,
+            drop_last=True, seed=1234))
+    else:
+        order = list(range(len(ds)))
+        random.Random(1234).shuffle(order)
+        plan = [order[i:i + bs] for i in range(0, len(order) - bs + 1, bs)]
+    n_probe = args.iters + args.warmup
+    picks = [plan[int(i * (len(plan) - 1) / max(n_probe - 1, 1))]
+             for i in range(n_probe)]
+    batches, widths = [], []
+    for idx in picks:
+        b = coll([ds[j] for j in idx])
+        widths.append(int(b["code_lengths"].max()))
         batches.append({k: (v.to(device) if torch.is_tensor(v) else v)
                         for k, v in b.items()})
-        if len(batches) >= args.iters + 2:
-            break
 
     net = CodeTransformer(config).to(device)
     module = import_module("2_training").TrainModule(net=net, config=config)
@@ -100,6 +134,8 @@ def main():
     print(f"batch_size={bs}  max_frames={frames}  ns_steps={args.ns_steps}  "
           f"muon_all={args.muon_all}  compile={args.compile}  "
           f"clip={args.clip}")
+    print(f"batching={'bucketed(pool=%d)' % args.pool_batches if args.bucket else 'uniform shuffle'}"
+          f"  mean batch width={statistics.mean(widths):.1f} frames")
     print(f"Muon: {len(muon_params)} tensors "
           f"({sum(p.numel() for p in muon_params)/1e6:.1f} M) | "
           f"AdamW: {len(adamw_params)} tensors")
@@ -148,7 +184,7 @@ def main():
         prev = med
     total = statistics.median(cum["+muon"])
     print(f"\nstep total   {total:.1f} ms  -> "
-          f"{3600.0 / total * bs:.0f} items/hour")
+          f"{3600.0 / (total / 1000.0) * bs:.0f} items/hour")
 
 
 if __name__ == "__main__":

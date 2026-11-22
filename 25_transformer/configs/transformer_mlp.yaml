@@ -18,6 +18,12 @@ transformer:
   decoder_layers: 12
   dim_feedforward: 2048
   dropout: 0.05
+  # Training-only decoder input-token dropout (see configs/transformer.yaml and
+  # AGENTS.md §4 "Decoder input-token dropout"): zero the code embedding of a
+  # random subset of past columns so the model learns to recover from a bad
+  # frame.  No new parameters, so it can be resumed/toggled like `dropout`; 0
+  # reproduces the historical behaviour.
+  input_dropout: 0.05
   max_positions: 4096
   phone_vocab_size: 1024   # g2pen_tokenizer_clean vocab
   phone_pad_id: 0
@@ -338,6 +344,12 @@ train:
   # (measured on a 16 GB 5060 Ti: 804 ms/step); 16 gives 527 ms/step at
   # 7.4 GB and the same items/hour, so it is the safer point.
   batch_size: 16
+  # Length-bucketed batching (dataset_codes.LengthBucketBatchSampler, see
+  # AGENTS.md §4): batches are padded to their own width instead of the corpus
+  # max, measured 2.5x steps/s on the Genshin corpus.  false = historical
+  # uniform shuffle.
+  bucket_batches: true
+  bucket_pool_batches: 8
   lr: 5e-6
   betas:
   - 0.9

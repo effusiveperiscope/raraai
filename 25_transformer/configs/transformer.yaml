@@ -32,6 +32,20 @@ transformer:
   decoder_layers: 12
   dim_feedforward: 2048
   dropout: 0.05
+  # Training-only input-token dropout on the decoder (see
+  # DelayCodebookDecoder._forward_impl): zero the code embedding of a random
+  # subset of *past* columns, so the next-token target has to be predicted from
+  # a partially missing history.  This is the cheap analogue of scheduled
+  # sampling (no sampling loop, no new parameters, no state_dict change, so a
+  # resume with a different value is a plain loss change) and it targets the
+  # failure mode a purely teacher-forced AR model has when decoding freely: one
+  # bad frame is an input it has never seen.  Only the code content is dropped
+  # -- position, speaker, FIM region/length and the hint vectors still reach the
+  # decoder -- and column 0 (the start token, always real at inference) is never
+  # masked.  0 reproduces the historical behaviour bit-identically.  0.05-0.1
+  # is the useful range; watch val_loss / val_text_delta, a too-large value
+  # shows up as a text-delta collapse before it shows up in the loss.
+  input_dropout: 0.05
   max_positions: 4096
   phone_vocab_size: 1024   # g2pen_tokenizer_clean vocab
   phone_pad_id: 0
@@ -402,6 +416,24 @@ train:
   # (measured on a 16 GB 5060 Ti: 804 ms/step); 16 gives 527 ms/step at
   # 7.4 GB and the same items/hour, so it is the safer point.
   batch_size: 16
+  # Length-bucketed batching (dataset_codes.LengthBucketBatchSampler).  The
+  # collator pads every batch to its longest item, and stage-2 clips are very
+  # uneven (mean 124 code frames, median 99, p90 234, max 512 on this corpus),
+  # so a uniformly shuffled batch of 16 averages ~330 frames of which 60 % is
+  # padding -- the loss masks it, but the decoder still runs over it.  Bucketing
+  # groups similarly long clips and pads only to the group's width.  Measured on
+  # this repo's real step: 161k -> 396k items/h at bs=16, 464k at bs=24 (the
+  # Muon step is batch-independent, so the larger batch amortises it; 24 is also
+  # the memory ceiling here -- 32 OOMs on a 16 GB card).  Same items, same
+  # crops, same FIM draws, same optimiser: only the order changes, so
+  # `max_steps`/`cosine_anneal_end` keep their meaning.  false = the historical
+  # uniform shuffle (reproduce an older run's batch composition).
+  bucket_batches: true
+  # Pool size in *batches*: shuffle, then sort each pool and cut it into
+  # batches, re-drawn every epoch.  Larger = tighter batches and more speed, but
+  # each batch becomes more length-homogeneous (less within-batch diversity).
+  # 8 = 128 items at bs=16, i.e. 0.09 % of the corpus per pool.
+  bucket_pool_batches: 8
   lr: 5e-6
   betas:
   - 0.9

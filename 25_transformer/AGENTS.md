@@ -1421,7 +1421,11 @@ a *batch-independent* per-step loop.
   iters, one run per point): `B=24` 247 ms → 350 items/h, `B=32` 320 ms → 360
   items/h, `B=48` 521 ms → 332 items/h. So the shipped 24 is already near the
   plateau and 48 is *worse*; do not assume a bigger batch buys throughput here,
-  measure with the script.
+  measure with the script. **Those points were all measured with a uniformly
+  shuffled batch order, i.e. with 60 % padding** (mean width 316 frames in a
+  16-item batch); with `train.bucket_batches` the width halves and the plateau
+  moves — `B=24` measures 464 k items/h vs 161 k for the old order at `B=16`
+  (see the next section).
 - `_LayoutGuard` (`LayoutCheckedAdamW`/`LayoutCheckedMuon`) exists because a
   checkpoint's optimizer state is matched **by position**: changing the split
   makes `Optimizer.load_state_dict` raise `loaded state dict contains a
@@ -1433,6 +1437,104 @@ a *batch-independent* per-step loop.
   `train.muon_ns_steps` lives in the Muon group's dict and would be restored
   *from the checkpoint*, so `_apply_muon_settings` re-applies the configured
   value in `on_train_start` and prints when it overrides the checkpoint's.
+
+### Length-bucketed batching (stage 2, v2.3)
+
+`train.bucket_batches` (default `true`) replaces the uniform `shuffle=True`
+train loader with `dataset_codes.LengthBucketBatchSampler`: shuffle the index
+list, cut it into pools of `train.bucket_pool_batches` batches (default 8),
+sort each pool by length, and emit `batch_size` chunks (shuffled inside the
+batch), re-drawn every epoch from `seed + epoch`.
+
+Why: the collator pads every batch to its longest item, and the corpus is very
+uneven — mean 124 code frames, median 99, p90 234, max 512 (v2.2's `max_frames`)
+— so a uniformly shuffled batch of 16 has a **mean max of ~316-330 frames**,
+i.e. ~60 % of every forward, backward and cross-entropy is computed on padding.
+The loss masks those positions; the decoder still runs over them (`L = max
+batch width + K - 1`, then a full CE per codebook). Measured with
+`scratch/bench_stage2_step.py` (same items, same step code, median of 8):
+
+| order | mean batch width | step | items/h |
+|---|---|---|---|
+| `shuffle=True`, B=16 | 316 | 358 ms | 161 k |
+| bucketed pool=8, B=16 | 142 | 146 ms | 396 k |
+| bucketed pool=8, B=24 | 151 | 186 ms | 464 k |
+
+So it is a **2.5-2.9x** throughput win at the shipped recipe, and it *changes
+nothing about what is trained*: same items, same crops, same FIM draws, same
+optimizer, one optimizer step per batch as before — so `max_steps`,
+`cosine_anneal_end`, checkpoint cadence and resume semantics keep their meaning,
+and no re-preprocessing is involved. The only behavioural difference is that a
+batch is length-homogeneous (measured width spread within an epoch is the
+corpus's, because pools are drawn from a globally shuffled list, so every epoch
+still mixes all lengths).
+
+Implementation notes:
+
+- `train()` calls `train_dataset.compute_lengths()` and passes the sampler to
+  `DataLoader(batch_sampler=...)`; `pl.Trainer(use_distributed_sampler=False)`
+  is required because Lightning's distributed-sampler rewrite only understands
+  `sampler`-based loaders and would otherwise drop the `batch_sampler`.
+- `CodeDataset.compute_lengths` caches to `<filelist>.lengths.npz`, keyed by
+  **tensor path** and storing the *raw* frame count (the `max_frames` clamp is
+  applied on read), so the cache is independent of `max_frames`, the two
+  blocklists and the speaker map — a blocklisted corpus and an unblocklisted one
+  share it instead of invalidating each other. Cold read is a `mmap` shape read
+  (0.23 ms/item, ~13 s for 146 k items), warm read 9 ms; only missing paths are
+  loaded and only a miss rewrites the file. Write failures (read-only corpus
+  dir) print and continue uncached.
+- The value is the *upper bound* of what an item contributes: `word_crop` can
+  only shorten a long clip inwards to a word boundary, which is what the
+  sampler wants (group by the bound, and the true width stays close to it).
+- `train.bucket_batches: false` restores the historical uniform shuffle
+  (e.g. to reproduce an older run's batch composition);
+  `scratch/bench_stage2_step.py --no_bucket` compares the two.
+- Validation/test loaders keep `shuffle=False`/`batch_size` — a val batch is
+  padded the same way it always was, so `val_loss` stays comparable to earlier
+  runs.
+
+### Decoder input-token dropout (stage 2, v2.3)
+
+`transformer.input_dropout` (default 0.05 in the shipped config, 0 in code)
+zeroes the summed codebook embedding of a random subset of decoder **input**
+columns during training only:
+
+```python
+if self.input_dropout > 0.0 and self.training:       # DelayCodebookDecoder
+    keep_pos = torch.arange(L, device=x.device).view(1, L, 1) > 0
+    drop = torch.rand(B, L, 1, device=x.device) < self.input_dropout
+    x = x.masked_fill(drop & keep_pos, 0.0)
+```
+
+It is the cheap analogue of scheduled sampling: no sampling loop, no new
+parameters, no `state_dict` change (a plain float, like `dropout`), so it needs
+no fresh `exp_name` and a `--resume_from` with a different value is just a loss
+change. The motivation is exposure bias — the model is trained purely
+teacher-forced (plus FIM), so one bad frame during free-running decoding is an
+input it has never seen, which is where the documented repetition/`seam` drift
+comes from.
+
+Properties that make it safe:
+
+- Only the *code content* is dropped. Position (RoPE/sinusoidal), `spk_emb`,
+  the FIM region/`len_emb` tags and the hint vectors are added after the mask,
+  so a masked column still says "this is speaker 12, frame 400, inside a middle
+  span with 6 frames left".
+- Column 0 (the start-of-sequence token, which inference **always** supplies)
+  is never masked — otherwise the first frame would be trained to predict from
+  no context at all, a state the model never sees when decoding.
+- It is a training-only branch, so `generate`/`infill`/validation and every
+  probe are bit-identically unaffected (`test_bucketing.py` asserts eval output
+  equality, that a p=0 model is unchanged, and that with everything masked the
+  logits stop depending on the masked columns' codes while the start column
+  still matters).
+- Watch `val_loss` and `val_text_delta`: too large a value collapses the text
+  delta before it shows up in the loss. 0.05-0.1 is the useful range; 0
+  reproduces the historical behaviour bit-identically.
+
+`test_bucketing.py` is the CPU smoke test for both (sampler coverage/epochs/
+`__len__`, the length cache, and the dropout semantics above), safe next to a
+GPU job.
 
 ### Conditioning-hint tensors (stage 2, `.cond`)
 
@@ -2518,8 +2620,17 @@ python scratch/hint_semantic_probe.py \
 # Stage-2 step-time benchmark: parts + totals, no Trainer, real code tensors
 # (see §4 "Stage-2 step cost"). Add --ns_steps 5 --muon_all for the pre-v0.6
 # layout/values, --compile for torch.compile, --batch_size 32 to sweep.
+# --bucket (default) / --no_bucket compares the v2.3 length-bucketed batch order
+# against the historical uniform shuffle: same items, so the difference is the
+# padding (measured 358 -> 146 ms/step at B=16).
 python scratch/bench_stage2_step.py
+python scratch/bench_stage2_step.py --no_bucket
 python scratch/bench_stage2_step.py --diagnostics_per_step   # no metric gating
+
+# CPU smoke test for bucketed batching + decoder input-token dropout (sampler
+# coverage/epochs/__len__, the length cache, and the dropout semantics: eval
+# no-op, start column never masked). Safe next to a GPU job.
+python test_bucketing.py
 
 # What is actually inside a stage-2 checkpoint? A run written before §6.19 also
 # carries the frozen stage-1 Generator (497 net_g.* keys -> 822 total); current
