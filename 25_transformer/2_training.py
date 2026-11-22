@@ -750,6 +750,13 @@ class TrainModule(pl.LightningModule):
         self._fim_length = 0.0
         self._fim_acc = 0.0
         self._fim_acc_bins = [0.0, 0.0, 0.0]
+        # Seam diagnostics: ``fim_seam_acc`` (last N middle targets) and the
+        # lookahead CE/acc (the transition, only on a ``fim_lookahead`` model).
+        self._fim_seam_acc = 0.0
+        self._fim_seam_count = 0
+        self._fim_la_loss = 0.0
+        self._fim_la_acc = 0.0
+        self._fim_la_count = 0
         self._fim_length_count = 0
         self._fim_probe_count = 0
 
@@ -1375,6 +1382,17 @@ class TrainModule(pl.LightningModule):
         self._add_scalar(f"sample{tag}/fim_spec_code_match_{j}",
                          (middle[0, :n_spec, :m] == codes[:n_spec, p:p + m])
                          .float().mean())
+        if self.net.fim_lookahead > 0:
+            # The seam number: teacher-forced CE of the real suffix start given
+            # the regenerated span.  Unlike `fim_middle_code_match_*` (free-
+            # running, at chance even for a healthy model) this is a readable
+            # "does the join land?" signal, and the same quantity
+            # `infill(best_of=N)` ranks candidates by.
+            seam_ce = self.net.infill_seam_score(
+                batch["phone_ids"][:1], batch["phone_lengths"][:1],
+                batch["sid"][:1], prefix, middle, suffix, hints=hint_arg,
+                hint_guidance=self.sample_hint_guidance)
+            self._add_scalar(f"sample{tag}/fim_seam_ce_{j}", seam_ce.mean())
         if self.net_g is not None:
             self._log_audio(f"fim{j}", codes, regen, batch["sid"][:1], tag)
 
@@ -1699,7 +1717,8 @@ class TrainModule(pl.LightningModule):
         for key in ("spec_loss", "pitch_loss", "acc", "spec_acc", "pitch_acc",
                     "fim_middle_loss", "fim_middle_acc",
                     "fim_middle_acc_early", "fim_middle_acc_mid",
-                    "fim_middle_acc_late", "fim_frac"):
+                    "fim_middle_acc_late", "fim_seam_acc",
+                    "fim_lookahead_loss", "fim_lookahead_acc", "fim_frac"):
             if key in out:
                 self.log(f"{prefix}_{key}", out[key], **kw)
 
@@ -2004,6 +2023,13 @@ class TrainModule(pl.LightningModule):
                 key = f"fim_middle_acc_{name}"
                 if key in base:
                     self._fim_acc_bins[i] += float(base[key])
+        if "fim_seam_acc" in base:
+            self._fim_seam_acc += float(base["fim_seam_acc"])
+            self._fim_seam_count += 1
+        if "fim_lookahead_loss" in base:
+            self._fim_la_loss += float(base["fim_lookahead_loss"])
+            self._fim_la_acc += float(base["fim_lookahead_acc"])
+            self._fim_la_count += 1
         self._fim_probe_count += 1
 
     def _log_fim_probe(self):
@@ -2022,17 +2048,30 @@ class TrainModule(pl.LightningModule):
         }
         if length_delta is not None:
             vals["val_fim_length_delta"] = length_delta
+        if self._fim_seam_count:
+            vals["val_fim_seam_acc"] = self._fim_seam_acc / self._fim_seam_count
+        if self._fim_la_count:
+            vals["val_fim_lookahead_loss"] = self._fim_la_loss / self._fim_la_count
+            vals["val_fim_lookahead_acc"] = self._fim_la_acc / self._fim_la_count
         for i, name in enumerate(("early", "mid", "late")):
             vals[f"val_fim_middle_acc/{name}"] = self._fim_acc_bins[i] / n
         for tag, v in vals.items():
             self._add_scalar(tag, torch.tensor(float(v)))
+        seam = (" | seam acc {:.3f} (last {} middle frames)".format(
+                    vals["val_fim_seam_acc"], self.net.fim_seam_frames)
+                if "val_fim_seam_acc" in vals else "")
+        look = (" | lookahead CE {:.3f} (acc {:.3f}, {} frames)".format(
+                    vals["val_fim_lookahead_loss"],
+                    vals["val_fim_lookahead_acc"], self.net.fim_lookahead)
+                if "val_fim_lookahead_loss" in vals else "")
         print("FIM probe: middle CE {:.3f} (acc {:.3f}, span thirds "
-              "{:.2f}/{:.2f}/{:.2f}) | deltas (nats): text {:+.3f}, suffix "
+              "{:.2f}/{:.2f}/{:.2f}){}{} | deltas (nats): text {:+.3f}, suffix "
               "{:+.3f}, region {:+.3f}, length {}".format(
                   vals["val_fim_middle_loss"], vals["val_fim_middle_acc"],
                   vals["val_fim_middle_acc/early"],
                   vals["val_fim_middle_acc/mid"],
                   vals["val_fim_middle_acc/late"],
+                  seam, look,
                   vals["val_fim_text_delta"], vals["val_fim_suffix_delta"],
                   vals["val_fim_region_delta"],
                   "n/a (length_cond off)" if length_delta is None
@@ -2214,6 +2253,34 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                 f"ERROR: {message}  Use --transfer_from {source} instead of "
                 f"--resume_from (a strict load cannot absorb the missing key), "
                 f"or start a fresh exp_name.")
+        print(f"NOTE: {message}")
+
+    # ``transformer.fim_lookahead`` reorders the *training* FIM stream (it
+    # repeats the first suffix frames after the middle) but adds no parameters
+    # and changes no shape, so a mismatched checkpoint would load completely.
+    # The persistent ``fim_layout_marker`` records the trained value; both
+    # directions are checked because "checkpoint has it, model does not" would
+    # silently evaluate the model on a prompt it was never trained for.
+    marker = state_dict.get("net.fim_layout_marker")
+    want_look = int(getattr(net, "fim_lookahead", 0))
+    if marker is not None:
+        got_look = int(marker.reshape(-1)[0].item())
+        if got_look != want_look:
+            raise SystemExit(
+                f"ERROR: {source} was trained with transformer.fim_lookahead="
+                f"{got_look} (net.fim_layout_marker), but this model is built "
+                f"with fim_lookahead={want_look}.  A checkpoint trained that way "
+                f"can only be resumed/evaluated by matching the value; there is "
+                f"no way to convert it.")
+    elif want_look > 0:
+        message = (f"{source} has no net.fim_layout_marker, i.e. it was trained "
+                   f"without the FIM suffix lookahead, but this model is built "
+                   f"with transformer.fim_lookahead={want_look}.  Every weight "
+                   f"transfers, but the seam objective has to be learned.")
+        if strict:
+            raise SystemExit(
+                f"ERROR: {message}  Use --transfer_from {source} instead of "
+                f"--resume_from, or start a fresh exp_name.")
         print(f"NOTE: {message}")
 
     # ``transformer.rope`` changes no tensor shape (the rotary embeddings have

@@ -215,6 +215,34 @@ transformer:
   # (2_training.py:check_special_layout refuses the mismatch).
   length_cond: true
   n_len_buckets: 9
+  # FIM seam continuity (v0.7-seam).  Two independent knobs, both about the
+  # *join* between the generated span and the suffix (the audible weak point of
+  # PSM: the middle is the last thing in the sequence, and nothing is ever
+  # predicted after it, so plain PSM never supervises the transition).
+  #
+  # fim_seam_frames/fim_seam_weight up-weight the CE of the last N *middle*
+  # targets -- the frames time-adjacent to the suffix.  Objective only: no
+  # tensors, no shape change, safe to --resume_from an existing FIM run.  The
+  # loss is renormalised (sum(w*ce)/sum(w)), so only the gradient allocation
+  # moves, not the loss scale.  0 / 1.0 disables it.  Watch
+  # val_fim_seam_acc / fim_middle_acc_late.  If the span starts pacing badly
+  # (content crammed into the last frames), lower fim_seam_weight first --
+  # 4 frames at 4x is a deliberately strong push on a short span.
+  fim_seam_frames: 4
+  fim_seam_weight: 4.0
+  #
+  # fim_lookahead repeats the first N suffix frames after the middle:
+  #   prefix <SUF> suffix <MID> middle <SUF> suffix[:N]
+  # so "predict the real continuation of the span" becomes a training target
+  # (fim_lookahead_loss/_acc, val_fim_lookahead_loss) instead of something the
+  # model can only infer.  It also enables CodeTransformer.infill(best_of=N),
+  # which ranks candidates by the teacher-forced CE of the true suffix start --
+  # i.e. "does this span actually join up?".  Training layout only (no new
+  # parameters), but it IS a contract: the persistent net.fim_layout_marker
+  # records the value and 2_training.py:check_special_layout refuses to mix
+  # them.  0 disables (the historical layout).  Enable it on a fresh exp_name
+  # and warm-start with --transfer_from.
+  fim_lookahead: 0
   # Span sampling for FIM items (training only; val stays plain AR so val_loss is
   # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
   fim_min_frames: 8

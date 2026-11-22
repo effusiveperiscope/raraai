@@ -14,6 +14,10 @@ checks the FIM code paths directly:
 * ``infill``'s per-column region/length tags being *bit-identical* to the
   training path's (the regression test for the one-column lag that made infill
   ask the model to emit SUF/MID under the wrong region).
+* the seam additions: ``transformer.fim_lookahead`` (repeated suffix frames
+  after the middle) and ``fim_seam_frames``/``fim_seam_weight``, plus
+  ``infill_seam_score`` / ``infill(best_of=N)`` and the
+  ``apply_fim`` <-> ``_fim_frame_tags`` agreement.
 
 Usage: ``python test_fim.py`` (exits non-zero on failure).
 """
@@ -285,6 +289,173 @@ def test_infill_alignment(model):
     print(f"  infill tags/logits match training (max|dlogit| {worst:.1e}): OK")
 
 
+def make_lookahead_config(lookahead: int = 3, seam_frames: int = 2,
+                          seam_weight: float = 3.0):
+    cfg = OmegaConf.create(OmegaConf.to_container(make_config(),
+                                                  resolve=True))
+    cfg.transformer.fim_lookahead = lookahead
+    cfg.transformer.fim_seam_frames = seam_frames
+    cfg.transformer.fim_seam_weight = seam_weight
+    return cfg
+
+
+def test_best_of_guard(model):
+    """``infill(best_of>1)`` needs the lookahead objective to rank with."""
+    K = model.codebook_num
+    prefix = torch.randint(0, 8, (1, K, 2))
+    suffix = torch.randint(0, 8, (1, K, 2))
+    phone = torch.randint(0, 30, (1, 6))
+    try:
+        model.infill(phone, torch.tensor([6]), torch.tensor([2]),
+                     prefix, suffix, 3, best_of=2)
+    except ValueError as e:
+        check("fim_lookahead" in str(e), f"unhelpful best_of error: {e}")
+    else:
+        raise SystemExit("FAIL: infill(best_of=2) should need a lookahead")
+    print("  infill(best_of>1) guard without lookahead: OK")
+
+
+def test_lookahead():
+    """Suffix lookahead + seam weighting (v0.7-seam)."""
+    torch.manual_seed(0)
+    model = CodeTransformer(make_lookahead_config())
+    model.eval()
+    check(model.fim_lookahead == 3, "fim_lookahead not read from config")
+    check("fim_layout_marker" in dict(model.named_buffers()),
+          "fim_layout_marker buffer missing")
+    K = model.codebook_num
+    T, p, m, look = 8, 2, 3, 3
+    s = T - p - m                                  # 3 == look, so a == 3
+    codes = torch.arange(T).view(1, 1, T).repeat(1, K, 1).long()
+    cl = torch.tensor([T])
+    out, lengths, region, len_bucket = model.apply_fim(
+        codes, cl, torch.tensor([True]), torch.tensor([p]), torch.tensor([m]))
+
+    Tn = T + 2 + 1 + look
+    check(tuple(out.shape) == (1, K, Tn), f"lookahead width {out.shape}")
+    check(int(lengths[0]) == Tn, f"lookahead length {lengths.tolist()}")
+    # prefix <SUF> suffix MID middle <SUF> suffix[:a]
+    check(torch.equal(out[:, :, :p], codes[:, :, :p]), "prefix moved")
+    check(int(out[0, 0, p]) == model.suf_ids[0], "first SUF missing")
+    check(torch.equal(out[:, :, p + 1:p + 1 + s], codes[:, :, p + m:]),
+          "suffix moved")
+    check(int(out[0, 0, p + s + 1]) == model.mid_ids[0], "MID missing")
+    check(torch.equal(out[:, :, p + s + 2:p + s + 2 + m], codes[:, :, p:p + m]),
+          "middle moved")
+    la = p + s + 2 + m
+    check(int(out[0, 0, la]) == model.suf_ids[0], "lookahead SUF missing")
+    check(torch.equal(out[:, :, la + 1:la + 1 + look], codes[:, :, p + m:]),
+          "lookahead does not repeat the suffix start")
+    exp_reg = torch.tensor([[1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2]])
+    check(torch.equal(region, exp_reg), f"lookahead region {region.tolist()}")
+    # Length buckets stay a property of the *span*: the lookahead is suffix.
+    exp_len = torch.tensor([[0, 0, 0, 0, 0, 0, 3, 2, 2, 1, 0, 0, 0, 0]])
+    check(torch.equal(len_bucket, exp_len),
+          f"lookahead len_bucket {len_bucket.tolist()}")
+
+    # ``apply_fim`` and the prompt builder in ``infill`` must agree: same span
+    # -> same per-frame region and length tags.
+    tag_reg, tag_remaining = model._fim_frame_tags(1, p, s, m, Tn, "cpu")
+    check(torch.equal(region, tag_reg), "apply_fim / _fim_frame_tags region")
+    check(torch.equal(len_bucket,
+                      model._len_buckets(tag_remaining, model.n_len_buckets)),
+          "apply_fim / _fim_frame_tags length tags")
+
+    # Short suffix: a = min(look, s) frames are repeated, and the stream ends
+    # there (the remaining columns are collator padding, not lookahead).
+    cl_short = torch.tensor([6])                   # s = 1
+    out2, len2, _, _ = model.apply_fim(
+        codes, cl_short, torch.tensor([True]),
+        torch.tensor([p]), torch.tensor([m]))
+    check(int(len2[0]) == 6 + 2 + 2, f"short-suffix length {len2.tolist()}")
+    check(int(out2[0, 0, 8]) == model.suf_ids[0], "short lookahead SUF")
+    check(torch.equal(out2[:, :, 9:10], codes[:, :, p + m:p + m + 1]),
+          "short lookahead frame")
+    check(int(out2[0, 0, 10]) == model.pad_ids[0],
+          "short lookahead leaked past the suffix")
+
+    # Empty suffix: no lookahead at all (EOS follows the middle instead).
+    cl_nosuf = torch.tensor([5])
+    _, len3, _, _ = model.apply_fim(
+        codes, cl_nosuf, torch.tensor([True]),
+        torch.tensor([2]), torch.tensor([3]))
+    check(int(len3[0]) == 5 + 2, f"no-suffix length {len3.tolist()}")
+
+    # Loss: the lookahead block and the seam targets are scored, and the
+    # weighted loss is finite.
+    batch = make_batch(model, [True, False])
+    out_loss = model.compute_batch_loss(batch, epoch=0, diagnostics=True)
+    for key in ("fim_seam_acc", "fim_lookahead_loss", "fim_lookahead_acc"):
+        check(key in out_loss and torch.isfinite(out_loss[key]),
+              f"{key} missing/unusable")
+    out_loss["loss"].backward()
+    check(model.decoder.len_emb.weight.grad is not None, "len_emb no grad")
+    model.zero_grad(set_to_none=True)
+    ar = model.compute_batch_loss(make_batch(model, [False, False]), epoch=0,
+                                  diagnostics=True)
+    check(not [k for k in ar if k.startswith(("fim_seam",
+                                              "fim_lookahead"))],
+          "AR-only batch leaked seam/lookahead scalars")
+
+    # Seam weighting must actually change the loss (it must not be a no-op).
+    plain = CodeTransformer(make_lookahead_config(seam_frames=0,
+                                                  seam_weight=1.0))
+    plain.load_state_dict(model.state_dict())
+    plain.eval()
+    l_w = float(model.compute_batch_loss(batch, epoch=0,
+                                         diagnostics=False)["loss"].detach())
+    l_p = float(plain.compute_batch_loss(batch, epoch=0,
+                                         diagnostics=False)["loss"].detach())
+    check(abs(l_w - l_p) > 1e-6, "fim_seam_weight had no effect on the loss")
+
+    # Seam score + best-of-N.
+    phone = torch.randint(0, 30, (1, 6))
+    plen = torch.tensor([6])
+    sid = torch.tensor([2])
+    prefix = torch.randint(0, 8, (1, K, 2))
+    suffix = torch.randint(0, 8, (1, K, 4))
+    mid = model.infill(phone, plen, sid, prefix, suffix, 3, temperature=1.0)
+    score = model.infill_seam_score(phone, plen, sid, prefix, mid, suffix)
+    check(score.shape == (1,) and torch.isfinite(score).all(),
+          f"infill_seam_score {score.shape}")
+    no_suf = model.infill_seam_score(phone, plen, sid, prefix, mid,
+                                     suffix[:, :, :0])
+    check(float(no_suf[0]) == 0.0, "empty suffix should score 0")
+    best = model.infill(phone, plen, sid, prefix, suffix, 3, best_of=3)
+    check(tuple(best.shape) == (1, K, 3), f"best_of shape {tuple(best.shape)}")
+    for k in range(K):
+        v = model.vocab_sizes[k]
+        check(int(best[:, k].min()) >= 0 and int(best[:, k].max()) < v,
+              f"best_of emitted out-of-range id in codebook {k}")
+
+    # End-to-end pin: scoring the *ground-truth* middle through the inference
+    # path must reproduce the training path's lookahead CE for the same item.
+    # This is what guarantees `infill_seam_score`/`best_of` rank with the
+    # objective that was actually trained.
+    T2, p2, m2 = 9, 2, 3                       # suffix s = 4 > look(3) -> a = 3
+    codes = torch.randint(0, 8, (1, K, T2))
+    phones = torch.randint(1, 30, (1, 6))
+    plens = torch.tensor([6])
+    sid2 = torch.tensor([3])
+    batch = {
+        "phone_ids": phones, "phone_lengths": plens, "sid": sid2,
+        "spec_codes": codes[:, :2], "pitch_codes": codes[:, 2:],
+        "code_lengths": torch.tensor([T2]),
+        "complete": torch.tensor([False]),
+        "fim": torch.tensor([True]),
+        "fim_prefix_len": torch.tensor([p2]),
+        "fim_mid_len": torch.tensor([m2]),
+    }
+    out = model.compute_batch_loss(batch, epoch=0, diagnostics=True)
+    sc = model.infill_seam_score(phones, plens, sid2,
+                                 codes[:, :, :p2], codes[:, :, p2:p2 + m2],
+                                 codes[:, :, p2 + m2:])
+    check(abs(float(sc[0]) - float(out["fim_lookahead_loss"])) < 1e-4,
+          f"seam score {float(sc[0]):.5f} != training lookahead CE "
+          f"{float(out['fim_lookahead_loss']):.5f}")
+    print("  suffix lookahead + seam weighting + best-of-N: OK")
+
+
 def main():
     torch.manual_seed(0)
     model = CodeTransformer(make_config())
@@ -295,6 +466,8 @@ def main():
     test_generate(model)
     test_infill(model)
     test_infill_alignment(model)
+    test_best_of_guard(model)
+    test_lookahead()
     print("ALL FIM CHECKS PASSED")
 
 

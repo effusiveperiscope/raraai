@@ -744,6 +744,9 @@ class Stage2REPL:
             config.train.get("sample_temperature", 1.0) or 1.0)
         top_k = config.train.get("sample_top_k", None)
         self.top_k: Optional[int] = int(top_k) if top_k else None
+        # Fill (`n`) candidate count: >1 ranks by the suffix-lookahead seam CE
+        # (needs a checkpoint trained with transformer.fim_lookahead > 0).
+        self.infill_best_of: int = 1
 
         self.net: Optional[CodeTransformer] = None
         # The eos/fim/region_cond layout is *derived from the checkpoint* (see
@@ -753,6 +756,7 @@ class Stage2REPL:
         self._layout_originals = {
             k: config.transformer.get(k, None)
             for k in ("eos_token", "fim", "region_cond", "length_cond",
+                      "fim_lookahead",
                       "hints", "decoder_hints", "hint_monotone",
                       "hint_film_memory", "hint_decoder_proj",
                       "hint_word_sem", "hint_word_dim")}
@@ -908,6 +912,18 @@ class Stage2REPL:
         if bool(tcfg.get("rope", False)) != rope:
             print(f"NOTE: rope={rope} in {source}; using that.")
             tcfg.rope = rope
+        # FIM suffix lookahead is parameter-free too: it only changes the order
+        # the *training* stream was laid out in, so the persistent
+        # `fim_layout_marker` is the only trace.  A wrong value loads every
+        # tensor and silently disables `infill_seam_score` / `best_of`.
+        look = 0
+        for key in keys:
+            if key == "fim_layout_marker" or key.endswith(".fim_layout_marker"):
+                look = int(state[key].reshape(-1)[0].item())
+                break
+        if int(tcfg.get("fim_lookahead", 0) or 0) != look:
+            print(f"NOTE: fim_lookahead={look} in {source}; using that.")
+            tcfg.fim_lookahead = look
         # Conditioning-hint layout.  These are *not* shape-compatible: a hint
         # model loaded into a non-hint config silently drops every hint tensor,
         # and a monotone/FiLM checkpoint loaded into the table model loses the
@@ -1675,7 +1691,8 @@ class Stage2REPL:
                 middle = self.net.infill(
                     phone, plen, sid_t, prefix, suffix, span,
                     temperature=self.temperature, top_k=self.top_k,
-                    hints=self._hint_arg())
+                    hints=self._hint_arg(),
+                    best_of=self.infill_best_of)
 
         except Exception as exc:
             print(f"  infill failed: {exc}")
@@ -1690,6 +1707,17 @@ class Stage2REPL:
         print(f"  sampled {span} middle frames in {dt * 1e3:.0f} ms "
               f"(sid {self.last_sid}, temp {self.temperature:g}, "
               f"top_k {self.top_k})")
+        if (getattr(self.net, "fim_lookahead", 0) > 0
+                and suffix.shape[-1] > 0):
+            try:
+                seam = self.net.infill_seam_score(
+                    phone, plen, sid_t, prefix, middle.unsqueeze(0), suffix,
+                    hints=self._hint_arg())
+                print(f"  seam CE {float(seam[0]):.3f} nats -- teacher-forced "
+                      f"CE of the true suffix start given this span "
+                      f"(lower = joins up better)")
+            except Exception as exc:
+                print(f"  seam score failed: {exc}")
         self._report_codes(self.fill_codes)
         # How close the re-generated span is to the codes it replaced.  Both
         # sides are in-distribution, so this is the "did it actually use the
@@ -2377,6 +2405,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "instead of the current text's (word-swap test)")
     parser.add_argument("--seed", type=int, default=None,
                         help="torch seed, so paired A/B draws are comparable")
+    parser.add_argument("--infill_best_of", type=int, default=1,
+                        help="fill (`n`): draw this many candidate spans and "
+                             "keep the one that best predicts the real suffix "
+                             "start (needs a fim_lookahead checkpoint)")
     return parser.parse_args(argv)
 
 
@@ -2435,6 +2467,8 @@ def main(argv=None) -> int:
         torch.manual_seed(int(args.seed))
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(args.seed))
+    if args.infill_best_of and int(args.infill_best_of) > 1:
+        repl.infill_best_of = int(args.infill_best_of)
     if args.topk is not None:
         text = str(args.topk).strip().lower()
         if text in ("none", "off", "0"):

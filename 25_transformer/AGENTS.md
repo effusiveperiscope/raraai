@@ -1045,6 +1045,59 @@ hole.
 mixed-batch loss, sentinel masking in `generate`, `infill`, and the
 `infill`-vs-training tag alignment), safe to run next to a GPU job.
 
+### FIM seam continuity (stage 2, v0.7-seam)
+
+PSM puts the middle **last** in the sequence, so plain FIM never predicts
+anything after the span: the join `middle_end -> suffix[0]` exists only as
+something the model can *infer* from having read the suffix earlier. Measured
+symptom: a locally plausible middle whose last frames do not continue into the
+suffix ("disjointed"). Two independent knobs target it, both in the
+`transformer` block:
+
+- **`fim_seam_frames` / `fim_seam_weight`** (default `4` / `4.0`) up-weight the
+  CE of the last N *middle* targets, i.e. the frames time-adjacent to the
+  suffix. Nothing is guessed here: ground-truth middle + ground-truth suffix is
+  continuous by construction, so "get these frames right" *is* "make the join
+  right". Applied in `code_loss` as `sum(w*ce)/sum(w)` (one extra
+  `reduction="none"` CE per codebook, only when `weight != 1`), so the loss
+  scale — and therefore the effective LR — is unchanged; only the gradient
+  allocation moves. `0`/`1.0` restores the historical path bit-identically.
+  Objective only: no tensors, no shape change, safe to `--resume_from`.
+- **`fim_lookahead: N`** (default `0`, off) makes the transition a *target*:
+  `prefix <SUF> suffix <MID> middle <SUF> suffix[:N]`. `apply_fim` repeats the
+  first `min(N, suffix)` suffix frames after the middle (same region 2, bucket
+  0), so the CE now contains "predict the real continuation of the span"
+  (`fim_lookahead_loss`/`_acc`, epoch-level `val_fim_lookahead_*`). It also
+  enables the inference-time scorer: `CodeTransformer.infill_seam_score(...)`
+  teacher-forces `prefix <SUF> suffix <MID> middle <SUF> suffix[:a]` and returns
+  the mean CE over that block per sample, and `infill(best_of=N)` draws N
+  candidates and keeps the seam-best one (per sample). That is the difference
+  between ranking by a proxy and ranking by "can this span predict the known
+  next frames?" — the suffix is a label, not a heuristic. `scratch/stage2_repl.py`
+  exposes it as `--infill_best_of` and prints the seam CE after every `n`;
+  `2_training._log_infill` logs `sample/fim_seam_ce_{j}` on a lookahead run.
+
+Contract details:
+
+- `fim_lookahead` adds **no parameters** but is a training-layout change, and a
+  mismatched checkpoint would otherwise load with every shape matching. It
+  therefore registers a persistent `net.fim_layout_marker` buffer (like
+  `rope_marker`) and `2_training.check_special_layout` refuses any mismatch in
+  **both** directions (fatal — there is no conversion either way).
+- `fim_seam_*` are plain attributes (not buffers), so `state_dict` is unchanged
+  and no guard is needed: changing them on a resume is just a loss change.
+- The span geometry is shared: `_fim_bounds` is the only place the
+  prefix/suffix/middle clamps live (used by `apply_fim` and by `code_loss`'s
+  seam/lookahead masks), and `_fim_frame_tags` is the prompt builder shared by
+  `infill` and `infill_seam_score` (`apply_fim` is its vectorised twin).
+  `test_fim.py` pins both pairs together, plus a short/empty-suffix case.
+- No re-preprocessing: the codes are unchanged. `fim_lookahead` needs a fresh
+  `exp_name` + `--transfer_from` (an existing FIM run resumes with
+  `fim_lookahead: 0`).
+- Watch `val_fim_seam_acc` (last N middle frames), `val_fim_lookahead_loss/_acc`
+  (the transition) and `val_fim_middle_acc/late` (where drift accumulates).
+  `fim_middle_code_match_*` is still free-running and stays near chance.
+
 ### Optimizers & manual optimization (stage 2)
 
 `TrainModule` splits the parameters between **two optimizers** via
@@ -1813,11 +1866,14 @@ and `test_pitch_anchors.py` guard all of it.
   `test_stage2_conditioning.py`); `0` in `train.text_delta_batches` disables
   the probe. Its FIM counterpart is the `_fim_probe` block (same cadence, first
   `train.fim_probe_batches` val batches): `val_fim_middle_loss`,
-  `val_fim_middle_acc` (+ `/early|mid|late`) and the four control-arm deltas
+  `val_fim_middle_acc` (+ `/early|mid|late`), `val_fim_seam_acc` (the last
+  `fim_seam_frames` middle frames), `val_fim_lookahead_loss`/`_acc` (the
+  transition, only on a `fim_lookahead` run) and the four control-arm deltas
   `val_fim_{text,suffix,region,length}_delta` — see §4's FIM section. Per-step
-  FIM scalars (`{train,val}_fim_middle_loss`, `_fim_middle_acc*`, `_fim_frac`)
-  come from `code_loss` on diagnostics steps. **`code_loss` emits the
-  `fim_middle_*` keys only when the mask actually contains a middle**
+  FIM scalars (`{train,val}_fim_middle_loss`, `_fim_middle_acc*`, `_fim_frac`,
+  `_fim_seam_acc`, `_fim_lookahead_*`) come from `code_loss` on diagnostics
+  steps. **`code_loss` emits those keys only when the mask actually contains
+  the corresponding frames**
   (`float(fim_den) > 0`, the one deliberate sync in that diagnostics-only
   block): validation items are plain AR, so their `fim` mask is all-False and a
   `0 / clamp_min(1e-6) = 0.0` would both look like a perfect span and be written
@@ -2057,6 +2113,15 @@ and `test_pitch_anchors.py` guard all of it.
     The sentinel ids are out of range for the stage-1 codec, so
     `generate`/`infill` mask them out of every sampled column — if you add
     another sampling path, do the same.
+
+    **`transformer.fim_lookahead` is the same kind of contract with a different
+    trace.** It changes no shape and adds no parameters (it repeats the first N
+    suffix frames after the middle during training), so nothing in
+    `load_state_dict` would notice; a persistent `net.fim_layout_marker` buffer
+    records the value and `check_special_layout` treats *any* mismatch as fatal
+    in both directions. `fim_seam_frames`/`fim_seam_weight` are loss-only (plain
+    attributes, no marker) and can be changed on a resume. See §4 "FIM seam
+    continuity".
 
 18. **`fairseq` turns the root logger to DEBUG at import time.** Importing
     `modeling.generator` pulls in the vendored NSF decoder

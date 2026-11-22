@@ -820,6 +820,20 @@ class CodeTransformer(nn.Module):
         # variant stays available as an ablation.
         length_cond = bool(_get_cfg(tcfg, "length_cond", False))
         n_len_buckets = int(_get_cfg(tcfg, "n_len_buckets", 9))
+        # FIM seam continuity (v0.7-seam).  Two independent knobs, both aimed at
+        # the *join* between the generated span and the suffix:
+        #   ``fim_lookahead`` repeats the first N suffix frames after the middle
+        #       (``prefix <SUF> suffix <MID> middle <SUF> suffix[:N]``), so the
+        #       transition the model has to *predict* is the real one instead of
+        #       it never existing in the sequence.  Training layout only -- no
+        #       parameters, but recorded in ``fim_layout_marker`` because a
+        #       mismatched checkpoint would otherwise load silently.
+        #   ``fim_seam_frames`` / ``fim_seam_weight`` up-weight the CE of the
+        #       last N middle targets (the frames time-adjacent to the suffix).
+        #       Objective only: no layout, no tensors, safe to resume into.
+        fim_lookahead = max(int(_get_cfg(tcfg, "fim_lookahead", 0) or 0), 0)
+        fim_seam_frames = max(int(_get_cfg(tcfg, "fim_seam_frames", 0) or 0), 0)
+        fim_seam_weight = float(_get_cfg(tcfg, "fim_seam_weight", 1.0) or 1.0)
         # Encoder -> decoder conditioning (v0.4.1).  See PhonemeEncoder.
         memory_norm = str(_get_cfg(tcfg, "memory_norm", "temporal"))
         residual_scale = bool(_get_cfg(tcfg, "residual_scale", True))
@@ -898,6 +912,12 @@ class CodeTransformer(nn.Module):
         self.n_regions = 4
         self.length_cond = length_cond
         self.n_len_buckets = max(int(n_len_buckets), 2)
+        # Seam knobs (see the constructor comment above).  ``fim_lookahead`` is
+        # forced to 0 without ``fim``: the extra frames are suffix copies, which
+        # only mean something inside a FIM stream.
+        self.fim_lookahead = fim_lookahead if fim else 0
+        self.fim_seam_frames = fim_seam_frames
+        self.fim_seam_weight = fim_seam_weight
         _special_base = 1 + int(eos_token)
         self.suf_ids = ([v + _special_base for v in self.vocab_sizes]
                         if fim else None)
@@ -963,6 +983,15 @@ class CodeTransformer(nn.Module):
             # ``2_training.check_special_layout``.
             self.register_buffer("rope_marker", torch.ones(1),
                                  persistent=True)
+        if self.fim_lookahead > 0:
+            # Same trick for the FIM layout: ``transformer.fim_lookahead``
+            # reorders the *training* stream but adds no parameters, so without
+            # a marker a checkpoint trained with (or without) the suffix
+            # lookahead would load with every shape matching and no warning.
+            self.register_buffer(
+                "fim_layout_marker",
+                torch.tensor([float(self.fim_lookahead)]),
+                persistent=True)
 
         # ---- LoRA fine-tuning adapters (--finetune) ------------------------ #
         # ``finetune.enabled`` wraps the configured linear layers in
@@ -1386,8 +1415,41 @@ class CodeTransformer(nn.Module):
         bucket = torch.where(r > 0, bucket, torch.zeros_like(bucket))
         return bucket.clamp(min=0.0, max=float(n_buckets - 1)).long()
 
+    def _fim_bounds(self, code_lengths, prefix_len, mid_len, T):
+        """Per-sample FIM span geometry ``(cl, p, m, s, a)``.
+
+        The single source of truth for the clamps ``apply_fim`` uses, so
+        ``apply_fim`` (which builds the stream) and ``code_loss`` (which builds
+        the seam / lookahead target masks) cannot drift apart.  ``cl`` is
+        ``(B,)``; ``p``/``m``/``s``/``a`` are ``(B, 1)``.
+
+        ``a`` is the *effective* lookahead: ``min(fim_lookahead, s)``, i.e. a
+        suffix shorter than the budget is repeated in full rather than padded.
+        """
+        device = code_lengths.device
+        cl = code_lengths.to(device).long().clamp(min=1, max=T)
+        p = prefix_len.to(device).long().clamp(min=0, max=T)[:, None]
+        p = torch.minimum(p, (cl - 1).clamp(min=0)[:, None])
+        m = mid_len.to(device).long().clamp(min=0, max=T)[:, None]
+        m = torch.minimum(m, cl[:, None] - p)
+        s = (cl[:, None] - p - m).clamp(min=0)
+        look = int(self.fim_lookahead)
+        a = (torch.minimum(torch.full_like(s, look), s) if look > 0
+             else torch.zeros_like(s))
+        return cl, p, m, s, a
+
     def apply_fim(self, codes, code_lengths, fim_mask, prefix_len, mid_len):
         """Reorder each FIM item to ``prefix <SUF> suffix <MID> middle``.
+
+        With ``transformer.fim_lookahead = N > 0`` each item also repeats the
+        first ``min(N, suffix)`` suffix frames after the middle, i.e.
+        ``... <MID> middle <SUF> suffix[:N]``.  That second ``<SUF>`` is the
+        whole point: it puts the *real* continuation of the span in the
+        sequence as a **target**, so the loss contains the transition the
+        listener hears (see ``code_loss``'s ``fim_lookahead_loss`` and
+        ``CodeTransformer.infill_seam_score``).  The repeated frames reuse
+        their original region (2 = suffix) and length bucket (0 = not in a
+        span), exactly like the first occurrence.
 
         The reordering is done at the **frame** level (all K codebooks move
         together), because the delay pattern requires frame-aligned codebooks;
@@ -1407,48 +1469,56 @@ class CodeTransformer(nn.Module):
             prefix_len, mid_len: ``(B,)`` span lengths (suffix = len - p - m).
 
         Returns:
-            ``(codes_new, lengths_new, region, len_bucket)``: ``(B, K, T+2)``,
-            ``(B,)`` (``T+2`` for FIM items, the original length for AR items),
-            ``(B, T+2)`` region ids (0 normal, 1 prefix, 2 suffix, 3 middle) and
-            ``(B, T+2)`` span-length buckets (``transformer.length_cond``):
-            ``0`` outside the middle, else the log2 bucket of the number of
-            frames left in the span *including* the current one, so ``MID``
-            itself is ``m + 1`` and the last middle frame is ``1``.
+            ``(codes_new, lengths_new, region, len_bucket)``:
+            ``(B, K, T + 2 [+ 1 + N])``, ``(B,)`` (one of ``cl + 2``,
+            ``cl + 3 + a``, or the original ``cl`` for AR items), ``(B, Tn)``
+            region ids (0 normal, 1 prefix, 2 suffix, 3 middle) and ``(B, Tn)``
+            span-length buckets (``transformer.length_cond``): ``0`` outside
+            the middle, else the log2 bucket of the number of frames left in
+            the span *including* the current one, so ``MID`` itself is ``m + 1``
+            and the last middle frame is ``1``.
         """
         B, K, T = codes.shape
         device = codes.device
-        Tn = T + 2
+        look = int(self.fim_lookahead)
+        Tn = T + 2 + (1 + look if look > 0 else 0)
         pos = torch.arange(Tn, device=device)                 # (Tn,)
-        cl = code_lengths.to(device).long().clamp(min=1, max=T)
-        p = prefix_len.to(device).long().clamp(min=0, max=T)[:, None]
-        p = torch.minimum(p, (cl - 1).clamp(min=0)[:, None])
-        m = mid_len.to(device).long().clamp(min=0, max=T)[:, None]
-        m = torch.minimum(m, cl[:, None] - p)
-        s = (cl[:, None] - p - m).clamp(min=0)                # suffix length
+        if code_lengths is None:
+            code_lengths = torch.full((B,), T, device=device, dtype=torch.long)
+        cl, p, m, s, a = self._fim_bounds(code_lengths, prefix_len, mid_len, T)
         isfim = fim_mask.to(device).bool()[:, None]           # (B, 1)
 
         pos2 = pos[None, :]                                   # (1, Tn)
+        mid_first = p + s + 2                                 # first middle frame
+        mid_end = mid_first + m                               # past the middle
+        la_start = mid_end                                    # lookahead SUF
         in_prefix = pos2 < p
         is_suf = pos2 == p
         in_suffix = (pos2 > p) & (pos2 <= p + s)
         is_mid = pos2 == p + s + 1
-        in_mid = (pos2 >= p + s + 2) & (pos2 < p + s + 2 + m)
+        in_mid = (pos2 >= mid_first) & (pos2 < mid_end)
+        is_la_suf = pos2 == la_start
+        in_la = (pos2 > la_start) & (pos2 <= la_start + a)
 
         src_fim = torch.where(
             in_prefix, pos2,
             torch.where(in_suffix, pos2 - 1 + m,
                         torch.where(in_mid, pos2 - s - 2,
-                                    torch.zeros_like(pos2))))
+                                    torch.where(in_la,
+                                                pos2 - la_start - 1 + p + m,
+                                                torch.zeros_like(pos2)))))
         src_ar = pos2.expand(B, Tn)
         valid_ar = pos2 < cl[:, None]
-        # A FIM item's reordered stream is exactly ``cl + 2`` frames long; any
-        # frame past that is collator padding (short item in a longer batch) and
-        # must stay masked, exactly like the AR padding.
-        valid_fim = pos2 < (cl + 2)[:, None]
+        # A FIM item's reordered stream is ``cl + 2`` frames long, plus the
+        # lookahead's SUF + ``a`` frames when the suffix is non-empty; any frame
+        # past that is collator padding (short item in a longer batch) and must
+        # stay masked, exactly like the AR padding.
+        extra = torch.where(a > 0, 1 + a, torch.zeros_like(a))  # (B, 1)
+        valid_fim = pos2 < (cl[:, None] + 2 + extra)
 
         reg_fim = torch.zeros((B, Tn), dtype=torch.long, device=device)
         reg_fim = torch.where(in_prefix, torch.ones_like(reg_fim), reg_fim)
-        reg_fim = torch.where(in_suffix | is_suf,
+        reg_fim = torch.where(in_suffix | is_suf | is_la_suf | in_la,
                               torch.full_like(reg_fim, 2), reg_fim)
         reg_fim = torch.where(in_mid | is_mid,
                               torch.full_like(reg_fim, 3), reg_fim)
@@ -1467,23 +1537,28 @@ class CodeTransformer(nn.Module):
                            suf_base.view(1, K, 1).expand(B, K, Tn), sent)
         sent = torch.where(is_mid[:, None, :].expand(B, K, Tn),
                            mid_base.view(1, K, 1).expand(B, K, Tn), sent)
+        # The lookahead is introduced by the same SUF sentinel: in PSM order it
+        # means "what follows is the future", which is exactly true again here.
+        sent = torch.where(is_la_suf[:, None, :].expand(B, K, Tn),
+                           suf_base.view(1, K, 1).expand(B, K, Tn), sent)
         out = torch.where(sent >= 0, sent, gathered)
 
         pad = torch.tensor(self.pad_ids, device=device,
                            dtype=codes.dtype).view(1, K, 1)
         out = torch.where(valid[:, None, :].expand(B, K, Tn),
                           out, pad.expand(B, K, Tn))
-        lengths_new = torch.where(fim_mask.to(device).bool(), cl + 2, cl)
+        lengths_new = torch.where(fim_mask.to(device).bool(),
+                                  cl + 2 + extra.squeeze(1), cl)
 
         # Span-length budget (``transformer.length_cond``): frames left in the
         # middle *including* the current frame, so the ``MID`` sentinel reports
         # ``m + 1`` and the last middle frame reports ``1`` -- the same formula
-        # ``infill`` uses (``Tn - pos``), which is what makes the tag mean the
-        # same thing at train and inference time.
-        mid_first = p + s + 2                       # first middle frame
+        # ``infill`` uses (``mid_end - pos``), which is what makes the tag mean
+        # the same thing at train and inference time.  The lookahead belongs to
+        # the suffix (region 2, bucket 0), not to the span.
         remaining = torch.where(
             (in_mid | is_mid),
-            (mid_first + m) - pos2,
+            mid_end - pos2,
             torch.zeros_like(pos2))
         len_bucket = torch.where(
             isfim,
@@ -1540,6 +1615,33 @@ class CodeTransformer(nn.Module):
         reg_t = region[:, frame]  # (B, L)[B, frame] -> (B, K, L)
         pad = torch.tensor(self.pad_ids, device=region.device).view(1, K, 1)
         return (reg_t == 3) & (targets != pad)
+
+    def _span_target_mask(self, targets: torch.Tensor, L: int,
+                          lo: torch.Tensor, hi: torch.Tensor,
+                          keep: torch.Tensor) -> torch.Tensor:
+        """Boolean ``(B, K, L)`` mask of non-pad targets in frames ``[lo, hi)``.
+
+        The seam-weight mask (last ``fim_seam_frames`` middle targets) and the
+        lookahead mask (the repeated ``<SUF> suffix[:N]`` frames) are both a
+        contiguous frame range of the *reordered* stream, so one helper serves
+        both.  ``lo``/``hi`` are ``(B, 1)`` frame indices and ``keep`` is a
+        ``(B, 1, 1)`` bool gate (the FIM mask: an AR item's frames must never
+        match a range that happens to line up).
+
+        Same column -> frame relationship as :meth:`_middle_target_mask`
+        (target column ``j`` of codebook ``k`` is frame ``j - k``); the
+        ``K - 1`` delay-tail columns clamp onto the last frame and are removed
+        by the pad-target test, exactly as there.
+        """
+        B, K, _ = targets.shape
+        frame = (torch.arange(L, device=targets.device)[None, :]
+                 - torch.arange(K, device=targets.device)[:, None])  # (K, L)
+        frame = frame.clamp(0, max(L - 1, 0))
+        sel = ((frame[None] >= lo[:, :, None])
+               & (frame[None] < hi[:, :, None])
+               & keep)                                    # (B, K, L)
+        pad = torch.tensor(self.pad_ids, device=targets.device).view(1, K, 1)
+        return sel & (targets != pad)
 
     # ------------------------------------------------------------------ #
     # Core computation
@@ -2003,6 +2105,15 @@ class CodeTransformer(nn.Module):
             span's budget shows up: flat across the span means it is pacing the
             content, a rise at the end means it is only good at wrapping up.
             Diagnostics only.
+        ``fim_seam_acc``
+            top-1 over the last ``fim_seam_frames`` middle targets only, i.e.
+            the frames time-adjacent to the suffix.  Diagnostics only, and only
+            emitted when the batch has a span.
+        ``fim_lookahead_loss``/``fim_lookahead_acc``
+            CE / top-1 over the repeated ``<SUF> suffix[:N]`` block
+            (``transformer.fim_lookahead``), i.e. the actual join between the
+            generated span and the suffix, scored as a next-token target.
+            Diagnostics only, and only emitted when the batch has one.
         ``fim_frac``
             fraction of the batch that was FIM (no-op items included).
         ``loss_weights`` (K,)
@@ -2016,12 +2127,21 @@ class CodeTransformer(nn.Module):
             hints = self.resolve_hints(hints, B, memory.shape[1], memory.device)
         region = None
         len_bucket = None
+        fim_spans = None
         if self.fim and fim_mask is not None:
             # Reorder FIM items to prefix <SUF> suffix <MID> middle.  When the
             # suffix is empty the middle reaches the clip's real end, so EOS
             # still belongs after the middle; a mid-clip middle (suffix present)
             # ends at MID_END-by-end-of-sequence and gets no EOS, like a
             # mid-clip AR crop.
+            if code_lengths is None:
+                code_lengths = torch.full((B,), T, dtype=torch.long,
+                                          device=codes.device)
+            # Seam/lookahead target masks are frame ranges of the *reordered*
+            # stream, so the span geometry is taken from the same helper
+            # ``apply_fim`` uses, before it rewrites ``codes``/``code_lengths``.
+            fim_spans = self._fim_bounds(code_lengths, fim_prefix_len,
+                                         fim_mid_len, T)
             if complete is None:
                 complete = torch.ones(B, dtype=torch.bool, device=codes.device)
             suffix_zero = (code_lengths - fim_prefix_len - fim_mid_len) <= 0
@@ -2037,6 +2157,28 @@ class CodeTransformer(nn.Module):
         seq = torch.cat([start, delayed], dim=2)  # (B, K, L + 1)
         inputs = seq[..., :L]
         targets = seq[..., 1:]
+
+        # ---- FIM seam targets (frame ranges of the reordered stream) -------- #
+        # ``seam_mask``: the last ``fim_seam_frames`` middle frames, i.e. the
+        # targets time-adjacent to the suffix (where free-running error piles up
+        # and where a bad join is audible).  ``la_mask``: the repeated
+        # ``<SUF> suffix[:N]`` block, i.e. the *transition* itself.  Both are
+        # built on every step (the seam mask also reweights the loss), so they
+        # cannot depend on ``diagnostics``.
+        seam_mask = None
+        la_mask = None
+        if fim_spans is not None:
+            _, p0, m0, s0, a0 = fim_spans
+            mid_first0 = p0 + s0 + 2
+            mid_end0 = mid_first0 + m0
+            keep = fim_mask.to(codes.device).bool().view(B, 1, 1)
+            if self.fim_seam_frames > 0:
+                seam_lo = (mid_end0 - self.fim_seam_frames).clamp(min=mid_first0)
+                seam_mask = self._span_target_mask(
+                    targets, L, seam_lo, mid_end0, keep)
+            if self.fim_lookahead > 0:
+                la_mask = self._span_target_mask(
+                    targets, L, mid_end0, mid_end0 + a0 + 1, keep)
 
         region_col = None
         len_col = None
@@ -2067,6 +2209,17 @@ class CodeTransformer(nn.Module):
         fim_acc_den = None
         fim_bin_num = None
         fim_bin_den = None
+        seam_num = None
+        seam_den = None
+        seam_acc_num = None
+        la_num = None
+        la_den = None
+        la_acc_num = None
+        # Seam up-weighting is active only when configured and the batch really
+        # has a span; the default (``fim_seam_frames=0`` or weight 1) keeps the
+        # plain ``F.cross_entropy`` path, i.e. bit-identical to before.
+        use_seam = (seam_mask is not None and self.fim_seam_weight != 1.0
+                    and self.fim_seam_frames > 0)
         for k in range(K):
             # fp32 for both CE and the diagnostics: under bf16-mixed the
             # logits come back bf16, which is fine for CE but too coarse for
@@ -2074,8 +2227,25 @@ class CodeTransformer(nn.Module):
             lg = logits[k].float()
             flat_logits = lg.reshape(-1, lg.size(-1))
             flat_targets = targets[:, k].reshape(-1)
-            losses.append(F.cross_entropy(
-                flat_logits, flat_targets, ignore_index=self.pad_ids[k]))
+            if use_seam:
+                # ``sum(w * ce) / sum(w)``: the last ``fim_seam_frames`` middle
+                # targets count ``fim_seam_weight`` times, everything else (and
+                # every pad target) once / zero.  Renormalising by the weight
+                # sum keeps the loss on the CE scale, so the effective LR and
+                # the cross-batch comparability do not move; only the gradient
+                # allocation does.
+                ce = F.cross_entropy(
+                    flat_logits, flat_targets, ignore_index=self.pad_ids[k],
+                    reduction="none")
+                wmask = torch.where(
+                    seam_mask[:, k].reshape(-1),
+                    torch.full_like(ce, float(self.fim_seam_weight)),
+                    torch.ones_like(ce))
+                wmask = wmask * (flat_targets != self.pad_ids[k]).to(wmask.dtype)
+                losses.append((ce * wmask).sum() / wmask.sum().clamp_min(1e-6))
+            else:
+                losses.append(F.cross_entropy(
+                    flat_logits, flat_targets, ignore_index=self.pad_ids[k]))
             if not diagnostics:
                 continue
 
@@ -2114,10 +2284,18 @@ class CodeTransformer(nn.Module):
             # exactly the "does it have a sense of the span's budget?" signal
             # (a profile that only looks good at the end of the span means the
             # model is good at wrapping up, not at pacing the content).
-            if mid_target_mask is not None:
+            #
+            # The same per-position CE vector also drives ``fim_seam_acc`` (the
+            # last ``fim_seam_frames`` middle targets) and ``fim_lookahead_*``
+            # (the repeated suffix), so it is computed once when any of the
+            # three masks is present.
+            ce_none = None
+            if (mid_target_mask is not None or seam_mask is not None
+                    or la_mask is not None):
                 ce_none = F.cross_entropy(
                     flat_logits, flat_targets,
                     ignore_index=self.pad_ids[k], reduction="none")
+            if mid_target_mask is not None:
                 mk_b = mid_target_mask[:, k]                    # (B, L) bool
                 mk = mk_b.reshape(-1).to(ce_none.dtype)
                 num = (ce_none * mk).sum()
@@ -2149,6 +2327,27 @@ class CodeTransformer(nn.Module):
                 else:
                     fim_bin_num = [a + b for a, b in zip(fim_bin_num, bin_num)]
                     fim_bin_den = [a + b for a, b in zip(fim_bin_den, bin_den)]
+
+            # ``fim_seam_acc``: top-1 over the last ``fim_seam_frames`` middle
+            # targets -- exactly the frames that have to land on the suffix.
+            if seam_mask is not None:
+                sk_b = seam_mask[:, k]
+                sk = sk_b.reshape(-1).to(lg.dtype)
+                ok = correct.to(lg.dtype) * sk
+                seam_acc_num = (ok.sum() if seam_acc_num is None
+                                else seam_acc_num + ok.sum())
+                seam_den = sk.sum() if seam_den is None else seam_den + sk.sum()
+
+            # ``fim_lookahead_loss/_acc``: the second ``<SUF> suffix[:N]``
+            # block, i.e. the real transition, scored as a next-token target.
+            if la_mask is not None:
+                lk_b = la_mask[:, k]
+                lk = lk_b.reshape(-1).to(lg.dtype)
+                lnum = (ce_none * lk).sum()
+                la_num = lnum if la_num is None else la_num + lnum
+                la_den = lk.sum() if la_den is None else la_den + lk.sum()
+                lok = (correct.to(lg.dtype) * lk).sum()
+                la_acc_num = lok if la_acc_num is None else la_acc_num + lok
 
         losses = torch.stack(losses)  # (K,)
         weights = self.loss_weights(epoch).to(device=losses.device,
@@ -2190,6 +2389,16 @@ class CodeTransformer(nn.Module):
                 for name, num, den in zip(("early", "mid", "late"),
                                           fim_bin_num, fim_bin_den):
                     out[f"fim_middle_acc_{name}"] = num / den.clamp_min(1e-6)
+            # Same "emit nothing when the mask is empty" rule: a validation
+            # batch has no span (`_sample_fim` is train-only), and a 0.0 would
+            # overwrite the probe's real numbers through Lightning's epoch
+            # flush.  ``float(...)`` is the one deliberate sync, diagnostics
+            # only.
+            if seam_den is not None and float(seam_den) > 0:
+                out["fim_seam_acc"] = seam_acc_num / seam_den.clamp_min(1e-6)
+            if la_den is not None and float(la_den) > 0:
+                out["fim_lookahead_loss"] = la_num / la_den.clamp_min(1e-6)
+                out["fim_lookahead_acc"] = la_acc_num / la_den.clamp_min(1e-6)
         if fim_mask is not None:
             out["fim_frac"] = fim_mask.to(losses.dtype).mean()
         return out
@@ -2520,6 +2729,32 @@ class CodeTransformer(nn.Module):
             if was_training:
                 self.train()
 
+    @staticmethod
+    def _fim_frame_tags(B: int, p: int, s: int, m: int, Tn: int, device):
+        """Per-frame region ids and span-length budget for a FIM stream.
+
+        ``region``: 1 prefix, 2 suffix (including both ``<SUF>`` sentinels and
+        the lookahead copy), 3 middle (including ``<MID>``).  ``remaining`` is
+        "frames left in the span *including* the current frame"
+        (``mid_end - pos``) and 0 outside it, so ``<MID>`` reports ``m + 1`` and
+        the last middle frame 1.
+
+        :meth:`apply_fim` is the vectorised, per-sample twin of this (it cannot
+        call it because ``p``/``m`` differ per item); ``test_fim.py`` pins the
+        two together so the inference prompt cannot drift from training.
+        """
+        region = torch.zeros((B, Tn), dtype=torch.long, device=device)
+        region[:, :p] = 1
+        region[:, p:p + s + 1] = 2
+        mid_end = p + s + 2 + m
+        region[:, p + s + 1:mid_end] = 3
+        region[:, mid_end:] = 2
+        pos = torch.arange(Tn, device=device).view(1, Tn)
+        remaining = torch.where(
+            (pos >= (p + s + 1)) & (pos < mid_end), mid_end - pos,
+            torch.zeros_like(pos))
+        return region, remaining
+
     @torch.no_grad()
     def infill(
         self,
@@ -2534,6 +2769,7 @@ class CodeTransformer(nn.Module):
         hints: Optional[dict] = None,
         hint_guidance: Optional[float] = None,
         hint_guidance_books: Optional[Sequence[float]] = None,
+        best_of: int = 1,
     ) -> torch.Tensor:
         """Fixed-length span regeneration: ``(prefix, suffix) -> middle``.
 
@@ -2562,6 +2798,15 @@ class CodeTransformer(nn.Module):
         which reproduces the training alignment to within float noise
         (``test_fim.py`` asserts that).
 
+        **Seam-aware selection (``best_of``).**  On a model trained with
+        ``transformer.fim_lookahead > 0``, ``best_of=N`` draws ``N`` candidate
+        spans and keeps, per sample, the one with the lowest
+        :meth:`infill_seam_score` -- i.e. the candidate whose tail actually
+        predicts the *real* first suffix frames.  That is the difference between
+        "sounds plausible" and "joins up": the suffix is known, so the join is a
+        supervised quantity, not a proxy.  Costs ``N`` sampling passes plus ``N``
+        teacher-forced scoring passes; ``N=4..8`` is a reasonable range.
+
         Args:
             prefix_codes, suffix_codes: ``(B, K, p)`` / ``(B, K, s)`` known codes.
                 Either may be empty (``p``/``s`` == 0).
@@ -2572,15 +2817,62 @@ class CodeTransformer(nn.Module):
                 :meth:`resolve_hints`).
             hint_guidance, hint_guidance_books: CFG over the hint channels, as
                 in :meth:`generate`; costs a second decoder pass per step.
+            best_of: draw this many candidates and keep the seam-best one
+                (requires ``transformer.fim_lookahead > 0``).
 
         Returns:
             ``(B, K, middle_frames)`` freshly generated middle codes.
         """
-        was_training = self.training
         if not self.fim:
             raise ValueError(
                 "CodeTransformer.infill requires transformer.fim (the SUF/MID "
                 "sentinel classes); this model was built without it.")
+        n = int(best_of)
+        if n <= 1:
+            return self._infill_sample(
+                phone_ids, phone_lengths, sid, prefix_codes, suffix_codes,
+                middle_frames, temperature=temperature, top_k=top_k,
+                hints=hints, hint_guidance=hint_guidance,
+                hint_guidance_books=hint_guidance_books)
+        if self.fim_lookahead <= 0:
+            raise ValueError(
+                "infill(best_of>1) ranks candidates by their teacher-forced "
+                "suffix-lookahead CE, which only exists on a model trained with "
+                "transformer.fim_lookahead > 0.  Retrain with a lookahead, or "
+                "call infill(best_of=1) and rank externally.")
+        cands = [self._infill_sample(
+            phone_ids, phone_lengths, sid, prefix_codes, suffix_codes,
+            middle_frames, temperature=temperature, top_k=top_k, hints=hints,
+            hint_guidance=hint_guidance,
+            hint_guidance_books=hint_guidance_books) for _ in range(n)]
+        stacked = torch.stack(cands, dim=0)                 # (N, B, K, m)
+        scores = torch.stack([
+            self.infill_seam_score(
+                phone_ids, phone_lengths, sid, prefix_codes, stacked[i],
+                suffix_codes, hints=hints, hint_guidance=hint_guidance,
+                hint_guidance_books=hint_guidance_books)
+            for i in range(n)], dim=0)                      # (N, B)
+        idx = scores.argmin(dim=0).view(1, -1, 1, 1)
+        idx = idx.expand(1, -1, stacked.shape[2], stacked.shape[3])
+        return stacked.gather(0, idx).squeeze(0)
+
+    @torch.no_grad()
+    def _infill_sample(
+        self,
+        phone_ids: torch.Tensor,
+        phone_lengths: Optional[torch.Tensor],
+        sid: torch.Tensor,
+        prefix_codes: torch.Tensor,
+        suffix_codes: torch.Tensor,
+        middle_frames: int,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        hints: Optional[dict] = None,
+        hint_guidance: Optional[float] = None,
+        hint_guidance_books: Optional[Sequence[float]] = None,
+    ) -> torch.Tensor:
+        """One ``infill`` sampling pass (the body of the loop)."""
+        was_training = self.training
         self.eval()
         try:
             hints = self.resolve_hints(hints, phone_ids.shape[0],
@@ -2613,11 +2905,10 @@ class CodeTransformer(nn.Module):
             pad = torch.tensor(self.pad_ids, device=device).view(1, K)
 
             # Region per reordered frame: prefix 1, SUF+suffix 2, MID+middle 3.
-            region_frames = torch.full((B, Tn), 3, dtype=torch.long,
-                                       device=device)
-            if p > 0:
-                region_frames[:, :p] = 1
-            region_frames[:, p:p + s + 1] = 2  # SUF at p, suffix p+1..p+s
+            # Shared with the seam scorer so the prompt cannot drift from
+            # training (`apply_fim` is the vectorised twin).
+            region_frames, remaining = self._fim_frame_tags(B, p, s, m, Tn,
+                                                            device)
 
             # Per-column tags, indexed by *column*: entry j is the tag of frame j
             # (the frame that column j predicts), with the ``K - 1`` delay-tail
@@ -2628,13 +2919,6 @@ class CodeTransformer(nn.Module):
                                      region_frames[:, -1:].expand(B, K - 1)], 1)
             len_cols = None
             if self.decoder.len_emb is not None:
-                # Frames left in the span *including* the current frame, i.e.
-                # ``Tn - pos``, so ``MID`` at ``Kp - 1`` reports ``m + 1`` and the
-                # last middle frame reports 1 -- the convention ``apply_fim``
-                # uses.  Before the span the tag is bucket 0 ("no span").
-                pos = torch.arange(Tn, device=device).view(1, Tn)
-                remaining = torch.where(pos >= (Kp - 1), Tn - pos,
-                                        torch.zeros_like(pos))
                 len_frames = self._len_buckets(remaining.expand(B, Tn),
                                                self.n_len_buckets)
                 len_cols = torch.cat([len_frames,
@@ -2706,6 +2990,134 @@ class CodeTransformer(nn.Module):
             if was_training:
                 self.train()
 
+    @torch.no_grad()
+    def infill_seam_score(
+        self,
+        phone_ids: torch.Tensor,
+        phone_lengths: Optional[torch.Tensor],
+        sid: torch.Tensor,
+        prefix_codes: torch.Tensor,
+        middle_codes: torch.Tensor,
+        suffix_codes: torch.Tensor,
+        lookahead: Optional[int] = None,
+        hints: Optional[dict] = None,
+        hint_guidance: Optional[float] = None,
+        hint_guidance_books: Optional[Sequence[float]] = None,
+    ) -> torch.Tensor:
+        """Teacher-forced CE (nats) of the *join* after a generated span.
+
+        Scores ``prefix <SUF> suffix <MID> middle <SUF> suffix[:a]`` exactly the
+        way :meth:`code_loss` sees it when ``transformer.fim_lookahead`` trained
+        that block, and returns the mean CE over the lookahead targets per
+        sample (``(B,)``, lower = the generated span continues into the real
+        suffix better).
+
+        This is what makes "regenerate until the join sounds right" principled
+        rather than a proxy: the suffix is known, so its first frames are a
+        *label* for the transition.  A candidate whose tail puts the model in
+        the wrong spectral/prosodic state cannot predict them, and that shows up
+        here even when every individual frame looks locally plausible.  Only
+        defined for a model trained with a lookahead -- a plain PSM model never
+        predicts the transition, so there is nothing to score.
+
+        Args:
+            middle_codes: ``(B, K, m)`` the generated span to score.
+            lookahead: how many suffix frames to score; defaults to the model's
+                trained ``fim_lookahead`` and is clamped to the suffix length.
+            hints/hint_guidance*: as in :meth:`infill`, so the score is taken in
+                the same conditioning state the candidate was drawn in.
+
+        Returns:
+            ``(B,)`` float32, mean CE over the ``a + 1`` lookahead frames and all
+            codebooks (0 when the suffix is empty, i.e. nothing to join).
+        """
+        if not self.fim:
+            raise ValueError(
+                "CodeTransformer.infill_seam_score requires transformer.fim.")
+        a = min(int(self.fim_lookahead if lookahead is None else lookahead),
+                int(suffix_codes.shape[-1]))
+        B = phone_ids.shape[0]
+        if a <= 0:
+            return torch.zeros(B, dtype=torch.float32, device=phone_ids.device)
+
+        was_training = self.training
+        self.eval()
+        try:
+            hints = self.resolve_hints(hints, B, phone_ids.shape[1],
+                                       phone_ids.device)
+            memory, memory_mask = self.encode(phone_ids, phone_lengths, sid,
+                                              hints=hints)
+            dec_hint = self._dec_hint(hints)
+            g_weights, g_memory, g_mask, g_hint = self._guidance_setup(
+                hints, phone_ids, phone_lengths, sid,
+                hint_guidance, hint_guidance_books)
+            K = self.codebook_num
+            device = phone_ids.device
+
+            m = int(middle_codes.shape[-1])
+            p = int(prefix_codes.shape[-1])
+            s = int(suffix_codes.shape[-1])
+            suf_col = torch.tensor(self.suf_ids, device=device,
+                                   dtype=torch.long).view(1, K, 1).expand(B, K, 1)
+            mid_col = torch.tensor(self.mid_ids, device=device,
+                                   dtype=torch.long).view(1, K, 1).expand(B, K, 1)
+            # Same order apply_fim trains: ... middle <SUF> suffix[:a].
+            known = torch.cat([prefix_codes.long(), suf_col,
+                               suffix_codes.long(), mid_col,
+                               middle_codes.long(), suf_col,
+                               suffix_codes[:, :, :a].long()], dim=2)
+            Tn = known.shape[2]
+            delayed = self.build_delay_pattern(
+                known, torch.full((B,), Tn, dtype=torch.long, device=device))
+            L = delayed.shape[2]
+            seq = torch.cat([self._pad_column(B, device), delayed], dim=2)
+            inputs, targets = seq[..., :L], seq[..., 1:]
+
+            region_frames, remaining = self._fim_frame_tags(B, p, s, m, Tn,
+                                                            device)
+            region_cols = self._tag_to_columns(region_frames, Tn, L)
+            len_cols = None
+            if self.decoder.len_emb is not None:
+                len_cols = self._tag_to_columns(
+                    self._len_buckets(remaining, self.n_len_buckets), Tn, L)
+
+            logits = self.decoder(inputs, memory, memory_mask, sid=sid,
+                                  region=region_cols, length=len_cols,
+                                  hint_vec=dec_hint)
+            if g_weights is not None:
+                logits = self._combine_guidance(
+                    logits,
+                    self.decoder(inputs, g_memory, g_mask, sid=sid,
+                                 region=region_cols, length=len_cols,
+                                 hint_vec=g_hint),
+                    g_weights)
+
+            # Target column ``j`` of codebook ``k`` is frame ``j - k`` (the
+            # ``build_delay_pattern`` relationship).  The lookahead block is
+            # frames ``[la_first, Tn)``: the repeated ``<SUF>`` plus the suffix
+            # copy, i.e. exactly the transition.
+            la_first = p + s + 2 + m
+            frame = (torch.arange(L, device=device)[None, :]
+                     - torch.arange(K, device=device)[:, None])  # (K, L)
+            total = torch.zeros(B, dtype=torch.float32, device=device)
+            count = torch.zeros(B, dtype=torch.float32, device=device)
+            for k in range(K):
+                lg = logits[k].float()
+                flat = lg.reshape(-1, lg.size(-1))
+                tgt = targets[:, k].reshape(-1)
+                pad_id = self.pad_ids[k]
+                ce = F.cross_entropy(flat, tgt, ignore_index=pad_id,
+                                     reduction="none").view(B, L)
+                sel = ((frame[k][None, :] >= la_first)
+                       & (frame[k][None, :] < Tn)
+                       & (targets[:, k] != pad_id))
+                total = total + (ce * sel.to(ce.dtype)).sum(dim=1)
+                count = count + sel.to(ce.dtype).sum(dim=1)
+            return total / count.clamp_min(1e-6)
+        finally:
+            if was_training:
+                self.train()
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
@@ -2745,6 +3157,11 @@ class CodeTransformer(nn.Module):
             f"length_cond={self.length_cond}"
             + (f" (n_len_buckets={self.n_len_buckets})"
                if self.length_cond else "")
+            + (f", seam={self.fim_seam_frames}x{self.fim_seam_weight:g}"
+               if self.fim and self.fim_seam_frames > 0
+               and self.fim_seam_weight != 1.0 else "")
+            + (f", lookahead={self.fim_lookahead}"
+               if self.fim and self.fim_lookahead > 0 else "")
             + (f", rope(decoder, base={self.rope_base:g})" if self.rope
                else ", pos=sinusoidal")
             + hints
