@@ -192,7 +192,13 @@ class TrainModule(pl.LightningModule):
 
         ``Generator.encode_codes`` refuses to run in train mode: the codec
         encoders contain dropout, so codes extracted that way are not the codes
-        ``2_preprocess.py`` stores.
+        ``2_preprocess.py`` stores. It also pins the encode to fp32 internally,
+        which is what keeps this probe comparable to the reference captured in
+        ``on_train_start``: that hook runs *outside* the trainer's autocast,
+        while this one is called from ``validation_step`` (i.e. inside the
+        ``bf16-mixed`` precision context). Without the fp32 pin the bf16 latent
+        canonicalises to a different nearest codebook entry on a few percent of
+        frames and the probe reports a phantom "the codes moved".
         """
         was_training = self.net_g.training
         self.net_g.eval()

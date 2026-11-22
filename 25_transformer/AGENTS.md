@@ -670,6 +670,22 @@ book rather than as a loss spike. The same invariant is re-checkable offline
 with `scratch/check_frozen_codes.py` (graph level, and
 `--checkpoint A --compare B` for two checkpoints).
 
+The probe is called from `validation_step`, which Lightning runs inside the
+`bf16-mixed` precision context (`strategy.validation_step` →
+`precision_plugin.val_step_context()`), while `on_train_start` runs outside it.
+`Generator.encode_codes` therefore pins its encode to fp32 with
+`torch.autocast(enabled=False)` (like `_pitch_codec_forward`), so both captures
+are the same function. Without that pin the bf16 latent picks a different
+nearest codebook entry on a few percent of frames and the probe prints a
+phantom "the codes changed" at every epoch — measured on `base_v0.7`, fp32 vs
+bf16-autocast agrees on 95 % of spec codes but only 70 % of pitch codes (CPU;
+the GPU run logged a constant 0.933 / 0.427 for 500 k steps, i.e. no drift at
+all, which is the signature of a precision artefact rather than a moving
+encoder). A match that is *constant* across epochs is that artefact; a match
+that *falls* is a real freeze bug. Note the training-time `forward` still runs
+its spec encode under the trainer's autocast, so stage-1 trains on bf16-derived
+(≈5-7 % different) spec ids while `2_preprocess.py` extracts fp32 ones.
+
 **What it does not fix.** Fine-tuning only the synthesis path still drifts the
 *old* voices (the `dec` and `spk_emb` rows move), so if old speakers must be
 preserved, mix a few percent of the base corpus into the fine-tune filelist —

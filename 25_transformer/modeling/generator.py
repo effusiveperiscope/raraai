@@ -617,6 +617,17 @@ class Generator(nn.Module):
         would jitter the extracted codes while stage-1 training sees the
         dropped variant.
 
+        The encode also runs with autocast **disabled** (fp32), like
+        ``_pitch_codec_forward``, so the result does not depend on the caller's
+        precision context. `2_preprocess.py` calls this without autocast, but a
+        caller inside `trainer`'s `bf16-mixed` `validation_step` (the
+        ``frozen_code/*`` probe in `1_training.py`) would otherwise quantise a
+        bf16 latent and return a *different* set of nearest-codebook ids for the
+        same weights: measured on `base_v0.7` codes, fp32 vs bf16-autocast
+        agrees on ~95 % of spec codes and only ~70 % of pitch codes (CPU; the
+        GPU run logged 0.933 / 0.427 and, tellingly, the same value at every
+        epoch for 500 k steps). Silent, because the ids are discrete.
+
         Returns (spec_codes, pitch_codes) as (Q, B, T_ds) int tensors.
         """
         if self.training:
@@ -630,13 +641,14 @@ class Generator(nn.Module):
         # `VevoRepCodec.encode_latent` takes no speaker conditioning). That is
         # what lets acoustic fine-tuning retrain the speaker table -- including
         # new rows for a new speaker set -- without moving a single code.
-        (t_frames, t_pad, _, _, _, _, _,
-         spec_codes) = self._spec_encode(spec, spec_l, with_indices=True)
+        with torch.autocast(device_type=spec.device.type, enabled=False):
+            (t_frames, t_pad, _, _, _, _, _,
+             spec_codes) = self._spec_encode(spec, spec_l, with_indices=True)
 
-        f0_aligned = self._align_f0(f0, t_frames)
-        _, px_ds, _ = self._pitch_encode_inputs(f0_aligned, t_pad)
-        _, _, _, _, pitch_codes = self.pitch_codec.encode_latent(
-            px_ds, with_indices=True)
+            f0_aligned = self._align_f0(f0, t_frames)
+            _, px_ds, _ = self._pitch_encode_inputs(f0_aligned, t_pad)
+            _, _, _, _, pitch_codes = self.pitch_codec.encode_latent(
+                px_ds, with_indices=True)
         return spec_codes, pitch_codes
 
     def infer_from_codes(self, spec_codes, pitch_codes, sid,
