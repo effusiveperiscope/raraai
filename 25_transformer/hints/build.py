@@ -934,6 +934,19 @@ def main(argv=None) -> int:
         items = items[: args.limit]
     transcripts = (read_transcripts(args.source_filelist)
                    if ("semantic" in hints or args.words) else {})
+    if args.words and not transcripts:
+        # ``--words`` is a silent no-op without transcripts: ``rec["text"]`` is
+        # None for every clip, so no word keys are added to ``want`` and
+        # ``word_jobs`` stays empty -- the run then "succeeds" having done the
+        # clip-level pass only.  That is never what the caller meant (the usual
+        # cause is pointing --source-filelist at a stage-1 list, which is
+        # ``audio|sid`` with no text column), so refuse up front.
+        p.error(
+            "--words needs transcripts, but no line of --source-filelist has "
+            "a text column (expected `audio_path|sid|text`). The word pass "
+            "would silently do nothing. filelists_1/*.txt are `audio|sid` "
+            "only -- use the matching stage-2 list, e.g. "
+            "filelists_2/genshin_full_eng_text_linux.txt.")
     source_audio = (read_source_audio(args.source_filelist)
                     if (args.audio_fallback and "intensity" in hints) else {})
     print(f"{len(items)} clip(s) from {len(args.filelist)} filelist(s)")
