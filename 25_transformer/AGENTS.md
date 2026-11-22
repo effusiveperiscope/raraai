@@ -1436,35 +1436,66 @@ a *batch-independent* per-step loop.
 
 ### Conditioning-hint tensors (stage 2, `.cond`)
 
-`hints/build.py` writes a sibling `<base>.cond` next to each `<base>.phone_ids`,
-from artefacts that already exist on disk -- no source audio, no ASR and no
-aligner:
+`hints/build.py` writes a sibling `<base>.cond` next to each `<base>.phone_ids`.
+Its four modes all **merge** into the same file, so a corpus is built in stages
+and each stage only tops up the keys it owns:
+
+| mode | writes | needs |
+|---|---|---|
+| default | clip-level `intensity`, `register_st` (`semantic` only when `--hints semantic`) | `<base>.wave` / `.f0` in `--wave-dir`, or source audio for intensity |
+| `--words` | `phone_word_idx`, `word_start_f`, `word_slot_f`, `pitch_word_st`, `pitch_word_voiced`, the V2 `pitch_anchors_*` | `--source-filelist` transcripts + audio; Qwen forced aligner |
+| `--word-bert` | `word_bert` | `--source-filelist`, the existing word fields, `transformers` |
+| `--fit-edges-only` | nothing — refits the level edges in `hints.json` | existing `.cond` files |
+
+The default run uses only artefacts that already exist on disk:
 
 ```
 <wave_dir>/<base>.wave    48 kHz waveform (1_preprocess.py)
 <wave_dir>/<base>.f0      100 Hz f0 in Hz, 0 = unvoiced (1_preprocess.py)
-filelists_2/*.txt         path|sid|transcript   (sentence vector only)
+filelists_2/*.txt         path|sid|transcript   (semantic / word passes)
 ```
 
-Contents, all **continuous** (the dataset buckets at load time, so the number of
-levels is a config change and never a re-run):
+No source audio and no aligner are touched *by the default run*. Source audio is
+available for all four source corpora (`filelists_2/*_linux.txt`): Genshin
+106 229, MLP 35 543, VCTK 43 885, Expresso-read 11 596 lines, ~100 % present on
+this box. Stage-1 `.wave`/`.f0` tensors only exist for Genshin and MLP, so
+`build.py` has an audio fallback: when `<base>.wave` is missing it reads the
+clip's own file from `--source-filelist` (`--no-audio-fallback` disables). The
+intensity hint is defined on the waveform, so that is an equivalent input;
+`register` still needs an `.f0` (it comes free for the other corpora at the
+alignment pass, which computes f0 anyway).
+
+Contents (all optional; a missing key means "hint not provided"). The
+clip-level and per-word values are **continuous** — the dataset buckets them at
+load time, so the number of levels is a config change and never a re-run:
 
 | key | type | meaning |
 |---|---|---|
-| `version` | int | 1 |
+| `version` | int | 2 (the `.cond` layout with word fields / pitch anchors) |
 | `n_phone` | int | `phone_ids.numel()`, the staleness anchor |
 | `intensity` | float32(1) | calibrated + whisper-gated DSP prediction of **perceptual intensity** (emotional / phonation effort, 1..9). **Not loudness** — the feature set peak-normalises every clip on purpose. A deliberately coarse, *clip-level*, end-user control, not a reconstruction aid |
-
-| `register_st` | float32(1) | voiced-median f0, semitones re: 100 Hz |
+| `register_st` | float32(1) | voiced-median f0, semitones re: 100 Hz (absolute on disk even with `--relative-register`) |
 | `semantic` | float16(384) | bge-small-en-v1.5 CLS embedding. **Removed in V2.2** — old `.cond` files still carry it, nothing reads it (see §4) |
-| `word_bert` | float16(n_word, 768) | **V2.1** per-word `bert-base-uncased` last-hidden-state mean (hints/build.py `--word-bert`, text only) |
+| `phone_word_idx` | int16(n_phone) | word index of each phone (`--words`) |
+| `word_start_f` | int32(n_word) | word start in code frames (`--words`) |
+| `word_slot_f` | int32(n_word) | start-to-start word slot in code frames (`--words`) |
+| `pitch_word_st` | float16(n_word) | word voiced-mean f0, semitones re the utterance's voiced median; NaN if unvoiced (`--words`) |
+| `pitch_word_voiced` | bool(n_word) | whether the word has any voiced frame (`--words`) |
+| `pitch_anchors_st` / `pitch_anchors_pos` | float16(n_word, A) | up to A `(value, position)` points of the word's f0 contour; position is a fraction of the word span (`--words`) |
+| `pitch_anchor_n` | int8(n_word) | valid anchors; **0 = the word is unvoiced** (`--words`) |
+| `word_bert` | float16(n_word, 768) | **V2.1** per-word `bert-base-uncased` last-hidden-state mean (`--word-bert`, text only) |
 
 `hints.json` (next to the first `--filelist`, or `--hints-json`) carries the
-provenance (DSP tier/calibration/gate, semantic model id), coverage, and the
-**level edges** per hint. They are equal-frequency quantiles of the corpus on
+provenance (DSP tier/calibration/gate, semantic model id), coverage, the
+**level edges** per hint, and the word layout (aligner id, code frame rate, pitch
+edges, slot-bucket count, anchor count and detector settings) plus the
+`--word-bert` model/dim. The edges are equal-frequency quantiles of the corpus on
 purpose: the DSP intensity regression is compressed (measured on the upstream
 val slice, `dsp = 2.07 + 0.512 * label`, pred std 0.71 vs label std 0.93), so
 fixed-width bins on the 1-9 scale would leave most of the level table unused.
+`--relative-register` fits the register edges on the **deviation from each
+speaker's median** and stores one offset per speaker in
+`levels.register.speaker_means` (see §4); the `.cond` value stays absolute.
 
 `hints/` is a port of `/mnt/data/Code/raraai/20_intensity_annotation` and is
 **offline only** -- nothing that trains or runs stage 2 imports it; they read the
@@ -1472,21 +1503,29 @@ tensors. Two deviations from upstream, both in `hints/README.md`: the shipped
 model was re-fitted under scikit-learn 1.9 (the upstream pkl was written by
 1.7.2 and no longer unpickles), and the register hint uses the median voiced f0.
 
-Word-level `pitch_word` / `phone_word_idx` / `word_start_f` / `word_slot_f` are
-written by the **`--words` pass** (not by the default run): it needs
-forced-alignment word timestamps, so `python hints/build.py ... --words` calls
-`FeatureExtractor.extract` per clip (the aligner is given the transcript from
-`--source-filelist`, so no ASR runs) and `FeatureExtractor.hint_words` turns the
-items into the fields. It is sequential on one GPU (~5 clips/s once warm
-measured, i.e. ~9-20 h for the 151 k-clip corpus) and it **merges** into the
-existing `.cond` instead of replacing it, so a `--words`-only re-run keeps the
-clip-level hints. Three properties make a multi-hour run safe to interrupt:
+Word-level fields are written by the **`--words` pass** (not by the default
+run): it needs forced-alignment word timestamps, so `python hints/build.py ...
+--words` calls `FeatureExtractor.extract` per clip (the aligner is given the
+transcript from `--source-filelist`, so no ASR runs) and
+`FeatureExtractor.hint_words` turns the items into `phone_word_idx` /
+`word_start_f` / `word_slot_f` / `pitch_word_st` / `pitch_word_voiced` and the
+V2 anchors (`--pitch-anchors`, default 3; must match
+`transformer.hint_pitch_anchors`). It is sequential on one GPU (~5 clips/s once
+warm measured, i.e. ~9-20 h for the 151 k-clip corpus) and it **merges** into
+the existing `.cond` instead of replacing it, so a `--words`-only re-run keeps
+the clip-level hints. `--skip-existing` requires the anchor keys too, so a v1
+file is rebuilt rather than left on the one-anchor fallback; `--force` redoes
+the word fields for clips that already have them. The `--word-bert` pass is a
+separate **text-only** merge (no audio, no aligner; ~10 min for 151 k clips at
+~290 clips/s on a 5060 Ti) that needs the fields above so it can align one
+vector per word; see §"Per-word semantic state" for the model contract. Three
+properties make a multi-hour run safe to interrupt:
 
 - **Writes are incremental, at every stage.** `build.py` flushes the audio stage
   in waves of `FLUSH_EVERY` (2000) clips, flushes every clip-level record after
   the embedding stage, and writes each clip's `.cond` immediately after its words
   are computed — so an interruption costs minutes, never the run. `--skip-existing`
-  resumes from disk and only redoes clips whose `phone_word_idx` is missing.
+  resumes from disk and only redoes clips whose requested keys are missing.
   Measured: killing a 200-clip run at 139 left 139 valid files and the resume
   finished the rest; with a 100-clip wave, files appear while the audio stage is
   still at 195/400. `coverage.clips_written` counts files and `coverage.writes`
@@ -1500,8 +1539,9 @@ clip-level hints. Three properties make a multi-hour run safe to interrupt:
   `--skip-existing` resume means only a subset of clips contributed values, so
   the existing `hints.json` edges are kept (printed as a NOTE). Equal-frequency
   edges are corpus-wide quantiles — refitting them on the last few clips would
-  renumber every level for every clip. `--fit-edges-only` refits from every
-  `.cond` on disk after a sharded run.
+  renumber every level for every clip. After a sharded/multi-GPU build (run with
+  `--no-edges`), `--fit-edges-only` refits them from every `.cond` on disk, adds
+  `coverage`, and writes `hints.json` without touching audio or any model.
 
 The invariant that makes this safe: **both paths tokenize the words as one
 sentence**. `phonemize_items` builds the sentence phone string and tokenizes it
@@ -1521,26 +1561,16 @@ the aligner's own token list is used, so a word it cannot place is genuinely
 missing -- that is a data difference, not a tokenization one.
 
 **Two ways in, one implementation.** `hints/build.py` is the offline/bulk path
-(parallel, no source audio needed); `features.py` exposes the same helpers as
-`hint_intensity` / `hint_register` / `hint_semantic` / `hint_word_bert` /
-`hint_words` / `extract_hints` (+ `hint_level` / `load_hint_levels` for
-bucketing and `write_hints` for saving), which is the entry point for an
-inference UI. Those
+(parallel for the clip-level hints; the word passes are sequential, as their
+models are); `features.py` exposes the same helpers as `hint_intensity` /
+`hint_register` / `hint_semantic` / `hint_word_bert` / `hint_words` /
+`extract_hints` (+ `hint_level` / `load_hint_levels` for bucketing and
+`write_hints` for saving), which is the entry point for an inference UI. Those
 wrappers import `hints/` **lazily**, because it adds parselmouth (Praat) and
 loads the DSP / bge models -- scikit-learn and pandas are already pulled in by
 `g2p_en`, so they are not the reason. `test_hints.py` asserts that
 `extract_hints` and `hints/build.py` produce the *same* numbers for the same
 clip (and the same 384-d semantic vector bit-for-bit).
-
-**Source audio is available** for all four source corpora
-(`filelists_2/*_linux.txt`): Genshin 106 229, MLP 35 543, VCTK 43 885,
-Expresso-read 11 596 lines, ~100 % present on this box. Stage-1 `.wave`/`.f0`
-tensors only exist for Genshin and MLP, so `build.py` has an audio fallback:
-when `<base>.wave` is missing it reads the clip's own file from
-`--source-filelist` (`--no-audio-fallback` disables). The intensity hint is
-defined on the waveform, so that is an equivalent input; `register` still needs
-an `.f0` (it comes free for the other corpora at the alignment pass, which
-computes f0 anyway).
 
 ### Conditioning hints in the model (stage 2, v0.8)
 
@@ -2404,13 +2434,19 @@ python scratch/merge_lora.py \
 # Conditioning hints for stage 2: one <base>.cond per <base>.phone_ids.
 # intensity/register come from the stage-1 tensors; `semantic` is still
 # computable but no longer consumed (removed in V2.2), so it is not the default.
-# --words adds the per-word pitch/timing fields via the aligner (needs the
-# transcripts; merges into the existing .cond) and drops clips whose phone_ids
-# are stale.  Resumable: re-run the SAME command with --skip-existing.
+# --words adds the per-word pitch/timing fields + V2 anchors via the aligner
+# (needs the transcripts; merges into the existing .cond) and drops clips whose
+# phone_ids are stale.  Resumable: re-run the SAME command with --skip-existing.
 python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
     --wave-dir data/genshin_full_stage1 \
     --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
-    --hints intensity,register --words --device cuda:0
+    --hints intensity,register --words --pitch-anchors 3 --device cuda:0
+
+# Per-word BERT states (Hints V2.1): text only, needs the --words fields above,
+# merges word_bert into each .cond.  Also resumable with --skip-existing.
+python hints/build.py --filelist data/genshin_plus_extras/train_stage2.txt \
+    --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
+    --word-bert --device cuda:0
 
 # Fit the relative register: one semitone offset per speaker plus residual
 # edges.  Pass the *training* split (dataset_codes subtracts these means at load

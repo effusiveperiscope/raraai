@@ -2,25 +2,67 @@
 """Build per-clip conditioning tensors (``.cond``) for the stage-2 transformer.
 
 Reads the stage-2 filelists written by ``2_preprocess.py`` and writes a sibling
-``<base>.cond`` next to each ``<base>.phone_ids``.  Everything it needs already
-exists in the repo:
+``<base>.cond`` next to each ``<base>.phone_ids``.  The default (clip-level) run
+needs only artefacts that already exist in the repo:
 
     <wave_dir>/<base>.wave    48 kHz float32 waveform (1_preprocess.py)
     <wave_dir>/<base>.f0      100 Hz f0 in Hz, 0 = unvoiced (1_preprocess.py)
-    filelists_2/*.txt         ``audio_path|sid|transcript`` (sentence vector)
+    filelists_2/*.txt         ``audio_path|sid|transcript``
 
-so no source audio is touched and no Qwen / aligner weights are loaded.
+When a corpus has no stage-1 tensors on this box, ``--source-filelist`` supplies
+its own audio as an equivalent input for intensity (``--audio-fallback``, on by
+default), plus the transcripts the optional word passes need.
 
-Produced fields (all optional, all *continuous* -- the dataset buckets them at
-load time so the level counts stay a config change, never a re-run):
+Four modes, all merging into the same ``<base>.cond``:
 
-    intensity    float32(1)   calibrated + whisper-gated DSP score, 1..9
-    register_st  float32(1)   utterance voiced mean f0 in semitones re: 100 Hz
-    semantic     float16(384) bge-small-en-v1.5 sentence embedding (CLS, L2)
+    (default)         clip-level hints: intensity and register (``semantic`` is
+                      still writable via ``--hints`` but no longer consumed)
+    --words           per-word timing/pitch + Hints V2 pitch anchors, from the
+                      Qwen forced aligner.  Sequential on ``--device``; needs
+                      ``--source-filelist`` (the aligner is given the transcript,
+                      so no ASR runs) and audio (the .wave or its fallback).
+    --word-bert       per-word ``bert-base-uncased`` states, text only.  Needs
+                      the ``--words`` fields, ``--source-filelist`` and
+                      transformers; no audio and no aligner.
+    --fit-edges-only  compute nothing: read every existing .cond and fit the
+                      equal-frequency level edges into ``hints.json`` (the step
+                      a sharded build needs afterwards).
 
-Not produced here: ``pitch_word`` / ``phone_word_idx`` / ``word_start_f`` /
-``word_slot_f``.  Those need forced-alignment word timings; see
-``hints/README.md`` for the command and why that is a separate pass.
+Produced fields (all optional; the dataset treats a missing key as "hint not
+provided").  Continuous values are bucketed by the dataset at load time, so the
+level counts stay a config change, never a re-run:
+
+    version           int               2 (current layout; word fields/anchors if written)
+    n_phone           int               phone_ids.numel(), the staleness anchor
+    intensity         float32(1)        calibrated + whisper-gated DSP score, 1..9
+    register_st       float32(1)        utterance voiced-median f0, semitones re: 100 Hz
+    semantic          float16(384)      legacy bge-small-en-v1.5 sentence CLS
+                                        (still writable, no longer consumed)
+    phone_word_idx    int16(n_phone)    word index of each phone               [--words]
+    word_start_f      int32(n_word)     word start, code frames                [--words]
+    word_slot_f       int32(n_word)     start-to-start slot, code frames       [--words]
+    pitch_word_st     float16(n_word)   word voiced-mean st re the utterance   [--words]
+    pitch_word_voiced bool(n_word)                                             [--words]
+    pitch_anchors_st  float16(n_word, A) anchor values, st                     [--words]
+    pitch_anchors_pos float16(n_word, A) anchor positions, word fraction       [--words]
+    pitch_anchor_n    int8(n_word)       valid anchors; 0 = unvoiced           [--words]
+    word_bert         float16(n_word, 768) per-word BERT last-hidden mean      [--word-bert]
+
+``hints.json`` (next to the first ``--filelist``, or ``--hints-json``) records
+the DSP provenance, coverage, the per-hint level ``edges`` and the ``--words``
+layout (aligner id, code frame rate, pitch edges/slot buckets, anchor count and
+detector settings) plus the ``--word-bert`` model/dim.  With
+``--relative-register`` the register edges are fitted on the deviation from each
+speaker's median and one offset per speaker is stored in
+``levels.register.speaker_means``; the ``.cond`` values themselves stay absolute.
+
+``--skip-existing`` reuses a ``.cond`` that already holds every requested key
+(for ``--words`` that includes the anchor keys, so a v1 file is rebuilt), and
+``--force`` redoes the word fields on top of that.  Every stage writes
+incrementally (audio in waves of ``FLUSH_EVERY`` clips, then each clip's words
+as soon as they align), so an interrupted multi-hour run loses minutes and
+resumes from disk.  A partial run (``--limit`` or reused clips) keeps the
+existing level edges instead of refitting corpus-wide quantiles from a subset.
 
 Usage::
 
@@ -30,7 +72,7 @@ Usage::
         --source-filelist filelists_2/genshin_full_eng_text_linux.txt \
         --limit 5
 
-    # full corpus, 8 workers, bin edges fitted over the union of both splits
+    # full corpus, 8 workers, edges fitted over the union of both splits
     python hints/build.py \
         --filelist data/genshin_plus_extras/train_stage2.txt \
                    data/genshin_plus_extras/val_stage2.txt \
@@ -39,9 +81,12 @@ Usage::
                    filelists_2/mlp_linux.txt \
         --workers 8
 
-Clips whose ``.wave``/``.f0`` is missing (e.g. a corpus whose stage-1 tensors
-are not on this box) are still written with whatever fields *are* available;
-the dataset treats a missing key as "hint not provided".
+    # word fields / anchors (hours; --skip-existing resumes), then BERT states
+    python hints/build.py ... --words --pitch-anchors 3 --device cuda:0
+    python hints/build.py ... --word-bert --device cuda:0
+
+    # after a sharded build: fit the corpus-wide edges from every .cond
+    python hints/build.py ... --fit-edges-only --relative-register
 """
 
 from __future__ import annotations
