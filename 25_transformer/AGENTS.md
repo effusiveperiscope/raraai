@@ -1187,6 +1187,102 @@ restores step 213 710 *and* the cosine position, so with `cosine_anneal_end:
 longer budget means a fresh `exp_name` + `--transfer_from` (no optimizer state)
 with `cosine_anneal_end` sized to the new total.
 
+### LoRA fine-tuning (stage 2, `--finetune`)
+
+`python 2_training.py --config <cfg> --finetune --transfer_from <base>.ckpt`
+switches stage 2 to a **low-rank fine-tune**: `modeling/lora.py` injects adapters
+into the model at construction time, `TrainModule.__init__` freezes everything
+else, and a single AdamW trains only the adapters (plus the speaker tables).
+
+Why it exists: a *full* stage-2 fine-tune overfits a small corpus almost
+immediately.  `transformer_mlp_v1` (41 869 clips, 25 speakers, `lr: 5e-6`)
+reached its val minimum at ~2.6 k steps (`val_loss` 2.25) and then went
+backwards to 2.36 by 15.7 k while train CE fell 2.35 -> 1.96 and
+`val_acc` 0.334 -> 0.317.  The adapters are ~2 % of the parameters and the base
+model (hence the whole stage-1 code space) does not move.
+
+What is adapted (`finetune.targets`):
+
+| target | modules |
+|---|---|
+| `encoder_ffn` / `decoder_ffn` | every block's `linear1`/`linear2` (`LoRALinear`) |
+| `decoder_attn` | the decoder **rotary** self-attention `out_proj` |
+| `decoder_qkv` | the decoder rotary self-attention fused `in_proj_weight` |
+
+The stock `nn.MultiheadAttention` modules (encoder self-attention, decoder
+cross-attention) are deliberately **not** adapted: they never call `out_proj` as
+a module — `F.multi_head_attention_forward` receives its weight tensors — so a
+`LoRALinear` there is inert in eval and training (measured: exactly zero effect
+on the module output), and an adapter that a merge cannot fold into a weight is
+a silent-correctness trap.  Adapting one means reimplementing
+`nn.MultiheadAttention.forward`.  A requested target that matches no module
+(e.g. `decoder_qkv` with `rope: false`) raises instead of silently training
+fewer adapters than the config names.
+
+Two model-level details that make "trained == evaluated" hold:
+
+- `LoRALinear` **adopts** the original `weight`/`bias` parameters instead of
+  wrapping the module in a child, so `state_dict()` keys are unchanged
+  (`...linear1.weight`, not `...linear1.base.weight`).  That is what lets
+  `--transfer_from` load a plain checkpoint into a LoRA model (every adapter
+  starts at zero, i.e. an exact identity), and what makes a merge a pure
+  weight fold.
+- injection calls `torch.backends.mha.set_fastpath_enabled(False)`.
+  `nn.TransformerEncoderLayer` has a fused **eval** path
+  (`torch._transformer_encoder_layer_fwd`) that reads `linear1/linear2.weight`
+  as tensors and never calls the FFN modules; with it enabled the encoder
+  adapters train and then silently do nothing at inference (measured).  The
+  fast path only exists in eval and the cost is irrelevant next to correctness.
+  (Don't reach for `self_attn._qkv_same_embed_dim = False`: on a stock
+  `nn.MultiheadAttention` that flag selects the separate-projection branch,
+  which asserts because `q_proj_weight` is `None`.  Only the rotary subclass
+  overrides `forward`.)
+
+Optimizer: `configure_optimizers` returns **one** `AdamW` at `finetune.lr`
+(default `5e-4`, *not* `train.lr`; a fresh low-rank weight wants ~1e-3 while a
+full fine-tune of this model uses 5e-6) with a cosine over
+`finetune.cosine_anneal_end` (default: `train.cosine_anneal_end`).  Muon is not
+used — all hidden 2-D matrices are frozen and its `sqrt(rows/cols)` LR scaling
+is meaningless for a rank-16 A/B pair.  Because Lightning returns a bare
+optimizer when there is only one, the manual-optimization loop normalises
+`self.optimizers()` / `self.lr_schedulers()` with `_optimizer_list()`;
+`_clip_and_log_grads(optims)` takes that list and logs `lr_muon` only when it
+exists.  `train.accumulate_grad_batches > 1` stays rejected (manual
+optimization).
+
+Freezing (`freeze_except_adapters`): adapters + `encoder.spk_emb` /
+`decoder.spk_emb` (`finetune.train_spk_emb`, default true — a new corpus has its
+own speaker ids, whose frozen rows would be whatever the base run learned for
+those ids) + optionally `memory_gain/bias`.  Keep `finetune.weight_decay` at 0
+so the (mostly unused) speaker rows are not decayed towards zero.
+
+Checkpoint contract (this is a **new parameter set**):
+
+- fresh `exp_name` + `--transfer_from`; a plain checkpoint cannot be
+  `--resume_from`'d into a LoRA run (strict load misses every adapter), and a
+  LoRA checkpoint into `finetune.enabled: false` is **fatal** — every base key
+  would still match, so the result would silently be the base model.
+- `rank`/`alpha`/`targets` are part of the contract.  `rank` changes adapter
+  shapes (silently skipped on load), `alpha` changes only the scale (would load
+  completely and score a different function).  Both are recorded in the
+  persistent `lora_marker` buffer (`[rank, alpha, n_targets]`) and compared by
+  `modeling.lora.check_lora_layout`, which `2_training.check_special_layout`
+  calls for both resume/transfer directions.
+- `commons.load_state_dict_mismatch` refuses to *skip* adapter keys (it would
+  otherwise be a perfect-looking load of the base model).  That guards the
+  eval/REPL scripts, which bypass `check_special_layout`.
+- `scratch/merge_lora.py --checkpoint <lora>.ckpt --config <run cfg> --out
+  <merged>.ckpt` folds the adapters into the base weights, verifies on a probe
+  batch that a plain model reproduces the adapted one, and writes an ordinary
+  Lightning-style checkpoint.  Use it for downstream tools instead of passing a
+  LoRA checkpoint around.
+- No re-preprocessing: the codes are unchanged.
+
+Config block (`finetune:` at the config root) is documented in
+`configs/transformer.yaml` / `configs/transformer_mlp.yaml`; `--finetune` only
+flips `enabled`, and `--finetune_rank` / `--finetune_lr` override the two knobs
+most useful for a sweep (both imply `--finetune`).
+
 ### Stage-2 step cost, Muon, and metric gating (v0.6)
 
 Two things dominated a stage-2 step that had nothing to do with the model, both
@@ -2100,6 +2196,33 @@ and `test_pitch_anchors.py` guard all of it.
       from an optional argument without calling `_sample_hint_arg` /
       `resolve_hints` -- that is exactly how the mismatch above got in.
 
+23. **`--finetune` (LoRA) is a new parameter set, and its adapters are only ever
+    *additive*.** `finetune.enabled` (see §4 "LoRA fine-tuning") injects
+    `lora_A`/`lora_B`/`lora_qkv_*` tensors plus a persistent `lora_marker`
+    buffer, so a plain checkpoint cannot be `--resume_from`'d into a LoRA run
+    (fresh `exp_name` + `--transfer_from`; the zero-initialised `lora_B` makes
+    that an exact identity).  The reverse direction is **fatal** by design:
+    `check_lora_layout` (and `commons.load_state_dict_mismatch`) refuse to drop
+    trained adapters, because every base key still matches and the result would
+    silently be the base model.  `rank`, `alpha` and `targets` are part of the
+    contract; rank/alpha live in `lora_marker`.  Two sharp edges:
+    - `LoRALinear` adopts the original `weight`/`bias` **parameters** (it is not
+      a child module), so state-dict keys stay unchanged.  Do not "wrap more
+      cleanly" with `self.base = nn.Linear(...)`: every `...linear1.weight`
+      would become `...linear1.base.weight` and `--transfer_from` would drop
+      the whole model.
+    - Torch's fast paths bypass modules, not just kernels: the fused
+      `nn.TransformerEncoderLayer` eval path reads the FFN weight tensors
+      directly, and `nn.MultiheadAttention` reads `out_proj.weight` inside
+      `F.multi_head_attention_forward`.  Injection therefore disables
+      `torch.backends.mha` fast paths and does **not** adapt the stock
+      attention modules.  If you add an adapter to a module torch reads as a
+      tensor, verify it in **eval** mode (training alone hides it) and make sure
+      `merge_lora` can fold it into a weight.
+    - `scratch/merge_lora.py` is the way to hand a fine-tuned model to the
+      eval/REPL scripts; passing an unmerged LoRA checkpoint to a config without
+      `finetune.enabled` is the failure these guards exist for.
+
 
 
 ---
@@ -2183,6 +2306,19 @@ python 2_preprocess.py --filelist filelists_2/25_stage2_base1.txt \
     --output_dir data/base2 --checkpoint checkpoints_stage1/base_v0.4/last.ckpt \
     --config configs/base.yaml --speaker_map speakers.json
 python 2_training.py --config configs/transformer.yaml
+
+# LoRA fine-tune (see §4 "LoRA fine-tuning"): ~2 % trainable, base frozen, so a
+# small corpus stops memorising.  Fresh exp_name + --transfer_from (a plain
+# checkpoint cannot be --resume_from'd into the adapters and vice versa is a
+# hard error).  Set train.max_steps / finetune.cosine_anneal_end to the short
+# budget you actually want; the flag only flips finetune.enabled.
+python 2_training.py --config configs/transformer_mlp.yaml --finetune \
+    --transfer_from checkpoints_stage2/transformer_mlp_v1/best-checkpoint.ckpt
+# ...fold the adapters into an ordinary checkpoint for eval/REPL (verifies on a
+# probe batch that a plain model reproduces the merged one before writing):
+python scratch/merge_lora.py \
+    --checkpoint checkpoints_stage2/transformer_mlp_v2_lora/last.ckpt \
+    --config configs/transformer_mlp.yaml --out /tmp/merged.ckpt
 
 # Conditioning hints for stage 2: one <base>.cond per <base>.phone_ids.
 # intensity/register come from the stage-1 tensors; `semantic` is still
@@ -2366,6 +2502,11 @@ python scratch/eval_stage2_wer.py --hints \
 # apply_fim reorder + length buckets, mixed AR+FIM loss, sentinel masking in
 # generate, infill, and infill's per-column tags matching the training path
 python test_fim.py
+
+# LoRA fine-tune smoke test (CPU): base keys preserved + exact identity at init,
+# freezing, adapter gradients, merge == plain model (incl. rotary qkv), and all
+# checkpoint/rank/alpha/target guards
+python test_lora.py
 
 # Phonemization smoke test: both stage-2 paths (transcript-only vs aligner),
 # per-word word|tag|phones tables plus PASS/FAIL checks and a cross-path diff

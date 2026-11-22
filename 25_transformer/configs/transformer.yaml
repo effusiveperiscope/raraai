@@ -313,6 +313,60 @@ gen:
   upsample_rates: [12, 10, 2, 2]
   upsample_input: 192
 
+# ----------------------------------------------------------- finetune ----
+# LoRA fine-tuning (``python 2_training.py --finetune --transfer_from <ckpt>``,
+# see modeling/lora.py).  The flag is a *training mode*, not part of the model
+# definition: adapters are injected into the model tree when ``enabled`` is
+# true, everything else is frozen, and a single AdamW at ``lr`` (below) trains
+# only the adapters plus the speaker rows.
+#
+# Why: a full fine-tune of this 136 M-parameter model on a small corpus overfits
+# within a few thousand steps (measured on ``transformer_mlp_v1``: train CE
+# 2.35 -> 1.96 while val CE turned around at ~2.6 k steps, 2.25 -> 2.36 by
+# 15.7 k).  With ``lora_B`` zero-initialised the adapters start as an exact
+# identity, so ``--transfer_from`` reproduces the base checkpoint bit-for-bit.
+#
+# Contract: this changes the *parameter set*, so
+#   * a plain checkpoint cannot be ``--resume_from``'d into a LoRA run (use
+#     ``--transfer_from`` with a fresh ``exp_name``);
+#   * a LoRA checkpoint into ``enabled: false`` is a hard error (dropping the
+#     adapters would silently evaluate the base model);
+#   * ``rank``/``alpha``/``targets`` are part of that contract and are checked
+#     in ``2_training.check_special_layout`` (rank/alpha are recorded in the
+#     ``lora_marker`` buffer).
+# No re-preprocessing: the codes and the whole code space are untouched.
+finetune:
+  enabled: false
+  # What to adapt.  encoder_ffn / decoder_ffn wrap the FFN nn.Linear modules of
+  # every block; decoder_attn wraps the rotary self-attention out_proj and
+  # decoder_qkv adds a low-rank delta to its fused qkv projection (both need
+  # transformer.rope: true).  The *stock* nn.MultiheadAttention modules (encoder
+  # self-attention, decoder cross-attention) are not adapted on purpose: they
+  # never call out_proj as a module (torch passes its weight tensors into
+  # F.multi_head_attention_forward), so an adapter there would be silently
+  # inert -- see modeling/lora.py.  A target that matches no module is an error,
+  # so a config cannot train fewer adapters than it names.
+  targets: [encoder_ffn, decoder_ffn, decoder_attn, decoder_qkv]
+  rank: 16
+  alpha: 32.0
+  # Dropout on the adapter's *input* (training only); the base path is frozen.
+  dropout: 0.05
+  # Unfreeze both speaker-embedding tables: a new corpus usually has its own
+  # speaker ids, and their frozen rows would be whatever the base run learned
+  # for those ids.  Keep weight_decay at 0 so the (mostly unused) rows are not
+  # decayed towards zero.
+  train_spk_emb: true
+  # The 2 * hidden_size memory_norm gains (tiny, off by default).
+  train_memory_norm: false
+  # Separate from train.lr: 5e-6 is the operating point of a *full* fine-tune,
+  # while fresh low-rank weights want ~1e-3.
+  lr: 5.0e-4
+  weight_decay: 0.0
+  # Cosine budget for this mode; null -> train.cosine_anneal_end.  A fine-tune
+  # is short, so set this (and train.max_steps) to the number of steps you
+  # actually want -- the anneal is periodic, see the note under train.
+  cosine_anneal_end: null
+
 # -------------------------------------------------------------- train ----
 train:
   # 48 on 5090, 24 on 5060Ti at max_frames 256.  At 512 the decoder is
@@ -608,4 +662,4 @@ train:
   ood_samples: 1
   ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
   ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
-  ood_sid: 612             # null -> speaker of the first sampled val item
+  ood_sid: 0             # null -> speaker of the first sampled val item

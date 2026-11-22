@@ -50,6 +50,8 @@ import pytorch_lightning as pl
 from commons import (load_state_dict_mismatch, load_submodule_prefix,
                      matplotlib_to_tensorboard)
 from dataset_codes import CodeCollator, CodeDataset
+from modeling.lora import (check_lora_layout, freeze_except_adapters,
+                           lora_parameters, resolve_config as resolve_finetune)
 from modeling.transformer import CodeTransformer, expand_state_dict_with_special
 
 import ultimate_xc
@@ -255,6 +257,21 @@ def plot_mel_comparison_figure(audio_ref, audio_pred, sampling_rate,
     return fig
 
 
+def _optimizer_list(optims):
+    """Normalise Lightning's ``optimizers()`` / ``lr_schedulers()`` return value.
+
+    Lightning returns a single object when ``configure_optimizers`` supplied
+    one, and a list otherwise.  Stage 2 has two optimizers normally and one in
+    fine-tune mode, so every consumer has to handle both shapes (indexing a bare
+    optimizer would silently index its *parameter groups*).
+    """
+    if optims is None:
+        return []
+    if isinstance(optims, (list, tuple)):
+        return list(optims)
+    return [optims]
+
+
 class _LayoutGuard:
     """Mixin: survive a checkpoint whose optimizer *layout* changed.
 
@@ -376,6 +393,36 @@ class TrainModule(pl.LightningModule):
                   f"{100 * self.cf_rate:.0f}% of steps, channels "
                   f"{self.cf_channels} (weight {self.cf_weight})")
 
+        # ---- fine-tuning mode (--finetune, LoRA) -------------------------- #
+        # The adapters themselves are injected by ``CodeTransformer.__init__``
+        # (so every reader of the same config sees the same parameter names);
+        # this freezes everything else and owns the optimizer.  See
+        # modeling/lora.py for the rationale and the checkpoint contract.
+        ft_raw = config.get("finetune", None)
+        self.finetune_enabled = bool(getattr(net, "lora_enabled", False))
+        self.finetune_cfg = None
+        if self.finetune_enabled:
+            self.finetune_cfg = resolve_finetune(
+                ft_raw if ft_raw is not None else net.lora_config)
+            counts = freeze_except_adapters(net, ft_raw)
+            if counts["trainable"] <= 0:
+                raise ValueError(
+                    "finetune is enabled but freezes every parameter: no "
+                    "adapter was injected.  Check finetune.targets "
+                    "(decoder_qkv needs transformer.rope: true) and that the "
+                    "config the model was built from is the same one.")
+            ft = self.finetune_cfg
+            print(f"Finetune: LoRA rank={ft['rank']} alpha={ft['alpha']:g} "
+                  f"dropout={ft['dropout']:g} on "
+                  f"{','.join(ft['targets'])}; "
+                  f"trainable {counts['trainable']/1e6:.2f} M / "
+                  f"{counts['total']/1e6:.1f} M "
+                  f"({100.0 * counts['trainable'] / max(counts['total'], 1):.2f} %: "
+                  f"lora {counts['lora']/1e6:.2f} M, "
+                  f"spk_emb {counts['spk_emb']/1e6:.2f} M, "
+                  f"memory_norm {counts['memory_norm']} params) "
+                  f"@ lr={ft['lr']:g}")
+
         # Learning-rate schedule end.  ``CosineAnnealingLR`` is *periodic* with
         # period ``2 * T_max``: past ``cosine_anneal_end`` the LR does not stay
         # at ``eta_min``, it climbs back towards its base value (reaching it at
@@ -387,6 +434,10 @@ class TrainModule(pl.LightningModule):
         # already be past it) and at the step it is crossed.
         self.anneal_end = int(
             config.train.get("cosine_anneal_end", 1000000) or 0)
+        if self.finetune_cfg and self.finetune_cfg["cosine_anneal_end"]:
+            # A fine-tune is short, so its own budget defaults to the *global*
+            # one but can be shortened without touching the base config.
+            self.anneal_end = int(self.finetune_cfg["cosine_anneal_end"])
         self._anneal_warned = False
 
         # Muon's Newton-Schulz iteration count (see configure_optimizers). Its
@@ -408,6 +459,9 @@ class TrainModule(pl.LightningModule):
         # rejects that with automatic optimization ("Training with multiple
         # optimizers is only supported with manual optimization").  We
         # therefore own zero_grad / backward / clip / step, see training_step.
+        # Fine-tune mode (`--finetune`) returns a *single* AdamW but keeps the
+        # manual loop, so there is one code path and no "which mode am I in?"
+        # branch in the step accounting.
         # NB: Lightning does not call `on_before_optimizer_step` in manual
         # optimization, which is why the clipping moved into
         # `_clip_and_log_grads` (called explicitly before stepping).
@@ -806,7 +860,14 @@ class TrainModule(pl.LightningModule):
         forward+backward FLOPs, delivered as 5 iterations x 3 matmuls x 119
         parameters in a per-parameter Python loop (``torch.optim.Muon`` has no
         ``foreach`` path).  Dropping to 3 steps removes 40 % of that.
+
+        In fine-tune mode (``--finetune``) every hidden 2-D matrix is frozen, so
+        Muon has nothing to orthogonalise and the run uses a single AdamW over
+        the adapters (plus the unfrozen speaker rows) at ``finetune.lr``.  See
+        ``_configure_finetune_optimizer``.
         """
+        if self.finetune_enabled:
+            return self._configure_finetune_optimizer()
         muon_params, adamw_params = self._split_params()
         if not muon_params or not adamw_params:
             raise ValueError(
@@ -850,6 +911,46 @@ class TrainModule(pl.LightningModule):
               f"(weight_decay={weight_decay:g})")
         return [optim_adamw, optim_muon], [sched_adamw, sched_muon]
 
+    def _configure_finetune_optimizer(self):
+        """One AdamW over the LoRA adapters (``--finetune``).
+
+        Muon is deliberately not used: it is defined for the hidden linear maps,
+        which are all frozen here, and its ``_adjust_lr`` scaling
+        (``sqrt(rows/cols)``) is meaningless for a rank-16 A/B pair.  The
+        adapters are small (a few M parameters), so the step cost of this mode
+        is essentially the frozen base model's forward+backward.
+
+        ``finetune.lr`` is a *separate* knob from ``train.lr`` (the base run's
+        schedule is not the right operating point for fresh low-rank weights:
+        measured full-fine-tunes of this model use 5e-6, while LoRA wants ~1e-3).
+        """
+        ft = self.finetune_cfg
+        params = [p for p in self.net.parameters() if p.requires_grad]
+        if not params:
+            raise ValueError(
+                "finetune is enabled but no parameter has requires_grad=True; "
+                "check finetune.targets and transformer.rope (decoder_qkv only "
+                "exists on the rotary attention).")
+        n_params = sum(p.numel() for p in params)
+        n_lora = sum(p.numel() for p in lora_parameters(self.net))
+        anneal_end = int(
+            ft["cosine_anneal_end"]
+            or self.config.train.get("cosine_anneal_end", 1000000))
+        optim = LayoutCheckedAdamW(
+            params,
+            lr=ft["lr"],
+            betas=tuple(self.config.train.betas),
+            eps=float(self.config.train.eps),
+            weight_decay=ft["weight_decay"],
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optim, T_max=anneal_end, eta_min=ft["lr"] * 0.01)
+        print(f"Optimizers: AdamW (finetune) {len(params)} tensors "
+              f"({n_params/1e6:.2f} M, of which {n_lora/1e6:.2f} M adapters) "
+              f"@ lr={ft['lr']:g} (weight_decay={ft['weight_decay']:g}), "
+              f"cosine anneal over {anneal_end} steps")
+        return [optim], [sched]
+
     def _apply_muon_settings(self):
         """Re-apply ``train.muon_ns_steps`` after a checkpoint restore.
 
@@ -859,8 +960,8 @@ class TrainModule(pl.LightningModule):
         with, no matter what the config says.  Called from ``on_train_start``,
         which runs after Lightning has restored the optimizers.
         """
-        optims = self.optimizers()
-        if len(optims) < 2:
+        optims = _optimizer_list(self.optimizers())
+        if len(optims) < 2:      # fine-tune mode has a single AdamW
             return
         muon = getattr(optims[1], "optimizer", optims[1])  # unwrap LightningOptimizer
         changed = False
@@ -959,7 +1060,7 @@ class TrainModule(pl.LightningModule):
             return
         self._anneal_warned = True
         if lr is None:
-            optims = self.optimizers()
+            optims = _optimizer_list(self.optimizers())
             adamw = getattr(optims[0], "optimizer", optims[0])
             lr = float(adamw.param_groups[0]["lr"])
         base_lr = float(self.config.train.get("lr", lr))
@@ -1633,7 +1734,7 @@ class TrainModule(pl.LightningModule):
             sq_total = sq if sq_total is None else sq_total + sq
         return None if sq_total is None else sq_total.sqrt()
 
-    def _clip_and_log_grads(self, optim_adamw, optim_muon):
+    def _clip_and_log_grads(self, optims):
         """Clip gradients (if configured), then log norms and learning rates.
 
         Called from ``training_step`` immediately before the optimizers step.
@@ -1645,8 +1746,10 @@ class TrainModule(pl.LightningModule):
         call costs no GPU->CPU sync, and only tensors are compared, so the
         per-step statistic accumulation stays on-device.
 
-        Both optimizers consume the same gradient buffers (disjoint parameter
-        sets, one backward pass), so clipping once covers both updates.
+        Every optimizer consumes the same gradient buffers (disjoint parameter
+        sets, one backward pass), so clipping once covers all updates.
+        ``optims`` is the normalised list from ``_optimizer_list`` (two entries
+        normally, one in fine-tune mode).
 
         Logged: ``train_grad_norm`` (the **pre-clip** norm, i.e. the spike
         detector — unchanged name/meaning from before clipping existed),
@@ -1701,10 +1804,11 @@ class TrainModule(pl.LightningModule):
         if scale is not None:
             self.log("train_grad_clip_scale", scale, on_step=True,
                      on_epoch=False, logger=True)
-        self.log("lr", float(optim_adamw.param_groups[0]["lr"]), on_step=True,
+        self.log("lr", float(optims[0].param_groups[0]["lr"]), on_step=True,
                  on_epoch=False, logger=True)
-        self.log("lr_muon", float(optim_muon.param_groups[0]["lr"]),
-                 on_step=True, on_epoch=False, logger=True)
+        if len(optims) > 1:
+            self.log("lr_muon", float(optims[1].param_groups[0]["lr"]),
+                     on_step=True, on_epoch=False, logger=True)
 
     def training_step(self, batch, batch_idx):
         """Manual optimization: zero_grad -> backward -> clip -> step -> sched.
@@ -1730,12 +1834,14 @@ class TrainModule(pl.LightningModule):
                                  diagnostics=diagnostics)
         self._log_step_metrics("train", out, on_step=True)
 
-        optim_adamw, optim_muon = self.optimizers()
-        sched_adamw, sched_muon = self.lr_schedulers()
+        # One optimizer in fine-tune mode (--finetune), two otherwise; Lightning
+        # returns a bare object for the single case, so normalise.
+        optims = _optimizer_list(self.optimizers())
+        scheds = _optimizer_list(self.lr_schedulers())
         # set_to_none keeps the no-grad buffers unallocated (as Lightning's
         # automatic loop does).
-        optim_adamw.zero_grad(set_to_none=True)
-        optim_muon.zero_grad(set_to_none=True)
+        for optim in optims:
+            optim.zero_grad(set_to_none=True)
 
         loss = out["loss"]
         # `manual_backward` (not `loss.backward()`) so Lightning keeps control
@@ -1769,19 +1875,22 @@ class TrainModule(pl.LightningModule):
                      on_epoch=True, prog_bar=False)
             self.log("train_cf_penalty", penalty.detach(), on_step=True,
                      on_epoch=True, prog_bar=False)
-        self._clip_and_log_grads(optim_adamw, optim_muon)
-        # Step AdamW through its LightningOptimizer wrapper: that is what
-        # advances Trainer.global_step (and hence max_steps,
+        self._clip_and_log_grads(optims)
+        # Step the *first* optimizer through its LightningOptimizer wrapper:
+        # that is what advances Trainer.global_step (and hence max_steps,
         # cosine_anneal_end, every_n_train_steps and the log axis).  Every
-        # wrapper .step() counts one global step, so Muon is stepped through
-        # the wrapped torch optimizer instead — stepping both wrappers would
-        # burn two global steps per batch and silently halve the configured
-        # budget.  Both updates consume the same (already clipped) gradients;
-        # the wrapper only adds step accounting.
-        optim_adamw.step()
-        optim_muon.optimizer.step()
-        sched_adamw.step()
-        sched_muon.step()
+        # wrapper .step() counts one global step, so the rest are stepped
+        # through the wrapped torch optimizer instead — stepping both wrappers
+        # would burn two global steps per batch and silently halve the
+        # configured budget.  All updates consume the same (already clipped)
+        # gradients; the wrapper only adds step accounting.
+        for index, optim in enumerate(optims):
+            if index == 0:
+                optim.step()
+            else:
+                optim.optimizer.step()
+        for sched in scheds:
+            sched.step()
         # One-time warning if this step crossed train.cosine_anneal_end, after
         # which CosineAnnealingLR starts *raising* the LR again (see
         # `_check_anneal_end`); gated so the hot path costs a single int compare.
@@ -2011,9 +2120,39 @@ def parse_args():
     parser.add_argument("--config", type=str, default="configs/transformer.yaml")
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--transfer_from", type=str, default=None)
+    # LoRA fine-tuning (modeling/lora.py).  The flag switches the mode on; the
+    # knobs stay YAML keys so a run is reproducible from its config, because
+    # rank/alpha/targets are part of the checkpoint contract.
+    parser.add_argument("--finetune", action="store_true",
+                        help="train LoRA adapters on a frozen base model")
+    parser.add_argument("--finetune_rank", type=int, default=None,
+                        help="override finetune.rank (implies --finetune)")
+    parser.add_argument("--finetune_lr", type=float, default=None,
+                        help="override finetune.lr (implies --finetune)")
     args = parser.parse_args()
     config = OmegaConf.load(args.config)
     return config, args
+
+
+def apply_finetune_args(config, args):
+    """Fold the ``--finetune*`` flags into ``config.finetune`` in place."""
+    rank = getattr(args, "finetune_rank", None)
+    lr = getattr(args, "finetune_lr", None)
+    if not (getattr(args, "finetune", False) or rank is not None
+            or lr is not None):
+        return config
+    if config.get("finetune", None) is None:
+        config["finetune"] = OmegaConf.create({})
+    config.finetune.enabled = True
+    if rank is not None:
+        if int(rank) <= 0:
+            raise SystemExit(f"--finetune_rank must be > 0, got {rank}")
+        config.finetune.rank = int(rank)
+    if lr is not None:
+        if float(lr) <= 0:
+            raise SystemExit(f"--finetune_lr must be > 0, got {lr}")
+        config.finetune.lr = float(lr)
+    return config
 
 
 def check_special_layout(state_dict, net, source, strict: bool = True):
@@ -2099,6 +2238,14 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                 f"ERROR: {message}  Use --transfer_from {source} instead of "
                 f"--resume_from, or start a fresh exp_name.")
         print(f"NOTE: {message}")
+
+    # ``finetune.enabled`` (LoRA adapters, modeling/lora.py) adds
+    # ``lora_A``/``lora_B``/``lora_qkv_*`` tensors plus a ``lora_marker``
+    # buffer.  Dropping them is silent in the worst possible way: every base key
+    # and shape still matches, so the run would evaluate the *base* model and
+    # report it as the fine-tune.  The check lives in modeling/lora.py so the
+    # CPU test can exercise it without importing this script.
+    check_lora_layout(state_dict, net, source, strict=strict)
 
     # ``transformer.hints`` adds its own tables (no class-count change), so it
     # needs the same treatment -- plus one extra check that length_cond does not
@@ -2290,12 +2437,15 @@ def train(config, resume_from=None, transfer_from=None):
         # checkpoint written by the old single-AdamW code would silently leave
         # Muon's momentum/step counters at zero.  Say so loudly.
         n_opt_states = len(d.get("optimizer_states") or [])
-        if n_opt_states != 2:
+        n_expected = 1 if getattr(net, "lora_enabled", False) else 2
+        if n_opt_states != n_expected:
             print(f"WARNING: {resume_from} contains {n_opt_states} optimizer "
-                  f"state(s), but this code trains with 2 (AdamW + Muon). "
-                  f"Lightning restores them positionally, so the Muon state "
-                  f"cannot be recovered -- prefer --transfer_from if the "
-                  f"checkpoint predates the Muon optimizer.")
+                  f"state(s), but this code trains with {n_expected} "
+                  f"({'a single AdamW in fine-tune mode' if n_expected == 1 else 'AdamW + Muon'}). "
+                  f"Lightning restores them positionally, so the remaining "
+                  f"state cannot be recovered -- prefer --transfer_from if the "
+                  f"checkpoint predates the Muon optimizer (or the --finetune "
+                  f"switch).")
         if d["global_step"] >= config.train.get("max_steps", 1000000):
             print("Maximum steps reached. Exiting.")
             return
@@ -2320,6 +2470,11 @@ def train(config, resume_from=None, transfer_from=None):
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         print("!!! No checkpoint file found - starting from scratch !!!")
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        if getattr(net, "lora_enabled", False):
+            print("WARNING: --finetune without --transfer_from/--resume_from: "
+                  "only the LoRA adapters are trainable, so the whole model "
+                  "would be trained through a ~2 % subspace on a randomly "
+                  "initialised base.  Pass --transfer_from <base>.ckpt.")
 
     training_module = TrainModule(net=net, config=config)
 
@@ -2489,4 +2644,5 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
 
     config, args = parse_args()
+    config = apply_finetune_args(config, args)
     train(config, resume_from=args.resume_from, transfer_from=args.transfer_from)

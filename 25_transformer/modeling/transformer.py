@@ -120,6 +120,11 @@ except ImportError:                     # `python modeling/transformer.py`
                               load_pitch_anchors, load_word_bert_dim,
                               load_word_bert_model)
 
+try:                                    # LoRA fine-tuning (--finetune)
+    from modeling.lora import inject_lora, qkv_delta
+except ImportError:                     # `python modeling/transformer.py`
+    from lora import inject_lora, qkv_delta
+
 
 def _get_cfg(cfg, key, default):
     """Read ``key`` from an OmegaConf/dict/namespace cfg, falling back."""
@@ -250,6 +255,14 @@ class RotaryMultiheadAttention(nn.MultiheadAttention):
         q = F.linear(query, w[:E], None if b is None else b[:E])
         k = F.linear(key, w[E:2 * E], None if b is None else b[E:2 * E])
         v = F.linear(value, w[2 * E:], None if b is None else b[2 * E:])
+        # LoRA qkv adapter (``--finetune``, see modeling/lora.py).  Only this
+        # class gets one: the stock ``nn.MultiheadAttention`` used by the
+        # encoder and the decoder cross-attention reads its fused weight inside
+        # ``F.multi_head_attention_forward``, so adapting it would mean copying
+        # torch internals.  Absent on a normal run.
+        if getattr(self, "lora_qkv_A", None) is not None:
+            dq, dk, dv = qkv_delta(self, query, key, value)
+            q, k, v = q + dq, k + dk, v + dv
         q = q.view(B, L, H, D).transpose(1, 2)
         k = k.view(B, S, H, D).transpose(1, 2)
         v = v.view(B, S, H, D).transpose(1, 2)
@@ -951,6 +964,34 @@ class CodeTransformer(nn.Module):
             self.register_buffer("rope_marker", torch.ones(1),
                                  persistent=True)
 
+        # ---- LoRA fine-tuning adapters (--finetune) ------------------------ #
+        # ``finetune.enabled`` wraps the configured linear layers in
+        # ``LoRALinear`` *here*, i.e. at construction time, so every reader
+        # (training, REPL, eval scripts, probes) that builds the model from the
+        # same config gets the same parameter names.  ``lora_B`` is zero, so an
+        # injected model is exactly its source function; see modeling/lora.py
+        # and ``2_training.check_special_layout`` for the layout guards.
+        # ``finetune`` lives at the config root (next to ``train``), because it
+        # is a training mode rather than a model definition -- but a run that
+        # *saves* adapters has to keep the flag on to reload them.
+        ft_cfg = _get_cfg(config, "finetune", None)
+        self.lora_enabled = False
+        self.lora_config = None
+        if bool(_get_cfg(ft_cfg, "enabled", False)):
+            info = inject_lora(self, ft_cfg)
+            self.lora_enabled = True
+            self.lora_config = dict(info["config"])
+            # Persistent marker *and* contract: rank and alpha change no
+            # parameter shape (alpha only scales the delta), so a checkpoint
+            # whose adapters were trained with another alpha would load
+            # completely and silently score a different function.  The values
+            # live in the buffer so ``check_special_layout`` can compare them.
+            self.register_buffer(
+                "lora_marker",
+                torch.tensor([float(self.lora_config["rank"]),
+                              float(self.lora_config["alpha"]),
+                              float(len(self.lora_config["targets"]))]),
+                persistent=True)
 
         # ---- conditioning-hint tables (v0.8) ------------------------------- #
         # ``hint_monotone`` (v1.1) replaces the two *clip-level* level tables
@@ -2707,6 +2748,8 @@ class CodeTransformer(nn.Module):
             + (f", rope(decoder, base={self.rope_base:g})" if self.rope
                else ", pos=sinusoidal")
             + hints
+            + (f", finetune=lora(r{self.lora_config['rank']})"
+               if self.lora_enabled else "")
             + f", params={n / 1e6:.2f}M)"
         )
 

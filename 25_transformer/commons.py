@@ -150,6 +150,26 @@ def slice_segments_general(x, ids_str, segment_size=4, pad_value=0.0):
 
 def load_state_dict_mismatch(model, state_dict, quiet=False):
     model_state_dict = model.state_dict()
+    # A LoRA checkpoint loaded into a model built without ``finetune.enabled``
+    # looks like a *perfect* load: every base tensor matches, and the adapters
+    # are simply "unexpected keys".  Skipping them means silently evaluating the
+    # base model, so this is the one mismatch that is never forgiven -- not even
+    # with ``quiet=True`` (see modeling/lora.py).
+    dropped_adapters = [
+        k for k in state_dict
+        if (".lora_A" in k or ".lora_B" in k or ".lora_qkv_A" in k
+            or ".lora_qkv_B" in k)
+        and k not in model_state_dict
+    ]
+    if dropped_adapters:
+        raise SystemExit(
+            f"ERROR: {len(dropped_adapters)} LoRA adapter tensor(s) in the "
+            f"checkpoint have no counterpart in this model (e.g. "
+            f"{dropped_adapters[0]}).  Every base weight would still load, so "
+            f"this would silently give you the *base* model.  Build the model "
+            f"with finetune.enabled: true (same rank/alpha/targets as the run), "
+            f"or fold the adapters into a plain checkpoint with "
+            f"scratch/merge_lora.py.")
     filtered_state_dict = {}
     mismatched_keys = []
 

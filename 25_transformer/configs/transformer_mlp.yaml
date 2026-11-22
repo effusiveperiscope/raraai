@@ -299,6 +299,38 @@ gen:
   upsample_rates: [12, 10, 2, 2]
   upsample_input: 192
 
+# ----------------------------------------------------------- finetune ----
+# LoRA fine-tuning: `python 2_training.py --config configs/transformer_mlp.yaml
+# --finetune --transfer_from <base>.ckpt`.  See modeling/lora.py and the long
+# note in configs/transformer.yaml.
+#
+# This block is why the run exists: a full fine-tune of the 136 M-parameter
+# model on the MLP corpus (41 869 clips, 25 speakers) overfits within a few
+# thousand steps -- on transformer_mlp_v1 train CE went 2.35 -> 1.96 while val
+# CE turned around at ~2.6 k steps (2.25) and rose to 2.36 by 15.7 k, with
+# val_acc 0.334 -> 0.317.  LoRA freezes the base and trains a ~2 % subspace,
+# which slows that drift without touching the code space (no re-preprocessing).
+#
+# Contract: changes the parameter set -> fresh exp_name + --transfer_from (a
+# plain checkpoint cannot be --resume_from'd into it, and a LoRA checkpoint
+# into enabled: false is fatal).  rank/alpha/targets must match the run.
+finetune:
+  enabled: false
+  # FFN adapters on every block + the rotary decoder self-attention (out_proj
+  # and qkv).  The stock nn.MultiheadAttention modules are not adapted; see the
+  # long note in configs/transformer.yaml / modeling/lora.py.
+  targets: [encoder_ffn, decoder_ffn, decoder_attn, decoder_qkv]
+  rank: 16
+  alpha: 32.0
+  dropout: 0.05
+  # The MLP corpus has its own ids, so the frozen rows would be whatever the
+  # base run learned for them; keep weight_decay 0 (see weight_decay below).
+  train_spk_emb: true
+  train_memory_norm: false
+  lr: 5.0e-4
+  weight_decay: 0.0
+  cosine_anneal_end: null
+
 # -------------------------------------------------------------- train ----
 train:
   # 48 on 5090, 24 on 5060Ti at max_frames 256.  At 512 the decoder is
@@ -594,4 +626,4 @@ train:
   ood_samples: 1
   ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
   ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
-  ood_sid: 612             # null -> speaker of the first sampled val item
+  ood_sid: 3             # null -> speaker of the first sampled val item
