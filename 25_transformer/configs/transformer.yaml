@@ -21,7 +21,7 @@
 # changes positional behaviour without changing a single tensor shape, so a
 # resume would silently continue with the wrong function.  Warm-start it with
 # `--transfer_from checkpoints_stage2/transformer_hints_v2.1_wordsem_b/last.ckpt`.
-exp_name: transformer_hints_v2.2_rope
+exp_name: transformer_hints_v2.3
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -378,7 +378,7 @@ finetune:
   rank: 16
   alpha: 32.0
   # Dropout on the adapter's *input* (training only); the base path is frozen.
-  dropout: 0.05
+  dropout: 0.1
   # Unfreeze both speaker-embedding tables: a new corpus usually has its own
   # speaker ids, and their frozen rows would be whatever the base run learned
   # for those ids.  Keep weight_decay at 0 so the (mostly unused) rows are not
