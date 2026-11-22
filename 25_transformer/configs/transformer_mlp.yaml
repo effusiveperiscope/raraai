@@ -7,7 +7,7 @@
 # Expected filelists (written by 2_preprocess):
 #   data/base/train_stage2.txt
 #   data/base/val_stage2.txt
-exp_name: transformer_mlp_v1
+exp_name: transformer_mlp_lora_v1
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -315,7 +315,7 @@ gen:
 # plain checkpoint cannot be --resume_from'd into it, and a LoRA checkpoint
 # into enabled: false is fatal).  rank/alpha/targets must match the run.
 finetune:
-  enabled: false
+  enabled: true
   # FFN adapters on every block + the rotary decoder self-attention (out_proj
   # and qkv).  The stock nn.MultiheadAttention modules are not adapted; see the
   # long note in configs/transformer.yaml / modeling/lora.py.
@@ -327,7 +327,7 @@ finetune:
   # base run learned for them; keep weight_decay 0 (see weight_decay below).
   train_spk_emb: true
   train_memory_norm: false
-  lr: 5.0e-4
+  lr: 1.0e-4
   weight_decay: 0.0
   cosine_anneal_end: null
 
