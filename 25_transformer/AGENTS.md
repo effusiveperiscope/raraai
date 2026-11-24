@@ -845,6 +845,50 @@ text" (plain AR now always starts where its audio starts). A `fim_rate: 0.0`
 control needs no shape change and can warm-start from the same checkpoint
 (keep `transformer.fim: true`; `apply_fim` then sees an all-False mask).
 
+### Truncated / mismatched transcripts (stage 2)
+
+The v2 corpus was phonemized with `--phones_from transcript`
+(`scratch/v2_pipeline/v2_rebuild.sh`), so the filelist text *is* the stage-2
+conditioning. Many Genshin lines are fragments (16.3 % end in `...`), while the
+audio contains the whole sentence: the model then learns to say only the prefix
+of what it hears, and a WER reference is wrong by construction. Stage 1 is
+unaffected (audio only).
+
+`scratch/audit_transcripts.py` ASRs the **original source audio** (not decoded
+codes) and classifies each line as `match`, `prefix_truncated` (transcript is a
+word-prefix of the ASR), `mismatch`, `asr_short` or `review`, writing a
+resumable JSONL cache, `transcript_drops.txt` (basenames) and
+`wer_references_clean.json` (WER overrides). It is deterministic and resumable;
+run the flagged subset plus a random control first:
+
+```bash
+python scratch/audit_transcripts.py --control 1000 --batch-size 16
+```
+
+Drop-only is the conservative policy: the filelist line is removed, no tensor
+is changed and the existing `phone_ids` of kept clips stay valid. `dataset_codes`
+matches the file by basename (the preprocessed filelist has no audio path);
+`train.transcript_blocklist` points at the drop file. For WER, `drop` mode
+(default) removes untrusted references; `override` mode substitutes the ASR
+text for a truncated/mismatched line (circular and a different word
+denominator -- use it only for diagnostics). `--reference_audit` /
+`train.wer_reference_audit` applies that JSON. Keep a raw-reference arm for
+honest comparisons.
+
+Measured on the flagged subset (ellipsis/dash/open-paren, 18 686 clips) plus
+1 000 no-flag controls, then all 5 137 val clips: short interjections and
+spelling variants (`aw`/`oh`, `alright`/`all right`) are kept via
+character/LCS/interjection checks; the first naive word-WER classifier would
+have dropped 88 % of 1-clip speakers. Final policy drops 1 750 / 183 995 train
+clips (0.95 %) and 162 val clips (3.2 %; 165 references in WER `drop` mode).
+The rate is strongly bucket-dependent -- 79 % of audited 1-clip-speaker clips,
+47 % of 2-5, 16 % of 6-20, 7 % of 21-100, 2.9 % of 100+ -- because rare NPC
+lines are disproportionately fragments/interjections. On a paired 50-utterance
+val sample the reference floor moves 7.65 % -> 7.03 % (71 -> 65 errors); the
+gain is real but small, and the low-data coverage cost is the reason to add a
+recovery path (ASR transcript + re-phonemize, or crop) before relying on
+drop-only for a low-data speaker.
+
 ### Non-speech annotations (stage directions)
 
 The Genshin transcripts write nonverbal sounds as `*sigh*`, `*panting*`,

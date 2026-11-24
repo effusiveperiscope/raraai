@@ -157,6 +157,7 @@ class CodeDataset(Dataset):
         word_crop: bool = True,
         alignment_blocklist: Optional[str] = None,
         stage_direction_blocklist: Optional[str] = None,
+        transcript_blocklist: Optional[str] = None,
     ):
         self.is_train = is_train
         self.max_frames = max_frames
@@ -188,6 +189,23 @@ class CodeDataset(Dataset):
                     line = line.strip()
                     if line and not line.startswith("#"):
                         blocklist.add(_norm_path(line))
+        # Transcript-audit drops (``scratch/audit_transcripts.py``) are keyed by
+        # source basename, because the preprocessed filelist has no audio path.
+        # Match either the full tensor path (like the other blocklists) or the
+        # basename without the ``.phone_ids``/``.spec_codes`` suffix.
+        transcript_bases = set()
+        if transcript_blocklist:
+            if not os.path.exists(str(transcript_blocklist)):
+                print(f"NOTE: transcript_blocklist {transcript_blocklist} does "
+                      f"not exist yet; no transcript drops applied.")
+            else:
+                with open(str(transcript_blocklist), "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        transcript_bases.add(
+                            os.path.basename(_norm_path(line)))
         self.rng = random.Random(random_seed)
         # Length table for the batch sampler (see ``compute_lengths``): the
         # filelist is kept because the cache path is derived from it.
@@ -281,6 +299,15 @@ class CodeDataset(Dataset):
                 if blocklist and _norm_path(parts[0]) in blocklist:
                     self.n_blocklisted += 1
                     continue
+                if transcript_bases:
+                    tb = os.path.basename(_norm_path(parts[0]))
+                    for suffix in (".phone_ids", ".spec_codes", ".pitch_codes"):
+                        if tb.endswith(suffix):
+                            tb = tb[: -len(suffix)]
+                            break
+                    if tb in transcript_bases:
+                        self.n_blocklisted += 1
+                        continue
                 sid = int(parts[3])
                 if self.speaker_map is not None:
                     resolved = speaker_map_lib.resolve_sid(

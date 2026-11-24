@@ -135,6 +135,51 @@ def wer_summary(pairs: Sequence[Tuple[str, str]]) -> Dict[str, float]:
 # --------------------------------------------------------------------------- #
 # Filelists / items
 # --------------------------------------------------------------------------- #
+def apply_wer_reference_audit(refs: Dict[str, str],
+                              audit_path: Optional[str],
+                              mode: str = "drop") -> Dict[str, str]:
+    """Apply ``audit_transcripts.py``'s ``--out-references`` to a ref dict.
+
+    ``mode="drop"`` (default) removes every clip whose reference the audit could
+    not trust (truncated/mismatched/ASR-short) and keeps the original text for
+    the rest; this is the honest benchmark -- the ASR text would be circular
+    (generated audio scored against an ASR transcript) and changes the word
+    denominator.  ``mode="override"`` instead substitutes the ASR text for a
+    truncated/mismatched line and drops only the uncertain ones.
+    """
+    if not audit_path or not os.path.exists(audit_path):
+        return refs
+    import json
+
+    if mode not in ("drop", "override"):
+        raise ValueError(f"reference audit mode must be drop|override, got "
+                         f"{mode!r}")
+    with open(audit_path, "r", encoding="utf-8") as f:
+        audit = json.load(f)
+    untrusted = {"prefix_truncated", "suffix_truncated", "mismatch",
+                 "asr_short", "asr_empty", "empty_reference", "audio_missing"}
+    n_text = n_drop = 0
+    for basename, rec in audit.items():
+        if not isinstance(rec, dict):
+            continue
+        cls = rec.get("class", "")
+        if mode == "drop":
+            if cls in untrusted and refs.pop(basename, None) is not None:
+                n_drop += 1
+            continue
+        if rec.get("drop") or cls in ("asr_empty", "empty_reference",
+                                      "audio_missing"):
+            if refs.pop(basename, None) is not None:
+                n_drop += 1
+        elif rec.get("text"):
+            if basename in refs and refs[basename] != rec["text"]:
+                n_text += 1
+            refs[basename] = rec["text"]
+    print(f"WER reference audit ({mode}): {n_text} corrected, {n_drop} "
+          f"dropped ({audit_path})")
+    return refs
+
+
 def item_basename(path: str) -> str:
     """``data/x/foo.wav.phone_ids`` -> ``foo.wav`` (the source basename)."""
     base = os.path.basename(path)
@@ -229,18 +274,24 @@ def build_wer_dataset(config, *, hints: bool = True, blocklists: bool = True):
 
 def select_items(dataset, refs: Dict[str, str], num_items: int,
                  sid_counts: Optional[Dict[int, int]] = None,
-                 buckets: Optional[Sequence[str]] = None
+                 buckets: Optional[Sequence[str]] = None,
+                 avail: Optional[Sequence[int]] = None,
+                 require_ref: bool = True
                  ) -> Tuple[List[int], List[dict], List[str]]:
     """Pick ``num_items`` val rows that have a reference transcript.
 
-    ``buckets`` restricts to speakers whose TRAINING clip-count bucket
-    (``speaker_bucket(sid_counts[sid])``) is in the given set -- use it to
-    over-sample the low-data speakers that an evenly spaced pick mostly skips
-    (they own few val utterances, so their WER otherwise rests on a handful of
-    words).
+    ``avail`` optionally fixes the candidate pool *before* a reference audit
+    dropped/replaced entries.  With ``require_ref=False`` the evenly spaced pick
+    is made over the whole pre-audit pool and dropped entries are then removed
+    from it, so the audit arm scores a *subset of the raw arm's utterances*
+    (paired) instead of shifting every index.
     """
-    avail = [i for i in range(len(dataset))
-             if item_basename(dataset.items[i]["spec_codes"]) in refs]
+    if avail is None:
+        avail = [i for i in range(len(dataset))
+                 if item_basename(dataset.items[i]["spec_codes"]) in refs]
+    elif require_ref:
+        avail = [i for i in avail
+                 if item_basename(dataset.items[i]["spec_codes"]) in refs]
     if buckets:
         allowed = set(buckets)
         counts = sid_counts or {}
@@ -253,6 +304,9 @@ def select_items(dataset, refs: Dict[str, str], num_items: int,
             "with the filelist(s) the val set came from (they need "
             "'path|sid|text' lines).")
     picked = pick_indices(avail, num_items)
+    if not require_ref:
+        picked = [i for i in picked
+                  if item_basename(dataset.items[i]["spec_codes"]) in refs]
     items = [dataset[i] for i in picked]
     texts = [refs[item_basename(dataset.items[i]["spec_codes"])]
              for i in picked]

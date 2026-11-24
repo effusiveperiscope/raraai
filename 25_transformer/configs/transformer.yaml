@@ -593,6 +593,11 @@ train:
   # Until then, the blocklist from scratch/find_stage_directions.py drops those
   # clips.  Set this to null when the corpus has been rebuilt.
   stage_direction_blocklist: null
+  # Transcript-audit drops: basenames whose filelist text disagrees with the
+  # spoken audio (scratch/audit_transcripts.py --out-drops).  The v2 phones were
+  # built with --phones_from transcript, so a truncated line is the training
+  # text; dropping the clip is the conservative fix.  null disables it.
+  transcript_blocklist: data/genshin_plus_extras/transcript_drops.txt
   # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
   # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
   # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run
@@ -786,4 +791,11 @@ train:
   wer_language: "English"
   # Transcript sources (path|sid|text); null -> every filelists_2/*.txt.
   wer_source_filelists: null
+  # Optional scratch/audit_transcripts.py --out-references JSON.  Corrects
+  # prefix-truncated/mismatched val references to the ASR (spoken) text and
+  # drops the ones whose ASR is too short to trust.  Null = raw filelist text.
+  wer_reference_audit: data/genshin_plus_extras/wer_references_clean.json
+  # drop = remove untrusted references (honest benchmark); override = replace
+  # truncated/mismatched refs with the ASR text (circular, different length).
+  wer_reference_audit_mode: "drop"
 

@@ -1471,9 +1471,16 @@ class TrainModule(pl.LightningModule):
         config = self.config
         sources = W.resolve_source_filelists(
             config.train.get("wer_source_filelists", None))
-        refs = W.load_references(sources)
+        refs_raw = W.load_references(sources)
+        refs = W.apply_wer_reference_audit(
+            dict(refs_raw), config.train.get("wer_reference_audit", None),
+            mode=str(config.train.get("wer_reference_audit_mode", "drop")
+                     or "drop"))
         dataset = W.build_wer_dataset(config)
-        picked, items, texts = W.select_items(dataset, refs, self.wer_items)
+        pool = [i for i in range(len(dataset))
+                if W.item_basename(dataset.items[i]["spec_codes"]) in refs_raw]
+        picked, items, texts = W.select_items(
+            dataset, refs, self.wer_items, avail=pool, require_ref=False)
         device = self.device
         asr = W.Asr(str(config.train.get("wer_asr_model",
                                          "Qwen/Qwen3-ASR-0.6B")),
@@ -2825,6 +2832,9 @@ def train(config, resume_from=None, transfer_from=None):
         alignment_blocklist=config.train.get("alignment_blocklist", None),
         stage_direction_blocklist=config.train.get(
             "stage_direction_blocklist", None),
+        # Transcript-audit drops (scratch/audit_transcripts.py).  Basenames, so
+        # the preprocessed filelist can be filtered without an audio path.
+        transcript_blocklist=config.train.get("transcript_blocklist", None),
         # Conditioning hints: the level edges come from the same hints.json the
         # model reads, so dataset and model cannot disagree about a level id.
         **hint_kwargs,
@@ -2850,7 +2860,7 @@ def train(config, resume_from=None, transfer_from=None):
     n_block_val = int(getattr(val_dataset, "n_blocklisted", 0))
     if n_block or n_block_val:
         print(f"Blocklists: dropped {n_block} train / {n_block_val} val clip(s) "
-              f"(alignment + stage-direction; see train.*_blocklist)")
+              f"(alignment + stage-direction + transcript; see train.*_blocklist)")
     if train_dataset.hints:
         reg_mode = ("relative to the speaker median "
                     f"({len(train_dataset.register_speaker_means)} offsets)"

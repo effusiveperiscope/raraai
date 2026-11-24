@@ -95,11 +95,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from commons import load_state_dict_mismatch, load_submodule_prefix  # noqa: E402
 from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
 from stage2_wer import (  # noqa: E402
-    Asr, build_wer_dataset, code_frame_samples, grouped_wer, item_basename,
-    load_references, load_sid_map, peek_layout, resolve_generator_path,
-    resolve_source_filelists, select_items, speaker_bucket, speaker_clip_counts,
-    stage1_speaker_fallback, synthesize_fim, synthesize_generated,
-    synthesize_reference, to_16k, transformer_speaker_fallback, wer_summary,
+    Asr, apply_wer_reference_audit, build_wer_dataset, code_frame_samples,
+    grouped_wer, item_basename, load_references, load_sid_map, peek_layout,
+    resolve_generator_path, resolve_source_filelists, select_items,
+    speaker_bucket, speaker_clip_counts, stage1_speaker_fallback,
+    synthesize_fim, synthesize_generated, synthesize_reference, to_16k,
+    transformer_speaker_fallback, wer_summary,
 )
 
 
@@ -190,6 +191,14 @@ def main():
     ap.add_argument("--source_filelists", nargs="*", default=None,
                     help="filelists with transcripts (path|sid|text); default: "
                          "every filelists_2/*.txt")
+    ap.add_argument("--reference_audit", default=None,
+                    help="audit_transcripts.py --out-references JSON: clean "
+                         "the val WER references")
+    ap.add_argument("--reference_audit_mode", choices=("drop", "override"),
+                    default=None,
+                    help="drop = remove untrusted references (default; honest); "
+                         "override = replace truncated/mismatched refs with the "
+                         "ASR text (circular, changes the word denominator)")
     ap.add_argument("--generator_checkpoint", default=None,
                     help="stage-1 Generator used to decode codes; default: "
                          "config.train.generator_checkpoint")
@@ -311,6 +320,11 @@ def main():
     config = OmegaConf.load(args.config)
     if args.stage1_sid_map is None:
         args.stage1_sid_map = config.train.get("stage1_speaker_map", None)
+    if args.reference_audit is None:
+        args.reference_audit = config.train.get("wer_reference_audit", None)
+    if args.reference_audit_mode is None:
+        args.reference_audit_mode = str(
+            config.train.get("wer_reference_audit_mode", "drop") or "drop")
     if args.stage1_sid_map and config.train.get("speaker_map", None):
         print("WARNING: train.speaker_map is set, so the dataset already emits "
               "stage-1 ids; ignoring stage1_speaker_map.")
@@ -335,7 +349,9 @@ def main():
     val_filelist = args.val_filelist or config.train.val_filelist
     sources = resolve_source_filelists(args.source_filelists)
     print(f"reference filelists: {len(sources)}")
-    refs = load_references(sources)
+    refs_raw = load_references(sources)
+    refs = apply_wer_reference_audit(
+        dict(refs_raw), args.reference_audit, mode=args.reference_audit_mode)
     print(f"  {len(refs)} transcripts "
           f"({', '.join(sources[:3])}{', ...' if len(sources) > 3 else ''})")
 
@@ -366,7 +382,10 @@ def main():
             raise SystemExit(f"--speaker_buckets: unknown bucket(s) {unknown}")
     picked, items, texts = select_items(
         dataset, refs, args.num_items, sid_counts=sid_counts,
-        buckets=bucket_filter)
+        buckets=bucket_filter,
+        avail=[i for i in range(len(dataset))
+               if item_basename(dataset.items[i]["spec_codes"]) in refs_raw],
+        require_ref=False)
     buckets = [speaker_bucket(sid_counts.get(int(it["sid"]), 0))
                for it in items]
     print(f"val: {val_filelist} ({len(dataset)} items) -> scoring "
