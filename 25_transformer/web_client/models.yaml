@@ -1,0 +1,72 @@
+server:
+  host: 0.0.0.0
+  port: 8765
+  title: "Stage-2 Studio"
+  subtitle: "phoneme-driven neural speech"
+  # null -> cuda if available, else cpu.  `--device` overrides.
+  device: null
+  # fp32 matches stage 2's 32-true convention; bf16/fp16 halve the transformer
+  # weights (the stage-1 vocoder still decodes fp32).
+  precision: fp32
+  # Load the default model in the background at startup so the first
+  # generation does not pay for it.  Leave false on a shared/training GPU.
+  preload: false
+  # One browser is the intended deployment ("single client").  Jobs are still
+  # namespaced per session, so the same process can later serve several users;
+  # for that, set fixed_model / an api_key / max_queue and raise
+  # max_loaded_models only if the cards have room.
+  single_client: true
+  fixed_model: null          # e.g. genshin_v2 -> hides the model picker
+  fixed_variant: null        # e.g. best      -> also pins the variant
+  api_key: null              # null = no auth (local use)
+  max_loaded_models: 1       # 1.1 GB transformer + 0.5 GB vocoder each
+  max_queue: 4
+  max_jobs: 200
+  max_text_chars: 2000
+
+defaults:
+  model: genshin_v2
+  variant: base
+  sid: 1228                  # Paimon (most frequent voice in the val split)
+  frames: 200                # max code frames (25 Hz -> 8.0 s)
+  temperature: 0.9
+  top_k: 20
+  intensity: 0               # 0 = the trained "not provided" state
+  register: 0
+  pitch_shift: 0             # semitones, per word
+  slot_shift: 0              # log2 duration, per word
+  word_semantics: "null"     # null | text (per-word BERT states)
+
+models:
+  genshin_v2:
+    label: "Genshin v2.4"
+    notes: >-
+      Hints v2 (per-word pitch anchors + word BERT), decoder RoPE, FIM, EOS.
+      Stage-1 vocoder: base_v0.7.
+    config: configs/transformer.yaml
+    checkpoint: checkpoints_stage2/transformer_hints_v2.4/last.ckpt
+    generator_checkpoint: checkpoints_stage1/base_v0.7/last.ckpt
+    variants:
+      base:
+        label: "v2.4 · last"
+        checkpoint: checkpoints_stage2/transformer_hints_v2.4/last.ckpt
+      best:
+        label: "v2.4 · best val"
+        checkpoint: checkpoints_stage2/transformer_hints_v2.4/best-checkpoint.ckpt
+
+  mlp_lora:
+    label: "MLP LoRA v2"
+    notes: >-
+      Low-rank fine-tune of transformer_mlp_v1 (adapters + speaker rows only;
+      see modeling/lora.py).  Its own speaker set and stage-1 vocoder.
+    config: configs/transformer_mlp.yaml
+    checkpoint: checkpoints_stage2/transformer_mlp_lora_v2/last.ckpt
+    generator_checkpoint: checkpoints_stage1/mlp_main/last.ckpt
+    variants:
+      base:
+        label: "LoRA v2 · last"
+        checkpoint: checkpoints_stage2/transformer_mlp_lora_v2/last.ckpt
+      v1:
+        label: "LoRA v1 · best"
+        checkpoint: checkpoints_stage2/transformer_mlp_lora_v1_best.ckpt
+        notes: "Earlier adapter run (same layout, different weights)."

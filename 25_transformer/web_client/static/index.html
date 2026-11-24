@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0d14" />
+  <title>Stage-2 Studio</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <svg class="brand-icon" viewBox="0 0 32 32" aria-hidden="true">
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#a78bfa"/>
+            <stop offset="1" stop-color="#22d3ee"/>
+          </linearGradient>
+        </defs>
+        <rect x="2" y="2" width="28" height="28" rx="9" fill="none" stroke="url(#bg)" stroke-width="2"/>
+        <path d="M9 19.5v-7M13.5 23V9M18.5 21V11M23 17.5v-3" stroke="url(#bg)"
+              stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-name">Stage&nbsp;2 <em>Studio</em></span>
+    </a>
+    <div class="top-right">
+      <span class="mode-pill" id="modePill" hidden>single user</span>
+      <div class="status" id="status" title="server status">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">connecting…</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <h1>Give it something to say.</h1>
+      <p class="hero-sub" id="subtitle">phoneme-driven neural speech</p>
+    </section>
+
+    <!-- ============================ composer ============================ -->
+    <section class="card composer">
+      <div class="composer-top">
+        <textarea id="text" rows="4" maxlength="2000" spellcheck="false"
+          placeholder="Type or paste what they should say…&#10;&#10;Tip: {HH AH0 L OW1} inserts raw ARPAbet."></textarea>
+        <div class="textbar">
+          <div class="voices-inline">
+            <label class="inline-field">
+              <span>Voice</span>
+              <input id="voiceSearch" type="search" placeholder="filter…" autocomplete="off" />
+            </label>
+            <select id="voice" aria-label="Voice"></select>
+          </div>
+          <span class="counter"><span id="chars">0</span>/2000</span>
+          <button class="ghost tiny" id="clearBtn" type="button">Clear</button>
+        </div>
+      </div>
+
+      <div class="model-row">
+        <label class="field">
+          <span>Model / LoRA</span>
+          <select id="model"></select>
+        </label>
+        <div class="model-note" id="modelNote"></div>
+      </div>
+
+      <details class="advanced" id="advanced">
+        <summary>
+          <span>Advanced</span>
+          <span class="summary-hint" id="advSummary">temp 0.9 · top-k 20</span>
+        </summary>
+
+        <div class="grid">
+          <label class="slider-field span2">
+            <span class="row"><span>Max length</span><output id="framesOut">200 frames · 8.0 s</output></span>
+            <input id="frames" type="range" min="25" max="512" step="1" value="200" />
+            <small>An EOS model may stop earlier. 25 code frames = 1 s.</small>
+          </label>
+
+          <label class="slider-field">
+            <span class="row"><span>Temperature</span><output id="tempOut">0.90</output></span>
+            <input id="temperature" type="range" min="0.1" max="1.5" step="0.05" value="0.9" />
+          </label>
+
+          <label class="slider-field">
+            <span class="row"><span>Top-k</span><output id="topkOut">20</output></span>
+            <input id="topk" type="range" min="0" max="128" step="1" value="20" />
+          </label>
+
+          <label class="field">
+            <span>Seed</span>
+            <div class="seed-row">
+              <input id="seed" type="number" inputmode="numeric" min="0" placeholder="random" />
+              <button class="ghost tiny" id="seedBtn" type="button" title="New random seed">⟳</button>
+            </div>
+          </label>
+
+          <div class="field caps-field">
+            <span>This checkpoint</span>
+            <div class="chips" id="capsChips"></div>
+          </div>
+        </div>
+
+        <div class="hints" id="hintPanel" hidden>
+          <div class="hints-head">
+            <h3>Conditioning hints</h3>
+            <label class="tiny-toggle">
+              <input type="checkbox" id="hintsEnable" checked />
+              <span>use hint channels</span>
+            </label>
+          </div>
+          <div class="grid">
+            <label class="slider-field">
+              <span class="row"><span>Intensity</span><output id="intOut">off</output></span>
+              <input id="intensity" type="range" min="0" step="1" value="0" />
+              <small>Perceptual effort, not loudness.</small>
+            </label>
+            <label class="slider-field">
+              <span class="row"><span>Register</span><output id="regOut">off</output></span>
+              <input id="register" type="range" min="0" step="1" value="0" />
+              <small>Pitch level relative to the speaker.</small>
+            </label>
+            <label class="slider-field">
+              <span class="row"><span>Word pitch</span><output id="pitchOut">0 st</output></span>
+              <input id="pitchShift" type="range" min="-6" max="6" step="0.5" value="0" />
+              <small>Shift every word's f0 contour.</small>
+            </label>
+            <label class="slider-field">
+              <span class="row"><span>Word timing</span><output id="slotOut">0</output></span>
+              <input id="slotShift" type="range" min="-2" max="2" step="1" value="0" />
+              <small>+1 ≈ twice as long per word.</small>
+            </label>
+            <label class="field" id="wordSemField" hidden>
+              <span>Word semantics</span>
+              <select id="wordSem">
+                <option value="null">off (trained null)</option>
+                <option value="text">from current text (BERT)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Hint state</span>
+              <select id="hintBase">
+                <option value="null">trained null (default)</option>
+                <option value="omit">omit vectors (ablation)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </details>
+
+      <div class="say-row">
+        <button class="primary" id="sayBtn" type="button" disabled>
+          <span class="btn-label">Say it</span>
+          <span class="spinner" aria-hidden="true"></span>
+        </button>
+        <button class="ghost" id="ideaBtn" type="button" title="Surprise me">⚄</button>
+      </div>
+    </section>
+
+    <!-- ============================= result ============================= -->
+    <section class="card result" id="resultCard" hidden>
+      <div class="result-head">
+        <div>
+          <span class="eyebrow" id="resultKind">generated</span>
+          <h2 id="resultVoice">Voice</h2>
+        </div>
+        <span class="result-time" id="resultDuration"></span>
+      </div>
+
+      <audio id="player" controls preload="metadata" playsinline></audio>
+
+      <div class="result-actions">
+        <a class="ghost" id="downloadBtn" href="#" download>Download WAV</a>
+        <a class="ghost" id="codesBtn" href="#" download>Codes .pt</a>
+        <button class="ghost" id="againBtn" type="button">Again</button>
+      </div>
+
+      <dl class="meta-grid" id="metaGrid"></dl>
+
+      <details class="phonemes">
+        <summary>Phonemes</summary>
+        <code id="phonesText"></code>
+      </details>
+
+      <div class="fill" id="fillPanel" hidden>
+        <div class="fill-head">
+          <h3>Regenerate a span</h3>
+          <span class="muted">FIM: keeps the prefix and suffix, resamples the hole.</span>
+        </div>
+        <div class="fill-map"><div class="fill-kept" id="fillKept"></div><div class="fill-hole" id="fillHole"></div><div class="fill-kept" id="fillKept2"></div></div>
+        <div class="grid">
+          <label class="slider-field">
+            <span class="row"><span>Start</span><output id="fillStartOut">0</output></span>
+            <input id="fillStart" type="range" min="0" max="100" step="1" value="0" />
+          </label>
+          <label class="slider-field">
+            <span class="row"><span>Span</span><output id="fillSpanOut">0</output></span>
+            <input id="fillSpan" type="range" min="1" max="100" step="1" value="20" />
+          </label>
+          <label class="field" id="fillBestOfField">
+            <span>Candidates</span>
+            <select id="fillBestOf">
+              <option value="1">1 (fastest)</option>
+              <option value="2">2 — keep best seam</option>
+              <option value="4">4 — keep best seam</option>
+            </select>
+          </label>
+        </div>
+        <button class="ghost" id="fillBtn" type="button">Regenerate this span</button>
+      </div>
+    </section>
+
+    <!-- ============================= history ============================ -->
+    <section class="card history" id="historyCard" hidden>
+      <div class="history-head">
+        <h2>History</h2>
+        <button class="ghost tiny" id="clearHistory" type="button">clear</button>
+      </div>
+      <ol id="historyList"></ol>
+    </section>
+
+    <section class="card log-card" id="logCard" hidden>
+      <div class="history-head">
+        <h2>Server log</h2>
+        <button class="ghost tiny" id="clearLog" type="button">clear</button>
+      </div>
+      <pre id="logText"></pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span id="footerTitle">Stage-2 Studio</span>
+    <span class="sep">·</span>
+    <span id="deviceText">-</span>
+    <span class="sep">·</span>
+    <a href="/api/docs" target="_blank" rel="noreferrer">API</a>
+  </footer>
+
+  <div class="mobile-bar">
+    <button class="primary" id="sayBtnMobile" type="button" disabled>
+      <span class="btn-label">Say it</span>
+      <span class="spinner" aria-hidden="true"></span>
+    </button>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- auth dialog (only when the server sets `api_key`) -->
+  <div class="modal" id="authModal" hidden>
+    <form class="modal-card" id="authForm">
+      <h2>Access key</h2>
+      <p class="muted">This server requires an API key.</p>
+      <input id="authKey" type="password" autocomplete="current-password" placeholder="key" />
+      <button class="primary" type="submit">Connect</button>
+    </form>
+  </div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
