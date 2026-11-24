@@ -370,6 +370,24 @@ def resolve_generator_path(path: str):
     return None
 
 
+def _impute_speaker_rows(weight: torch.Tensor, counts: Dict[int, int], *,
+                         min_clips: int = 6, mode: str = "mean") -> int:
+    """Replace rows of ``weight`` for speakers with < ``min_clips`` clips."""
+    if mode not in ("mean", "zero"):
+        raise ValueError(f"speaker fallback mode must be mean|zero, got {mode!r}")
+    n = weight.shape[0]
+    keep = torch.tensor([counts.get(i, 0) >= min_clips for i in range(n)],
+                        dtype=torch.bool, device=weight.device)
+    if not bool(keep.any()):
+        return 0
+    fill = (torch.zeros_like(weight[:1]) if mode == "zero"
+            else weight[keep].mean(dim=0, keepdim=True))
+    idx = (~keep).nonzero(as_tuple=True)[0]
+    with torch.no_grad():
+        weight[idx] = fill.to(weight.dtype)
+    return int(idx.numel())
+
+
 def stage1_speaker_fallback(net_g, counts: Dict[int, int], *,
                             min_clips: int = 6, mode: str = "mean") -> int:
     """Replace under-trained stage-1 speaker embeddings (in place).
@@ -390,21 +408,28 @@ def stage1_speaker_fallback(net_g, counts: Dict[int, int], *,
 
     Returns the number of rows replaced.
     """
-    if mode not in ("mean", "zero"):
-        raise ValueError(f"stage1 speaker fallback mode must be mean|zero, "
-                         f"got {mode!r}")
-    weight = net_g.spk_emb.weight
-    n = weight.shape[0]
-    keep = torch.tensor([counts.get(i, 0) >= min_clips for i in range(n)],
-                        dtype=torch.bool, device=weight.device)
-    if not bool(keep.any()):
-        return 0
-    fill = (torch.zeros_like(weight[:1]) if mode == "zero"
-            else weight[keep].mean(dim=0, keepdim=True))
-    idx = (~keep).nonzero(as_tuple=True)[0]
-    with torch.no_grad():
-        weight[idx] = fill.to(weight.dtype)
-    return int(idx.numel())
+    return _impute_speaker_rows(net_g.spk_emb.weight, counts,
+                                min_clips=min_clips, mode=mode)
+
+
+def transformer_speaker_fallback(net, counts: Dict[int, int], *,
+                                 min_clips: int = 6, mode: str = "mean") -> int:
+    """Same imputation for the stage-2 encoder/decoder ``spk_emb`` tables.
+
+    A low-data speaker's stage-2 row is also under-trained (measured: row norms
+    scale monotonically with clip count), so the transformer gets little or no
+    voice conditioning for exactly the speakers that need it most.  Imputing the
+    population row gives them a meaningful starting point; ``"zero"`` is the
+    trained "absent" state the hint tables use.  Evaluation-time control only --
+    a real fix is to initialise/regularise these rows during training.
+    """
+    n = 0
+    for module in (getattr(net, "encoder", None), getattr(net, "decoder", None)):
+        emb = getattr(module, "spk_emb", None) if module is not None else None
+        if emb is not None:
+            n += _impute_speaker_rows(emb.weight, counts,
+                                      min_clips=min_clips, mode=mode)
+    return n
 
 
 def peek_layout(path) -> Dict[str, object]:
@@ -426,6 +451,25 @@ def peek_layout(path) -> Dict[str, object]:
     else:
         out["fim_lookahead"] = 0
     return out
+
+
+def load_sid_map(path: Optional[str]) -> Dict[int, int]:
+    """Load the ``sid_map`` of a ``speaker_map.py`` JSON (stage-2 -> stage-1)."""
+    if not path:
+        return {}
+    import json
+
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    raw = obj.get("sid_map", obj) if isinstance(obj, dict) else {}
+    return {int(k): int(v) for k, v in raw.items()}
+
+
+def map_sids(sids, sid_map: Optional[Dict[int, int]]):
+    """Apply a stage-2 -> stage-1 ``sid_map`` (identity for unmapped ids)."""
+    if not sid_map:
+        return list(sids)
+    return [int(sid_map.get(int(s), int(s))) for s in sids]
 
 
 @torch.no_grad()
@@ -455,7 +499,9 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
                          stop_on_eos: bool = True,
                          hint_arg_fn=None,
                          hint_guidance: Optional[float] = None,
-                         hint_guidance_books=None) -> List[np.ndarray]:
+                         hint_guidance_books=None,
+                         sid_map: Optional[Dict[int, int]] = None
+                         ) -> List[np.ndarray]:
     """Sample codes per item (oracle length cap) and decode them to audio.
 
     ``hint_arg_fn(chunk)`` (a ``CodeCollator`` closure, typically) turns the
@@ -490,7 +536,13 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
             return_lengths=True)
         spec = gen[:, :Qs].transpose(0, 1).contiguous()
         pitch = gen[:, Qs:Qs + Qp].transpose(0, 1).contiguous()
-        audio = net_g.infer_from_codes(spec, pitch, sid)        # (B, 1, N)
+        # The transformer is conditioned on its own (stage-2) ids, as trained.
+        # The frozen Generator's voice is a stage-1 id, which is a *different*
+        # space: pass the mapped ids to `infer_from_codes` only.
+        gen_sid = torch.tensor(
+            map_sids([int(it["sid"]) for it in chunk], sid_map),
+            dtype=torch.long, device=device)
+        audio = net_g.infer_from_codes(spec, pitch, gen_sid)     # (B, 1, N)
         for i in range(B):
             n = min(int(glen[i]), lens[i]) * hop
             wavs.append(audio[i, 0, :n].float().cpu().numpy())
@@ -498,15 +550,18 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
 
 
 @torch.no_grad()
-def synthesize_reference(net_g, items, device) -> List[np.ndarray]:
+def synthesize_reference(net_g, items, device,
+                         sid_map: Optional[Dict[int, int]] = None
+                         ) -> List[np.ndarray]:
     """Decode the item's ground-truth codes (the WER floor / control arm)."""
     wavs = []
     hop = code_frame_samples(net_g)
     for it in items:
         codes = torch.cat([it["spec_codes"], it["pitch_codes"]], dim=0)
+        sid = map_sids([int(it["sid"])], sid_map)
         wavs.extend(decode_codes(
             net_g, codes.unsqueeze(0).to(device),
-            torch.tensor([int(it["sid"])], dtype=torch.long, device=device)))
+            torch.tensor(sid, dtype=torch.long, device=device)))
     return wavs
 
 
@@ -536,7 +591,8 @@ def synthesize_fim(net, net_g, items, pad_id, device, *,
                    hint_arg_fn=None,
                    hint_guidance: Optional[float] = None,
                    hint_guidance_books=None,
-                   best_of: int = 1):
+                   best_of: int = 1,
+                   sid_map: Optional[Dict[int, int]] = None):
     """Regenerate the middle third of each item's ground-truth codes.
 
     Returns ``(wavs, spans)`` where ``spans[i] = (prefix, middle, suffix)`` (in
@@ -570,6 +626,9 @@ def synthesize_fim(net, net_g, items, pad_id, device, *,
             hint_guidance_books=hint_guidance_books,
             best_of=int(best_of))                               # (1, K, m)
         regen = torch.cat([prefix, middle, suffix], dim=2)
-        wavs.extend(decode_codes(net_g, regen, sid))
+        gen_sid = map_sids([int(it["sid"])], sid_map)
+        wavs.extend(decode_codes(
+            net_g, regen,
+            torch.tensor(gen_sid, dtype=torch.long, device=device)))
         spans.append((p, m, T - p - m))
     return wavs, spans

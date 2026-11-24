@@ -1304,6 +1304,59 @@ Details that matter:
   as a sanity check next to the teacher-forced `val_loss`, not a decision
   metric on its own.  A spike in `wer/fim` while `wer/generated` is flat points
   at the seam/span path, not at text conditioning.
+- **Speaker breakdown.** `--by_speaker` adds a WER row per *training-clip*
+  bucket (`0,1,2-5,6-20,21-100,100+`) and `--speaker_buckets 0,1,2-5
+  --num_items 0` scores every val utterance from speakers an evenly spaced pick
+  skips.  The counts filelist is `--speaker_counts_filelist` (default
+  `train.train_filelist`); pass the *stage-1* filelist to bucket by how much
+  voice data the frozen Generator had, which is what its `spk_emb` row saw.
+  WER is an intelligibility metric, not a voice-similarity/naturalness metric:
+  the floor is flat across stage-1 buckets even though low-data stage-1 rows
+  are near random, because the vocoder stays intelligible.
+- **Under-trained speaker rows.** Both stages condition on an independent
+  `nn.Embedding` row per id, so there is no parameter sharing between speakers.
+  Row norms track clip count (stage-2 encoder, `0/1/2-5/6-20/21-100/100+`:
+  0.03/0.83/1.08/1.52/1.87/2.30; stage-1 rows of rare speakers stay at the
+  ~6.0 random-init norm vs ~5.55 for 100+).  `stage2_wer.stage1_speaker_fallback`
+  / `transformer_speaker_fallback` (exposed as `--stage1_spk_fallback` /
+  `--stage2_spk_fallback`) replace rows below `--stage1_spk_min_clips` with the
+  reliable-row mean or zero, as an evaluation control; `scratch/
+  impute_speaker_rows.py` writes a patched checkpoint.  These are stop-gaps:
+  a real fix needs a representation shared across speakers (speaker encoder, or
+  conditioning on the stage-1 voice embedding), not a per-id lookup.
+
+### Speaker-embedding structure (stage 2, optional)
+
+The default conditioning is two independent `nn.Embedding(n_speakers, hidden)`
+tables (`encoder.spk_emb`, `decoder.spk_emb`): no parameters are shared between
+speakers, and the encoder one is added *before* `_temporal_norm`, whose mean
+subtraction removes a per-clip constant.  Measured on `transformer_hints_v2.3`
+(24 val utterances, `--ignore_eos`, with the `speakers.json` decode map):
+zeroing the encoder table changes WER 17.98 -> 19.24 %, zeroing the decoder
+table changes it 17.98 -> 17.03 % (the decoder table is not carrying WER).
+Corpus skew explains the interest: 1 559 / 2 704 speakers have <= 5 clips, and
+stage-2 row norms track the clip count (0.03 / 0.83 / 1.08 / 1.52 / 1.87 / 2.30
+for 0 / 1 / 2-5 / 6-20 / 21-100 / 100+).
+
+Optional switches, all default-off and all a **new parameter set** (fresh
+`exp_name` + `--transfer_from`; `spk_layout_marker` is checked by
+`check_special_layout` in both directions):
+
+| key | effect |
+|---|---|
+| `spk_rank: N > 0` | per-id code `(N,)` + a **shared** `N -> hidden` projection (encoder and decoder each get their own code table + projection); rare ids learn `N` numbers instead of 768 |
+| `spk_norm: l2` | normalise the code to `sqrt(N)` (direction only, no free norm) |
+| `spk_init: zero` | start at the neutral vector instead of a random direction |
+| `spk_kl_weight: w` | per-id `logvar` + Gaussian KL (`z = mu + eps*exp(logvar/2)` in training, mean at eval). Optimisation-only term, logged `train_spk_kl`; `val_loss` stays pure code CE |
+| `spk_film_memory: true` | speaker FiLM applied **after** `_temporal_norm` (zero-init identity); the additive path is before the norm and cancels |
+
+`spk_kl_weight` requires `spk_rank > 0` (the prior is on the code).  The intent
+is not that any one of these is a guaranteed win: they are the controllable
+axes for an ablation -- sharing (`spk_rank`), constraint (`spk_norm`/`spk_init`),
+smoothness (`spk_kl_weight`), and injection site (`spk_film_memory`).  A
+pretrained speaker encoder or conditioning on the frozen stage-1 voice vector is
+still the only mechanism that generalises to a speaker whose id never appeared
+in training.
 
 ### LoRA fine-tuning (stage 2, `--finetune`)
 
@@ -2109,6 +2162,26 @@ and `test_pitch_anchors.py` guard all of it.
      docstrings before touching this.
    - `2_training.py` prints a warning if any speaker id is out of range of
      `transformer.n_speakers`.
+   - **Measured on the shipped combined corpus: the ids did not line up**
+     (`Nahida` was 1777 in stage 2 / 1563 in stage 1, `Paimon` 1228 / 1158;
+     2 641 genshin ids map 1:1 by basename, the 127 MLP/VCTK/Expresso ids have
+     no stage-1 speaker at all). Both runs used `speaker_map: null`, so every
+     checkpoint made so far conditioned the transformer on one speaker and
+     asked the frozen Generator to render another -- voice identity was wrong
+     across the board, and the extra corpora had no voice at all.
+     `speakers.json` now holds the basename-derived `sid_map`, and
+     `train.stage1_speaker_map` applies it **only at `infer_from_codes` time**
+     (training-time samples, `wer/*`, `scratch/stage2_repl.py --stage1_sid_map`,
+     `scratch/eval_stage2_wer.py`), so an existing checkpoint renders the right
+     voice without a retrain. `train.speaker_map` remains the data-time fix and
+     needs a fresh stage-2 run (the transformer must be trained on the same ids
+     it will decode with); setting both is a double map and is disabled with a
+     warning. This is *not* the low-data problem: with the map the reference
+     floor on the <=5-clip speakers moves only 35.3 -> 33.4 %, because those
+     transcripts/audio are hard for ASR independently (the low-data WER is
+     dominated by transcript mismatch, e.g. `"Forever may the Electro Archon
+     reign..."` recognised as `"Glory to the Shogun in your everlasting
+     reign."`). Voice identity needs a similarity/naturalness metric, not WER.
 2. **`1_training.py` sets
    `warnings.filterwarnings('error', category=RuntimeWarning)`.** A benign
    RuntimeWarning (e.g. from numpy/pyworld) becomes a hard crash in stage 1.

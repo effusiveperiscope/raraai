@@ -21,7 +21,7 @@
 # changes positional behaviour without changing a single tensor shape, so a
 # resume would silently continue with the wrong function.  Warm-start it with
 # `--transfer_from checkpoints_stage2/transformer_hints_v2.1_wordsem_b/last.ckpt`.
-exp_name: transformer_hints_v2.4
+exp_name: transformer_hints_v2.5
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -53,6 +53,25 @@ transformer:
   # this must be large enough to hold every stage-1 id you use
   # (see speaker_map.py and train.speaker_map).
   n_speakers: 4096
+  # ---- speaker-embedding structure (optional; off = historical tables) ----
+  # Both sites condition on an independent nn.Embedding row per id, so nothing
+  # is shared between speakers and a 1-5-clip speaker has to learn 768 numbers.
+  # spk_rank > 0 replaces each table with a per-id code (rank,) + a SHARED
+  # (rank -> hidden) projection: the projection is trained by every speaker, so
+  # a rare id only learns `rank` numbers.  Start with 16 or 32.
+  # spk_norm "l2" fixes the code's norm (direction only); spk_init "zero" starts
+  # every speaker at the neutral vector (no random direction for rare ids).
+  # spk_kl_weight > 0 adds a per-id logvar and a Gaussian KL (VAE-style smooth
+  # latent): rare ids stay at the prior, high-data ids move; eval uses the mean.
+  # spk_film_memory adds the post-_temporal_norm FiLM injection site (the
+  # additive encoder path is before the norm, which removes a per-clip
+  # constant); zero-init, so a --transfer_from starts identical.
+  # All are parameter-set changes -> fresh exp_name + --transfer_from.
+  spk_rank: 64
+  spk_norm: "none"
+  spk_init: "zero"
+  spk_kl_weight: 0.0
+  spk_film_memory: false
   # ---- coarse conditioning hints (v0.8) -----------------------------------
   # Five optional side channels built by hints/build.py (see HINTS_PLAN.md and
   # hints/README.md).  Each continuous value is bucketed at load time with the
@@ -627,6 +646,18 @@ train:
   # filelist was preprocessed without a map, the map's `sid_map` is still
   # applied here without re-running preprocessing.
   speaker_map: null
+  # Decode-only stage-2 -> stage-1 speaker-id map (a speaker_map.py JSON).
+  # Use this when the stage-2 filelist was built in a *different* id space than
+  # the stage-1 Generator (the shipped combined corpus does: Nahida is 1777 in
+  # stage 2 and 1563 in stage 1).  The transformer keeps the ids it was trained
+  # on; only `infer_from_codes` gets the mapped id, so an existing checkpoint
+  # synthesises the right voice without retraining.  `speaker_map` above is the
+  # data-time fix and requires a fresh stage-2 run (both sides see one id).
+  # Shipped: the map built from the combined corpus (2 641 genshin ids; the
+  # 127 MLP/VCTK/Expresso ids stay unmapped because stage 1 never saw them).
+  # Set to null together with a non-null `speaker_map`: the dataset has already
+  # canonicalised the ids then, and this map would remap them a second time.
+  stage1_speaker_map: speakers.json
   # Optional: stage-1 Generator checkpoint used to turn sampled codes into
   # audio for TensorBoard. Set to null to disable audio logging.
   # This is a *stage-1* run, so it lives in checkpoints_stage1/ (stage 2 writes
@@ -738,8 +769,8 @@ train:
   #   wer/reference   ground-truth codes through the same vocoder (the floor)
   # Read it as a trend: 8-24 utterances is noisy (+/-3 pp at 24), and the
   # teacher-forced val_loss remains the low-variance decision metric.
-  wer_interval: 0           # 0 = off; e.g. 5 = every 5 epochs
-  wer_items: 8
+  wer_interval: 1           # 0 = off; e.g. 5 = every 5 epochs
+  wer_items: 50
   wer_fim: true
   wer_reference: true       # the floor is computed once and cached
   # Hint state for generation: "null" (the trained level-0 state -- the honest

@@ -340,6 +340,69 @@ class _OmitHints(dict):
 OMIT_HINTS = _OmitHints()
 
 
+class SpeakerEmbedding(nn.Module):
+    """Low-rank / regularised speaker conditioning (optional).
+
+    The default model uses a full ``nn.Embedding(n_speakers, hidden)`` per site.
+    With this module (``transformer.spk_rank > 0``) each speaker instead owns a
+    short code ``(rank,)`` and a **shared** ``rank -> hidden`` projection turns
+    it into the conditioning vector.  The projection is trained by every
+    speaker, so a 1-5-clip speaker only has to learn ``rank`` numbers (16-32)
+    rather than 768, with the structure supplied by the shared projection --
+    this is the parameter-sharing mechanism the per-id table lacks.
+
+    ``spk_norm: l2`` normalises the code to ``sqrt(rank)`` (directions only, no
+    free norm); ``spk_init: zero`` starts every speaker at the neutral vector so
+    rare ids begin at the population prior instead of a random direction.
+
+    With ``spk_kl_weight > 0`` a per-speaker ``logvar`` table is added and the
+    code is reparameterised (``z = mu + eps * exp(logvar/2)``) during training;
+    ``kl`` is the standard Gaussian KL.  At inference the mean is used.  This is
+    the "smooth latent" option: rare speakers stay at the prior (zero code),
+    high-data speakers move, and no discrete lookup can jump between unrelated
+    directions.
+    """
+
+    def __init__(self, n_speakers: int, hidden_size: int, rank: int,
+                 norm: str = "none", init: str = "default",
+                 kl_weight: float = 0.0):
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("SpeakerEmbedding needs rank > 0")
+        if norm not in ("none", "l2"):
+            raise ValueError(f"spk_norm must be none|l2, got {norm!r}")
+        if init not in ("default", "zero"):
+            raise ValueError(f"spk_init must be default|zero, got {init!r}")
+        self.rank = int(rank)
+        self.norm = norm
+        self.code = nn.Embedding(n_speakers, self.rank)
+        self.proj = nn.Linear(self.rank, hidden_size, bias=False)
+        if init == "zero":
+            nn.init.zeros_(self.code.weight)
+        self.logvar = (nn.Embedding(n_speakers, self.rank)
+                       if kl_weight > 0 else None)
+        if self.logvar is not None:
+            nn.init.zeros_(self.logvar.weight)
+
+    def vector(self, sid: torch.Tensor, stochastic: bool = True) -> torch.Tensor:
+        """``(B,)`` ids -> ``(B, hidden)`` conditioning vectors."""
+        mu = self.code(sid)
+        if self.logvar is not None and stochastic and self.training:
+            std = torch.exp(0.5 * self.logvar(sid))
+            mu = mu + std * torch.randn_like(mu)
+        if self.norm == "l2":
+            mu = F.normalize(mu, dim=-1) * math.sqrt(self.rank)
+        return self.proj(mu)
+
+    def kl(self, sid: torch.Tensor) -> torch.Tensor:
+        """Gaussian KL for the ids in ``sid`` (0 when KL is disabled)."""
+        if self.logvar is None:
+            return torch.zeros((), device=sid.device)
+        mu = self.code(sid)
+        logvar = self.logvar(sid)
+        return 0.5 * (mu.pow(2) + logvar.exp() - 1.0 - logvar).sum(-1).mean()
+
+
 class PhonemeEncoder(nn.Module):
     """Encodes phoneme tokens + a speaker id into a cross-attention memory.
 
@@ -389,6 +452,11 @@ class PhonemeEncoder(nn.Module):
         memory_norm: str = "temporal",
         residual_scale: bool = True,
         hint_film: bool = False,
+        spk_rank: int = 0,
+        spk_norm: str = "none",
+        spk_init: str = "default",
+        spk_kl_weight: float = 0.0,
+        spk_film: bool = False,
     ):
         super().__init__()
         if memory_norm not in ("temporal", "layer", "none"):
@@ -399,7 +467,31 @@ class PhonemeEncoder(nn.Module):
         self.memory_norm_eps = 1e-5
 
         self.phone_emb = nn.Embedding(phone_vocab_size, hidden_size)
-        self.spk_emb = nn.Embedding(n_speakers, hidden_size)
+        if spk_rank > 0:
+            self.spk_lowrank = SpeakerEmbedding(
+                n_speakers, hidden_size, spk_rank, norm=spk_norm,
+                init=spk_init, kl_weight=spk_kl_weight)
+            self.spk_emb = None
+        else:
+            self.spk_lowrank = None
+            self.spk_emb = nn.Embedding(n_speakers, hidden_size)
+            if spk_init == "zero":
+                nn.init.zeros_(self.spk_emb.weight)
+        # Post-norm FiLM of the speaker vector.  The additive path above is
+        # added *before* ``_temporal_norm``, whose per-dimension mean
+        # subtraction cancels a per-clip constant; this is the injection site
+        # that survives (the speaker analogue of ``hint_film_memory``).
+        self.spk_film = bool(spk_film)
+        if self.spk_film:
+            self.spk_film_gamma = nn.Linear(hidden_size, hidden_size)
+            self.spk_film_beta = nn.Linear(hidden_size, hidden_size)
+            nn.init.zeros_(self.spk_film_gamma.weight)
+            nn.init.zeros_(self.spk_film_gamma.bias)
+            nn.init.zeros_(self.spk_film_beta.weight)
+            nn.init.zeros_(self.spk_film_beta.bias)
+        else:
+            self.spk_film_gamma = None
+            self.spk_film_beta = None
         self.pos = SinusoidalPositionalEncoding(hidden_size, max_positions)
         layer = nn.TransformerEncoderLayer(
             d_model=hidden_size,
@@ -463,6 +555,17 @@ class PhonemeEncoder(nn.Module):
         x = x * self.memory_gain + self.memory_bias
         return x * mask
 
+    def _spk_vector(self, sid: torch.Tensor) -> torch.Tensor:
+        """``(B,)`` ids -> ``(B, H)`` (low-rank + optional VAE sampling)."""
+        if self.spk_lowrank is not None:
+            return self.spk_lowrank.vector(sid)
+        return self.spk_emb(sid.to(sid.device))
+
+    def spk_kl(self, sid: torch.Tensor) -> torch.Tensor:
+        if self.spk_lowrank is None:
+            return torch.zeros((), device=sid.device)
+        return self.spk_lowrank.kl(sid)
+
     def forward(
         self,
         phone_ids: torch.Tensor,  # (B, N) long
@@ -494,7 +597,8 @@ class PhonemeEncoder(nn.Module):
         valid = torch.arange(N, device=phone_ids.device)[None, :] < phone_lengths[:, None]
 
         x = self.phone_emb(phone_ids)
-        x = x + self.spk_emb(sid.to(phone_ids.device)).unsqueeze(1)
+        spk = self._spk_vector(sid.to(phone_ids.device))
+        x = x + spk.unsqueeze(1)
         if hint_vec is not None:
             x = x + hint_vec.to(x.dtype).unsqueeze(1)
         if pos_hint is not None:
@@ -504,6 +608,12 @@ class PhonemeEncoder(nn.Module):
         x = x * valid.unsqueeze(-1).to(x.dtype)
         if self.memory_norm == "temporal":
             x = self._temporal_norm(x, valid)
+        if self.spk_film:
+            # Post-norm, so the per-clip speaker vector is not removed by the
+            # temporal standardisation (zero-init: identity at start).
+            x = (x * (1.0 + self.spk_film_gamma(spk).unsqueeze(1))
+                 + self.spk_film_beta(spk).unsqueeze(1))
+            x = x * valid.unsqueeze(-1).to(x.dtype)
         if self.film_gamma is not None and hint_vec is not None:
             h = hint_vec.to(x.dtype)
             x = (x * (1.0 + self.film_gamma(h).unsqueeze(1))
@@ -553,6 +663,10 @@ class DelayCodebookDecoder(nn.Module):
         rope: bool = False,
         rope_base: float = 10000.0,
         input_dropout: float = 0.0,
+        spk_rank: int = 0,
+        spk_norm: str = "none",
+        spk_init: str = "default",
+        spk_kl_weight: float = 0.0,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -582,9 +696,19 @@ class DelayCodebookDecoder(nn.Module):
                 raise ValueError(
                     "speaker_cond=True requires n_speakers > 0, got "
                     f"{n_speakers}")
-            self.spk_emb = nn.Embedding(n_speakers, hidden_size)
+            if spk_rank > 0:
+                self.spk_lowrank = SpeakerEmbedding(
+                    n_speakers, hidden_size, spk_rank, norm=spk_norm,
+                    init=spk_init, kl_weight=spk_kl_weight)
+                self.spk_emb = None
+            else:
+                self.spk_lowrank = None
+                self.spk_emb = nn.Embedding(n_speakers, hidden_size)
+                if spk_init == "zero":
+                    nn.init.zeros_(self.spk_emb.weight)
         else:
             self.spk_emb = None
+            self.spk_lowrank = None
 
         # FIM region tag (prefix / suffix / middle), added to every decoder
         # column exactly like ``spk_emb``.  Region ids: 0 = normal (plain AR
@@ -688,6 +812,16 @@ class DelayCodebookDecoder(nn.Module):
             x = e if x is None else x + e
         return x
 
+    def _spk_vector(self, sid: torch.Tensor) -> torch.Tensor:
+        if self.spk_lowrank is not None:
+            return self.spk_lowrank.vector(sid)
+        return self.spk_emb(sid)
+
+    def spk_kl(self, sid: torch.Tensor) -> torch.Tensor:
+        if self.spk_lowrank is None:
+            return torch.zeros((), device=sid.device)
+        return self.spk_lowrank.kl(sid)
+
     def _forward_impl(
         self,
         codes: torch.Tensor,  # (B, K, L) long, pad index == vocab size
@@ -734,12 +868,12 @@ class DelayCodebookDecoder(nn.Module):
             # adding the absolute table as well would reintroduce exactly the
             # unseen-position cliff RoPE exists to remove.
             x = self.pos(x)
-        if self.spk_emb is not None:
+        if self.spk_emb is not None or self.spk_lowrank is not None:
             if sid is None:
                 raise ValueError(
                     "DelayCodebookDecoder was built with speaker_cond=True "
                     "but no sid was passed")
-            x = x + self.spk_emb(sid.to(codes.device)).unsqueeze(1)
+            x = x + self._spk_vector(sid.to(codes.device)).unsqueeze(1)
 
         # FIM region tag (prefix/suffix/middle), a per-column additive side
         # channel.  ``region`` is optional: a plain AR caller (or a model built
@@ -876,6 +1010,44 @@ class CodeTransformer(nn.Module):
                 "transformer.input_dropout must be in [0, 1), got "
                 f"{input_dropout}")
 
+        # Speaker-embedding structure (optional; see SpeakerEmbedding).
+        # Defaults reproduce the historical full per-id table exactly, so a
+        # checkpoint written before these keys existed still loads.
+        spk_rank = max(int(_get_cfg(tcfg, "spk_rank", 0) or 0), 0)
+        spk_norm = str(_get_cfg(tcfg, "spk_norm", "none") or "none").lower()
+        spk_init = str(_get_cfg(tcfg, "spk_init", "default")
+                       or "default").lower()
+        spk_kl_weight = float(_get_cfg(tcfg, "spk_kl_weight", 0.0) or 0.0)
+        spk_film = bool(_get_cfg(tcfg, "spk_film_memory", False))
+        if spk_norm not in ("none", "l2"):
+            raise ValueError(
+                f"transformer.spk_norm must be none|l2, got {spk_norm!r}")
+        if spk_init not in ("default", "zero"):
+            raise ValueError("transformer.spk_init must be default|zero, got "
+                             f"{spk_init!r}")
+        if spk_kl_weight > 0 and spk_rank <= 0:
+            raise ValueError(
+                "transformer.spk_kl_weight needs transformer.spk_rank > 0 "
+                "(the Gaussian prior is on the low-rank speaker code)")
+        if spk_norm != "none" and spk_rank <= 0:
+            raise ValueError(
+                "transformer.spk_norm needs transformer.spk_rank > 0 (the "
+                "full per-id table has no separate code to normalise)")
+        self.spk_kl_weight = spk_kl_weight
+        self.spk_layout = (spk_rank, spk_norm, spk_init, spk_film,
+                           spk_kl_weight > 0)
+        # A parameter-free marker (like rope_marker) only for non-default
+        # layouts: default checkpoints keep exactly their old key set, while a
+        # structured run records the contract for check_special_layout.
+        if any((spk_rank > 0, spk_norm != "none", spk_init != "default",
+                spk_film, spk_kl_weight > 0)):
+            self.register_buffer(
+                "spk_layout_marker",
+                torch.tensor([float(spk_rank),
+                              {"none": 0.0, "l2": 1.0}[spk_norm],
+                              {"default": 0.0, "zero": 1.0}[spk_init],
+                              float(spk_film), float(spk_kl_weight > 0)]))
+
         # Coarse conditioning hints (v0.8).  The tables are built below; the
         # level counts come from the *same* ``hints.json`` the dataset used, so
         # a level id means the same thing on both sides by construction.
@@ -976,6 +1148,11 @@ class CodeTransformer(nn.Module):
             memory_norm=memory_norm,
             residual_scale=residual_scale,
             hint_film=hint_film,
+            spk_rank=spk_rank,
+            spk_norm=spk_norm,
+            spk_init=spk_init,
+            spk_kl_weight=spk_kl_weight,
+            spk_film=spk_film,
         )
 
         self.decoder = DelayCodebookDecoder(
@@ -999,6 +1176,10 @@ class CodeTransformer(nn.Module):
             rope=rope,
             rope_base=rope_base,
             input_dropout=input_dropout,
+            spk_rank=spk_rank,
+            spk_norm=spk_norm,
+            spk_init=spk_init,
+            spk_kl_weight=spk_kl_weight,
         )
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
@@ -1332,6 +1513,16 @@ class CodeTransformer(nn.Module):
             raise ValueError(
                 f"transformer.hint_guidance_books must be >= 0, got {weights}")
         return None if all(abs(w - 1.0) < 1e-9 for w in weights) else weights
+
+    def spk_kl(self, sid: torch.Tensor) -> torch.Tensor:
+        """Gaussian-prior KL of the speaker code (``transformer.spk_kl_weight``).
+
+        Only non-zero for a low-rank model with ``spk_kl_weight > 0``; the
+        encoder and decoder keep separate tables, so both KLs are summed.  Use
+        the *mean* over the batch (a per-sample KL would scale with batch size).
+        """
+        kl = self.encoder.spk_kl(sid) + self.decoder.spk_kl(sid)
+        return kl
 
     def loss_weights(self, epoch: Optional[int] = None) -> torch.Tensor:
         """Effective ``(K,)`` loss weights for training epoch ``epoch``.

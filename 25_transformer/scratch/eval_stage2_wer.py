@@ -96,10 +96,10 @@ from commons import load_state_dict_mismatch, load_submodule_prefix  # noqa: E40
 from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
 from stage2_wer import (  # noqa: E402
     Asr, build_wer_dataset, code_frame_samples, grouped_wer, item_basename,
-    load_references, peek_layout, resolve_generator_path,
+    load_references, load_sid_map, peek_layout, resolve_generator_path,
     resolve_source_filelists, select_items, speaker_bucket, speaker_clip_counts,
     stage1_speaker_fallback, synthesize_fim, synthesize_generated,
-    synthesize_reference, to_16k, wer_summary,
+    synthesize_reference, to_16k, transformer_speaker_fallback, wer_summary,
 )
 
 
@@ -250,6 +250,23 @@ def main():
                     help="stage-1 filelist used for the fallback counts "
                          "(path|...|sid); e.g. "
                          "data/genshin_full_stage1/train.txt")
+    ap.add_argument("--stage1_sid_map", default=None,
+                    help="speaker_map.py JSON whose sid_map (stage-2 -> "
+                         "stage-1) is applied ONLY when the frozen Generator "
+                         "decodes codes.  This is the fix for a stage-2 run "
+                         "trained with its own id space: the transformer keeps "
+                         "the ids it learned, the vocoder gets the id that "
+                         "renders the same voice.  No re-preprocessing.")
+    ap.add_argument("--stage2_spk_fallback", choices=("none", "mean", "zero"),
+                    default="none",
+                    help="same imputation for the stage-2 encoder/decoder "
+                         "speaker tables, using the stage-2 clip counts "
+                         "(--speaker_counts_filelist)")
+    ap.add_argument("--zero_spk", choices=("none", "encoder", "decoder", "both"),
+                    default="none",
+                    help="zero a stage-2 speaker table before generation, to "
+                         "measure which injection site actually carries the "
+                         "voice (the encoder add sits before _temporal_norm)")
     ap.add_argument("--asr_model", default="Qwen/Qwen3-ASR-0.6B")
     ap.add_argument("--language", default="English")
     ap.add_argument("--save_dir", default=None,
@@ -292,6 +309,12 @@ def main():
                              "(otherwise every channel is already absent).")
 
     config = OmegaConf.load(args.config)
+    if args.stage1_sid_map is None:
+        args.stage1_sid_map = config.train.get("stage1_speaker_map", None)
+    if args.stage1_sid_map and config.train.get("speaker_map", None):
+        print("WARNING: train.speaker_map is set, so the dataset already emits "
+              "stage-1 ids; ignoring stage1_speaker_map.")
+        args.stage1_sid_map = None
     device = torch.device(args.device if args.device else
                           ("cuda:0" if torch.cuda.is_available() else "cpu"))
     if args.temperature is None:
@@ -331,7 +354,8 @@ def main():
                          "hint channels; check transformer.hints_json.")
     counts_path = (args.speaker_counts_filelist
                    or config.train.get("train_filelist", None))
-    need_counts = bool(args.by_speaker or args.speaker_buckets)
+    need_counts = bool(args.by_speaker or args.speaker_buckets
+                       or args.stage2_spk_fallback != "none")
     sid_counts = speaker_clip_counts(counts_path) if need_counts else {}
     bucket_filter = ([b.strip() for b in args.speaker_buckets.split(",")
                       if b.strip()] if args.speaker_buckets else None)
@@ -376,6 +400,10 @@ def main():
               f"stage-1 clip(s) ({reliable} reliable speakers)")
     sample_rate = int(config.data.sampling_rate)
     frame_samples = code_frame_samples(net_g)
+    sid_map = load_sid_map(args.stage1_sid_map)
+    if sid_map:
+        print(f"stage-1 decode speaker map: {len(sid_map)} id(s) from "
+              f"{args.stage1_sid_map}")
     labels = [f"{item_basename(dataset.items[i]['spec_codes'])} "
               f"({items[k]['spec_codes'].shape[1] * frame_samples / sample_rate:.2f}s)"
               for k, i in enumerate(picked)]
@@ -429,7 +457,7 @@ def main():
 
     floor = None
     if "reference" in arms:
-        ref_wavs = synthesize_reference(net_g, items, device)
+        ref_wavs = synthesize_reference(net_g, items, device, sid_map=sid_map)
         save("reference", ref_wavs)
         ref_hyps = asr.transcribe(to_16k(ref_wavs, sample_rate))
         floor = wer_summary(list(zip(texts, ref_hyps)))
@@ -482,6 +510,30 @@ def main():
             current["rope"] = bool(layout["rope"])
             current["fim_lookahead"] = int(layout["fim_lookahead"])
         epoch, step = load_transformer_weights(net, path)
+        if args.zero_spk != "none":
+            from stage2_wer import transformer_speaker_fallback
+            # zero every row = the trained "no speaker" state
+            counts = {i: 0 for i in range(int(config.transformer.get(
+                "n_speakers", 0)) or 0)}
+            modules = (("encoder",) if args.zero_spk == "encoder"
+                       else ("decoder",) if args.zero_spk == "decoder"
+                       else ("encoder", "decoder"))
+            n_zero = 0
+            for name in modules:
+                mod = getattr(net, name, None)
+                emb = getattr(mod, "spk_emb", None)
+                if emb is not None:
+                    n_zero += int(emb.weight.shape[0])
+                    with torch.no_grad():
+                        emb.weight.zero_()
+            print(f"    zero_spk {args.zero_spk}: zeroed {n_zero} row(s)")
+        if args.stage2_spk_fallback != "none":
+            n_stage2 = transformer_speaker_fallback(
+                net, sid_counts, min_clips=args.stage1_spk_min_clips,
+                mode=args.stage2_spk_fallback)
+            print(f"    stage-2 speaker fallback "
+                  f"({args.stage2_spk_fallback}): replaced {n_stage2} row(s) "
+                  f"with < {args.stage1_spk_min_clips} stage-2 clip(s)")
         tag = f"{os.path.basename(os.path.dirname(path))}@{step}"
         print(f"=== {os.path.basename(os.path.dirname(path))}/"
               f"{os.path.basename(path)}  (epoch {epoch}, step {step})")
@@ -497,7 +549,8 @@ def main():
                 stop_on_eos=not args.ignore_eos,
                 hint_arg_fn=hint_arg_fn,
                 hint_guidance=args.hint_guidance,
-                hint_guidance_books=args.hint_guidance_books)
+                hint_guidance_books=args.hint_guidance_books,
+                sid_map=sid_map)
             save(f"{tag}_generated", wavs)
             hyps = asr.transcribe(to_16k(wavs, sample_rate))
             summary = wer_summary(list(zip(texts, hyps)))
@@ -517,7 +570,7 @@ def main():
                 hint_arg_fn=hint_arg_fn,
                 hint_guidance=args.hint_guidance,
                 hint_guidance_books=args.hint_guidance_books,
-                best_of=args.fim_best_of)
+                best_of=args.fim_best_of, sid_map=sid_map)
             idx = [i for i, w in enumerate(wavs) if w is not None]
             if not idx:
                 print("    [fim] no item was long enough to split\n")

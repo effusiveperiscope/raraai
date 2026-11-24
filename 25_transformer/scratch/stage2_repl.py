@@ -673,12 +673,23 @@ class Stage2REPL:
                  auto_play: bool = False,
                  reader: Optional[KeyReader] = None,
                  hint_mode: Optional[str] = None,
-                 precision: str = "fp32"):
+                 precision: str = "fp32",
+                 stage1_sid_map: Optional[str] = None):
         self.config = config
         self.checkpoint = checkpoint
         self.device = device
         self.precision = resolve_precision(precision, device)
         self.generator_checkpoint = generator_checkpoint
+        from stage2_wer import load_sid_map
+        if stage1_sid_map is None:
+            stage1_sid_map = config.train.get("stage1_speaker_map", None)
+        if stage1_sid_map and config.train.get("speaker_map", None):
+            print("WARNING: train.speaker_map is set; ignoring "
+                  "stage1_speaker_map for decode.")
+            stage1_sid_map = None
+        self.stage1_sid_map = load_sid_map(stage1_sid_map)
+        if self.stage1_sid_map:
+            print(f"stage-1 decode speaker map: {len(self.stage1_sid_map)} id(s)")
         self.audio = bool(audio) and generator_checkpoint is not None
         self._audio_disabled = not audio
         self.out_dir = out_dir
@@ -1562,7 +1573,8 @@ class Stage2REPL:
             return False
         n_spec = self.net.spec_codebook_num
         codes = codes.to(self.device)
-        sid_t = torch.tensor([int(sid)], dtype=torch.long, device=self.device)
+        gen_sid = int(self.stage1_sid_map.get(int(sid), int(sid)))
+        sid_t = torch.tensor([gen_sid], dtype=torch.long, device=self.device)
         try:
             # `infer_from_codes` builds a graph unless we say otherwise (it is
             # also used from training-time sampling), and nothing here trains.
@@ -2408,6 +2420,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="fill (`n`): draw this many candidate spans and "
                              "keep the one that best predicts the real suffix "
                              "start (needs a fim_lookahead checkpoint)")
+    parser.add_argument("--stage1_sid_map", default=None,
+                        help="speaker_map.py JSON (stage-2 -> stage-1 ids), "
+                             "applied only when the frozen Generator decodes; "
+                             "fixes a run trained in a different id space")
     return parser.parse_args(argv)
 
 
@@ -2438,7 +2454,8 @@ def main(argv=None) -> int:
         auto_play=args.play,
         reader=KeyReader(force_line_mode=args.line_mode),
         hint_mode=args.hints,
-        precision=args.precision)
+        precision=args.precision,
+        stage1_sid_map=args.stage1_sid_map)
 
 
     # Initial state, before the (slow) model build, so --list_speakers stays

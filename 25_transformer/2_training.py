@@ -555,6 +555,22 @@ class TrainModule(pl.LightningModule):
         self._wer_failed = False
         self._wer_floor = None
 
+        # Stage-2 -> stage-1 speaker-id map applied ONLY when the frozen
+        # Generator decodes codes (see AGENTS.md §6.1).  A run trained on a
+        # stage-2 filelist whose ids differ from the stage-1 filelist's (the
+        # shipped combined corpus does: Nahida is 1777 vs 1563) conditions the
+        # transformer on the id it learned but renders a *different* voice for
+        # that id.  `train.speaker_map` fixes this at data time and needs a
+        # retrain; this map fixes an existing checkpoint's audio without one.
+        self.stage1_speaker_map = config.train.get("stage1_speaker_map", None)
+        if self.stage1_speaker_map and config.train.get("speaker_map", None):
+            print("WARNING: both train.speaker_map and train.stage1_speaker_map "
+                  "are set. The dataset has already canonicalised the ids, so "
+                  "re-mapping them at decode would be wrong -- disabling "
+                  "stage1_speaker_map.")
+            self.stage1_speaker_map = None
+        self._gen_sid_map_cache = None
+
 
 
         # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a *synthetic*
@@ -1325,12 +1341,34 @@ class TrainModule(pl.LightningModule):
                     (g == p).float()[valid].mean())
 
 
+    def _gen_sid_map(self):
+        """Stage-2 -> stage-1 id map (``train.stage1_speaker_map``), lazily."""
+        if self._gen_sid_map_cache is None:
+            from stage2_wer import load_sid_map
+
+            self._gen_sid_map_cache = load_sid_map(self.stage1_speaker_map)
+            if self._gen_sid_map_cache:
+                print(f"Stage-1 decode speaker map: "
+                      f"{len(self._gen_sid_map_cache)} id(s) from "
+                      f"{self.stage1_speaker_map} (the transformer keeps its "
+                      f"own ids; only infer_from_codes is remapped)")
+        return self._gen_sid_map_cache
+
+    def _gen_sid(self, sid):
+        """Map a stage-2 speaker id to the stage-1 id the Generator renders."""
+        mapping = self._gen_sid_map()
+        if not mapping:
+            return sid
+        flat = [mapping.get(int(s), int(s)) for s in sid.reshape(-1)]
+        return torch.tensor(flat, dtype=sid.dtype, device=sid.device).view(
+            sid.shape)
+
     def _decode_codes(self, codes, sid):
         """(K, T) codes -> (waveform, f0 in Hz (T,)) through stage 1."""
         n_spec = self.net.spec_codebook_num
         audio, f0 = self.net_g.infer_from_codes(
-            codes[:n_spec].unsqueeze(1), codes[n_spec:].unsqueeze(1), sid,
-            return_pitch=True)
+            codes[:n_spec].unsqueeze(1), codes[n_spec:].unsqueeze(1),
+            self._gen_sid(sid), return_pitch=True)
         return audio[0].squeeze(0).float().cpu().numpy(), f0[0]
 
     def _log_audio(self, j, gt, pred, sid, tag: str = ""):
@@ -1459,6 +1497,7 @@ class TrainModule(pl.LightningModule):
               f"asr={self.config.train.get('wer_asr_model', 'Qwen/Qwen3-ASR-0.6B')}")
         return {"items": items, "texts": texts, "picked": picked,
                 "dataset": dataset, "asr": asr, "hint_fn": hint_fn,
+                "sid_map": self._gen_sid_map(),
                 "sample_rate": int(config.data.sampling_rate)}
 
     @torch.no_grad()
@@ -1510,7 +1549,8 @@ class TrainModule(pl.LightningModule):
                 if self.wer_reference and self._wer_floor is None:
                     torch.manual_seed(seed)
                     ref_wavs = W.synthesize_reference(self.net_g, items,
-                                                      self.device)
+                                                      self.device,
+                                                      sid_map=st["sid_map"])
                     hyps = st["asr"].transcribe(W.to_16k(ref_wavs, sample_rate))
                     self._wer_floor = W.wer_summary(list(zip(texts, hyps)))
                 if self.wer_reference and self._wer_floor is not None:
@@ -1521,7 +1561,8 @@ class TrainModule(pl.LightningModule):
                     self.net, self.net_g, items, phone_pad, self.device,
                     batch_size=batch_size, max_frames=max_frames,
                     temperature=temperature, top_k=top_k,
-                    stop_on_eos=not ignore_eos, hint_arg_fn=st["hint_fn"])
+                    stop_on_eos=not ignore_eos, hint_arg_fn=st["hint_fn"],
+                    sid_map=st["sid_map"])
                 hyps = st["asr"].transcribe(W.to_16k(wavs, sample_rate))
                 results["generated"] = W.wer_summary(list(zip(texts, hyps)))
 
@@ -1530,7 +1571,7 @@ class TrainModule(pl.LightningModule):
                     fim_wavs, _ = W.synthesize_fim(
                         self.net, self.net_g, items, phone_pad, self.device,
                         temperature=temperature, top_k=top_k,
-                        hint_arg_fn=st["hint_fn"])
+                        hint_arg_fn=st["hint_fn"], sid_map=st["sid_map"])
                     keep = [i for i, w in enumerate(fim_wavs) if w is not None]
                     if keep:
                         hyps = st["asr"].transcribe(W.to_16k(
@@ -1601,7 +1642,7 @@ class TrainModule(pl.LightningModule):
             audio, f0 = self.net_g.infer_from_codes(
                 codes[:, :n_spec].permute(1, 0, 2),
                 codes[:, n_spec:].permute(1, 0, 2),
-                sid_t, return_pitch=True)
+                self._gen_sid(sid_t), return_pitch=True)
         except Exception as e:
             print(f"Speaker probe synthesis failed: {e}")
             return
@@ -2025,6 +2066,14 @@ class TrainModule(pl.LightningModule):
             optim.zero_grad(set_to_none=True)
 
         loss = out["loss"]
+        if getattr(self.net, "spk_kl_weight", 0.0) > 0:
+            # VAE-style Gaussian prior on the low-rank speaker codes (see
+            # SpeakerEmbedding).  Added to the optimisation loss only; val_loss
+            # stays the pure code CE so it remains comparable across arms.
+            spk_kl = self.net.spk_kl(batch["sid"])
+            loss = loss + self.net.spk_kl_weight * spk_kl
+            self.log("train_spk_kl", spk_kl.detach(), on_step=True,
+                     on_epoch=True, prog_bar=False)
         # `manual_backward` (not `loss.backward()`) so Lightning keeps control
         # of AMP scaling / DDP grad sync should the precision ever change.
         self.manual_backward(loss)
@@ -2444,6 +2493,35 @@ def check_special_layout(state_dict, net, source, strict: bool = True):
                 f"ERROR: {message}  Use --transfer_from {source} instead of "
                 f"--resume_from, or start a fresh exp_name.")
         print(f"NOTE: {message}")
+
+    # Low-rank / VAE / FiLM speaker layout (``transformer.spk_rank``,
+    # ``spk_norm``, ``spk_init``, ``spk_film_memory``, ``spk_kl_weight``).
+    # Rank changes parameter *shapes*; the others change the function while
+    # keeping shapes, so the persistent marker is the only trace for those.
+    spk_marker = state_dict.get("net.spk_layout_marker")
+    want_spk = getattr(net, "spk_layout", (0, "none", "default", False, False))
+    if spk_marker is not None:
+        got = spk_marker.reshape(-1).tolist()
+        got_spk = (int(got[0]), "l2" if got[1] else "none",
+                   "zero" if got[2] else "default", bool(got[3]),
+                   bool(got[4]))
+        if got_spk != want_spk:
+            raise SystemExit(
+                f"ERROR: {source} was trained with a different speaker layout "
+                f"(spk_rank/spk_norm/spk_init/spk_film/spk_kl = {got_spk}) "
+                f"than this model ({want_spk}).  Rank changes the embedding "
+                f"shapes and the other flags change the function; start a "
+                f"fresh exp_name with the checkpoint's config.")
+    elif want_spk != (0, "none", "default", False, False):
+        message = (f"{source} has no net.spk_layout_marker, i.e. it was trained "
+                   f"with the full per-id speaker tables, but this model is "
+                   f"built with {want_spk}.  The base weights transfer, the "
+                   f"new speaker parameters start fresh.")
+        if strict:
+            raise SystemExit(
+                f"ERROR: {message}  Use --transfer_from (fresh exp_name) rather "
+                f"than --resume_from.")
+        print("NOTE: " + message)
 
     # ``transformer.rope`` changes no tensor shape (the rotary embeddings have
     # no parameters), so a mismatched checkpoint would load *completely* and
