@@ -7,7 +7,7 @@
 # Expected filelists (written by 2_preprocess):
 #   data/base/train_stage2.txt
 #   data/base/val_stage2.txt
-exp_name: transformer_mlp_lora_v1
+exp_name: transformer_mlp_lora_v2
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -207,6 +207,9 @@ transformer:
   # (2_training.py:check_special_layout refuses the mismatch).
   length_cond: true
   n_len_buckets: 9
+  fim_seam_frames: 4
+  fim_seam_weight: 4.0
+  fim_lookahead: 4
   # Span sampling for FIM items (training only; val stays plain AR so val_loss is
   # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
   fim_min_frames: 8

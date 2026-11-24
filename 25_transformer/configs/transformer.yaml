@@ -21,7 +21,7 @@
 # changes positional behaviour without changing a single tensor shape, so a
 # resume would silently continue with the wrong function.  Warm-start it with
 # `--transfer_from checkpoints_stage2/transformer_hints_v2.1_wordsem_b/last.ckpt`.
-exp_name: transformer_hints_v2.3
+exp_name: transformer_hints_v2.4
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -256,7 +256,7 @@ transformer:
   # records the value and 2_training.py:check_special_layout refuses to mix
   # them.  0 disables (the historical layout).  Enable it on a fresh exp_name
   # and warm-start with --transfer_from.
-  fim_lookahead: 0
+  fim_lookahead: 4
   # Span sampling for FIM items (training only; val stays plain AR so val_loss is
   # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
   fim_min_frames: 8
@@ -402,7 +402,7 @@ finetune:
   train_memory_norm: false
   # Separate from train.lr: 5e-6 is the operating point of a *full* fine-tune,
   # while fresh low-rank weights want ~1e-3.
-  lr: 5.0e-4
+  lr: 3.0e-6
   weight_decay: 0.0
   # Cosine budget for this mode; null -> train.cosine_anneal_end.  A fine-tune
   # is short, so set this (and train.max_steps) to the number of steps you
@@ -722,4 +722,37 @@ train:
   ood_samples: 1
   ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
   ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
-  ood_sid: 0             # null -> speaker of the first sampled val item
+  ood_sid: 1542             # null -> speaker of the first sampled val item
+
+  # ---- end-to-end WER probe (v2.4) ----------------------------------------
+  # Every `wer_interval` epochs, decode `wer_items` val utterances through the
+  # frozen stage-1 Generator + Qwen3-ASR and log the recognised-text WER.  The
+  # machinery is `stage2_wer.py`, shared with `scratch/eval_stage2_wer.py`, so
+  # training-time and offline numbers are the same computation.  Costs one ASR
+  # load (~1.2 GB, first probe only) and a few seconds per epoch; 0 disables it
+  # and nothing is loaded.
+  #   wer/generated   plain AR sampling (the real number)
+  #   wer/fim         middle third of the GROUND-TRUTH codes regenerated with
+  #                   `infill` and spliced back (prefix/suffix real): isolates
+  #                   span generation + seam continuity from content errors
+  #   wer/reference   ground-truth codes through the same vocoder (the floor)
+  # Read it as a trend: 8-24 utterances is noisy (+/-3 pp at 24), and the
+  # teacher-forced val_loss remains the low-variance decision metric.
+  wer_interval: 0           # 0 = off; e.g. 5 = every 5 epochs
+  wer_items: 8
+  wer_fim: true
+  wer_reference: true       # the floor is computed once and cached
+  # Hint state for generation: "null" (the trained level-0 state -- the honest
+  # no-oracle default) or "cond" (each item's real .cond).
+  wer_hints: "null"
+  wer_temperature: null     # null -> sample_temperature
+  wer_top_k: null           # null -> sample_top_k
+  wer_max_frames: 1000
+  wer_batch_size: 4
+  wer_ignore_eos: false
+  wer_seed: 0               # fixed so epochs draw the same items/samples
+  wer_asr_model: "Qwen/Qwen3-ASR-0.6B"
+  wer_language: "English"
+  # Transcript sources (path|sid|text); null -> every filelists_2/*.txt.
+  wer_source_filelists: null
+

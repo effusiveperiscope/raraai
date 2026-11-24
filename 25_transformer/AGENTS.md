@@ -47,6 +47,9 @@ ultimate_xc.py       (imported for side effects; see footguns)
 merge_pitch_codec.py Splice one stage-1 run's pitch codec path into another
                      checkpoint (see §7; prefixes come from
                      modeling.generator.PITCH_PATH_PREFIXES)
+stage2_wer.py        Shared end-to-end WER machinery (codes -> stage-1 audio ->
+                     ASR -> WER, FIM splice); used by 2_training.py and
+                     scratch/eval_stage2_wer.py (see §4)
 
 configs/
   base.yaml          Stage-1 hyperparameters (Generator, codecs, discriminators)
@@ -1255,6 +1258,52 @@ restores step 213 710 *and* the cosine position, so with `cosine_anneal_end:
 300000` only ~86 k steps of decay remain before the LR turns around again; a
 longer budget means a fresh `exp_name` + `--transfer_from` (no optimizer state)
 with `cosine_anneal_end` sized to the new total.
+
+### End-to-end WER probe (stage 2, `train.wer_interval`)
+
+`stage2_wer.py` is the single implementation of "codes -> stage-1 audio -> ASR
+-> WER".  Both `2_training.py` (the per-epoch probe) and
+`scratch/eval_stage2_wer.py` (the offline eval matrix) import it, so the two
+numbers are the same computation -- including the text normalisation, the WER
+definition, the decoding mode and the FIM splice.  Nothing in the module imports
+`2_training.py`; the ASR import is lazy inside `stage2_wer.Asr`.
+
+The probe is off by default (`wer_interval: 0`).  When enabled it runs from
+`on_train_epoch_end` every `wer_interval` epochs and logs:
+
+| tag | arm |
+|---|---|
+| `wer/generated` | plain autoregressive sampling (the real number) |
+| `wer/fim` | the middle third of each item's **ground-truth** codes regenerated with `CodeTransformer.infill` and spliced back in time order (prefix/suffix real) |
+| `wer/reference` | the item's own codes through the same vocoder + ASR (the floor, computed once and cached) |
+
+plus `wer/<arm>_{sub,del,ins}`.  `wer/fim` is whole-utterance, not span-only:
+two thirds of the audio is real, so it sits near the floor and answers "does the
+regenerated span stay intelligible and join up", not "is the content right".
+`--ignore_eos` (offline) / `train.wer_ignore_eos` decode exactly the item's
+length; `wer_hints: cond` supplies the item's real `.cond`, the default `null`
+is the trained level-0 state.
+
+Details that matter:
+
+- The eval dataset is built separately from `self.test_dataset`: the latter is
+  cropped to `train.max_frames`, while WER must score the whole utterance the
+  reference transcript describes.  References come from
+  `train.wer_source_filelists` (null -> every `filelists_2/*.txt`).
+- `synthesize_fim` / `fim_split` (p = m = T//3) are shared with
+  `_log_infill`, so the eval span and the TensorBoard probe cannot drift.
+- The probe runs under `torch.random.fork_rng`, so its seeded sampling does not
+  perturb the training RNG stream (FIM spans, hint dropout).  Any failure (ASR
+  OOM, missing reference, no `generator_checkpoint`) prints and disables the
+  probe instead of breaking the run.
+- `scratch/eval_stage2_wer.py` reads `rope` / `fim_lookahead` back from each
+  checkpoint (`peek_layout`), so a mixed list of runs can be scored with one
+  config.  Its `--arms` default is `generated,reference,fim`; `--fim_best_of`
+  ranks candidates with `infill_seam_score` on a `fim_lookahead` model.
+- Sample size: 8-24 utterances gives roughly +/-3 pp at 24; treat the WER trend
+  as a sanity check next to the teacher-forced `val_loss`, not a decision
+  metric on its own.  A spike in `wer/fim` while `wer/generated` is flat points
+  at the seam/span path, not at text conditioning.
 
 ### LoRA fine-tuning (stage 2, `--finetune`)
 
@@ -2705,26 +2754,39 @@ python scratch/eval_stage2_checkpoints.py \
 # End-to-end intelligibility: sample codes from one or more stage-2 checkpoints,
 # decode them with the frozen stage-1 Generator and score the result with
 # Qwen3-ASR against the source transcripts (WER, with S/D/I counts).  The
-# "reference" arm decodes the ground-truth codes through the same vocoder and is
-# the floor (vocoder + ASR error), so a checkpoint's gap to it is what the
-# transformer actually contributes.  Needs `--generator_checkpoint`
-# (checkpoints_stage1/...); `--ignore_eos` removes the model's duration errors;
-# `--save_dir` keeps the wavs.  Noisy: 24 utterances (~440 words) gives a
-# ~+/-3 pp 95 % interval, so use --num_items 50+ before acting on <1 pp.
+# machinery is stage2_wer.py, shared with the training-time `wer/*` probe, so an
+# offline number and a logged one are the same computation.  `generated` is
+# plain AR sampling, `reference` decodes the ground-truth codes through the same
+# vocoder (the floor), and `fim` regenerates the middle third of each item's
+# ground-truth codes with `infill` and splices it back (seam/continuity arm).
+# `--ignore_eos` removes the model's duration errors; `--save_dir` keeps wavs.
+# `--fim_best_of N` ranks candidates by `infill_seam_score` (needs a
+# fim_lookahead model).  `rope`/`fim_lookahead` are read from each checkpoint,
+# so a mixed list works with one config.  Noisy: 24 utterances (~440 words) is
+# a ~+/-3 pp 95 % interval, so use --num_items 50+ before acting on <1 pp.
 python scratch/eval_stage2_wer.py \
     --checkpoints checkpoints_stage2/<exp>/best-checkpoint.ckpt \
                   checkpoints_stage2/<exp>/last.ckpt \
-    --num_items 20 --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt
+    --num_items 24 --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt
 # ...with the hint channels supplied from each item's .cond instead of running
 # in the trained null state.  Run both ways: the hint arm should improve WER
 # (measured -1.2 to -3.0 pp on transformer_v0.9); an identical result means the
-# dataset did not actually carry the hints (the v0.8-era bug, see
-# scratch/HINTS_V1_PLAN.md §1.2).  Needs transformer.hints: true + a checkpoint
-# that has the hint tables.
+# dataset did not actually carry the hints.  Needs transformer.hints: true + a
+# checkpoint that has the hint tables.
 python scratch/eval_stage2_wer.py --hints \
     --checkpoints checkpoints_stage2/<exp>/last.ckpt \
     --num_items 24 --generator_checkpoint checkpoints_stage1/base_v0.7/last.ckpt \
     --ignore_eos
+
+# Same metrics during training: every `wer_interval` epochs the run decodes
+# `wer_items` val utterances and logs wer/{generated,fim,reference} (plus S/D/I)
+# and prints a one-line summary.  Off by default (0); the ASR weights load on
+# the first probe only.  `wer_hints: cond` uses each item's .cond, the default
+# "null" is the trained no-oracle state.
+#   configs/transformer.yaml:
+#     wer_interval: 5
+#     wer_items: 8
+#     wer_fim: true
 
 # FIM / span-regeneration smoke test (CPU; safe next to a GPU training job):
 # apply_fim reorder + length buckets, mixed AR+FIM loss, sentinel masking in

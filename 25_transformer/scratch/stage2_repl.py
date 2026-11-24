@@ -917,6 +917,7 @@ class Stage2REPL:
         # `fim_layout_marker` is the only trace.  A wrong value loads every
         # tensor and silently disables `infill_seam_score` / `best_of`.
         look = 0
+        keys = set(state)
         for key in keys:
             if key == "fim_layout_marker" or key.endswith(".fim_layout_marker"):
                 look = int(state[key].reshape(-1)[0].item())
@@ -928,8 +929,6 @@ class Stage2REPL:
         # model loaded into a non-hint config silently drops every hint tensor,
         # and a monotone/FiLM checkpoint loaded into the table model loses the
         # trained direction (which reads as "the channel does nothing").
-        keys = set(state)
-
         def has(suffix: str) -> bool:
             return any(k == suffix or k.endswith("." + suffix) for k in keys)
 

@@ -15,3 +15,8 @@ test_in
 
 # scratch/run_hints_v1.py run directory (logs, generated configs)
 scratch/hints_v1_runs/
+
+# web client runtime artefacts (the job store is in memory; this is the
+# stage-2 REPL's nominal output dir, created by web_client/engine.py)
+web_client/outputs/
+__pycache__/
