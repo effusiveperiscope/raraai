@@ -21,7 +21,14 @@
 # changes positional behaviour without changing a single tensor shape, so a
 # resume would silently continue with the wrong function.  Warm-start it with
 # `--transfer_from checkpoints_stage2/transformer_hints_v2.1_wordsem_b/last.ckpt`.
-exp_name: transformer_hints_v2.5
+# v2.6 = the v2.5 low-rank speaker layout (rank 128), but the codes/projection
+# are warm-started from the truncated SVD of v2.4's full tables
+# (scratch/init_lowrank_speakers.py) instead of `spk_init: zero`.  v2.5's
+# zero-init codes stayed tiny (norm 0.03-0.9, effective rank 8.5/12 vs 120/305)
+# and its speakers blended together; see AGENTS.md §4 "Speaker-embedding
+# structure".  Fresh exp_name, `--transfer_from` the SVD checkpoint (a resume
+# would fail on the speaker layout).
+exp_name: transformer_hints_v2.6_spk128
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -67,7 +74,11 @@ transformer:
   # additive encoder path is before the norm, which removes a per-clip
   # constant); zero-init, so a --transfer_from starts identical.
   # All are parameter-set changes -> fresh exp_name + --transfer_from.
-  spk_rank: 64
+  # This run (v2.6): rank 128 keeps 66 % of v2.4's decoder table variance
+  # (64: 50 %, 256: 83 %), and the codes are SVD-initialised by
+  # scratch/init_lowrank_speakers.py -- `spk_init: zero` below only describes
+  # the constructor (the marker), the transfer overwrites the values.
+  spk_rank: 128
   spk_norm: "none"
   spk_init: "zero"
   spk_kl_weight: 0.0
@@ -453,7 +464,10 @@ train:
   # each batch becomes more length-homogeneous (less within-batch diversity).
   # 8 = 128 items at bs=16, i.e. 0.09 % of the corpus per pool.
   bucket_pool_batches: 8
-  lr: 5e-6
+  # v2.6 warm-starts from v2.4 at step 114 640, where the 300 k cosine had
+  # already decayed 5e-6 -> ~3.7e-6; a 60 k budget starts there instead of
+  # re-warming to 5e-6.
+  lr: 3e-6
   betas:
   - 0.9
   - 0.98
@@ -542,8 +556,10 @@ train:
   # (the historical values) the run spends 700 k steps un-annealing and is back
   # at full LR by step 600 k.  2_training.py now warns once when a run crosses
   # `cosine_anneal_end` (see TrainModule._check_anneal_end).
-  cosine_anneal_end: 300000
-  max_steps: 300000
+  # v2.6: a short warm-started run (see exp_name) -- the anneal must end with
+  # the run, otherwise the periodic cosine climbs again after step 60 k.
+  cosine_anneal_end: 60000
+  max_steps: 60000
   max_epochs: -1
   # Code frames per training segment.  Code rate is 25 Hz (48 kHz / hop 480 /
   # Generator down_factor 4), so 512 frames = 20.5 s and covers 99.0 % of the

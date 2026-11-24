@@ -1328,6 +1328,54 @@ regenerated span stay intelligible and join up", not "is the content right".
 length; `wer_hints: cond` supplies the item's real `.cond`, the default `null`
 is the trained level-0 state.
 
+What the logged numbers actually are:
+
+- **`wer/<arm>` is a corpus-level ratio, not a mean of per-utterance WERs**: all
+  items' edit counts are summed and divided by the *total* reference word count
+  (`stage2_wer.wer_summary`), so one long line weighs more than a short one and
+  the value never drifts with the item count alone.
+- **`wer/<arm>_{sub,del,ins}` are raw integer counts** over the whole probe, not
+  fractions or rates: the Levenshtein breakdown of turning the reference into the
+  ASR hypothesis — `sub` = a reference word recognised as a different word,
+  `del` = a reference word missing from the hypothesis, `ins` = a hypothesis word
+  with no reference counterpart — with `wer = (sub + del + ins) / ref_words`.
+  `errors`, `words` and `n` are computed but **not logged**, so these three are
+  the only denominator clue in TensorBoard (their sum is `errors`, and
+  `errors / wer` recovers the word count of that arm). They are also the cheap
+  diagnosis: rising `del` = dropped/clipped words (early EOS, too-short
+  duration), rising `ins` = extra audio after the text (babble/repetition),
+  `sub` = intelligible but wrong words.
+- **Text normalisation is part of the metric**: lowercase, curly → straight
+  apostrophes, then only `[a-z0-9]+(?:'[a-z]+)*` tokens survive (punctuation is
+  dropped, so "don't" is one word and a number counts as a word). Both the
+  reference and the ASR hypothesis go through it, which is why a
+  punctuation-only difference is not an error.
+- **The same utterances every epoch.** `wer_items` is an *evenly spaced* pick
+  from the val rows that have a reference transcript (not a random draw), built
+  once at the first probe and reused (`self._wer_state`), so per-epoch numbers
+  are paired. With `wer_reference_audit` the pick is made over the pre-audit pool
+  and untrusted refs are removed afterwards, so raw and audit arms score a
+  subset of the same utterances instead of shifting every index.
+- **`wer/reference` is one cached number** (`self._wer_floor`), computed at the
+  first probe and re-logged unchanged every epoch: a flat line by construction,
+  and a property of *that* stage-1 checkpoint + reference set. Changing
+  `train.generator_checkpoint` (or the audit file) needs a fresh run to move it.
+- **`wer/fim` is conditional**: only when the model has `transformer.fim: true`
+  *and* at least one item produced audio, so its `_sub/_del/_ins` counts and
+  word denominator can differ from `wer/generated`'s.
+- **Sampling is seeded and isolated**: code sampling uses `wer_seed` (default 0)
+  inside `torch.random.fork_rng`, so an epoch's probe is reproducible and does
+  not advance the training RNG (FIM spans, hint dropout).
+- Config keys (`configs/transformer.yaml` `train.` block, commented there):
+  `wer_interval` (0 = off), `wer_items` (50 shipped, 8 if absent),
+  `wer_fim` / `wer_reference` (true), `wer_hints` (`null`|`cond`, unknown values
+  print and fall back to `null`), `wer_temperature` / `wer_top_k` (null →
+  `sample_temperature` / `sample_top_k`), `wer_max_frames` (1000),
+  `wer_batch_size` (4), `wer_ignore_eos` (false), `wer_seed` (0),
+  `wer_asr_model` (`Qwen/Qwen3-ASR-0.6B`), `wer_language` (`English`),
+  `wer_source_filelists` (null → every `filelists_2/*.txt`),
+  `wer_reference_audit` / `wer_reference_audit_mode` (`drop`|`override`).
+
 Details that matter:
 
 - The eval dataset is built separately from `self.test_dataset`: the latter is
@@ -1401,6 +1449,50 @@ smoothness (`spk_kl_weight`), and injection site (`spk_film_memory`).  A
 pretrained speaker encoder or conditioning on the frozen stage-1 voice vector is
 still the only mechanism that generalises to a speaker whose id never appeared
 in training.
+
+**Measured trap: `spk_rank: 64` + `spk_init: zero` collapses voice identity.**
+`transformer_hints_v2.5` (rank 64, no norm, zero init, 125 k steps, warm-started
+from `v2.4`) sounds like the speakers blend together, and the numbers agree:
+
+| per-id speaker vectors | v2.4 (full 768-d tables) | v2.5 (rank 64, zero init) |
+|---|---:|---:|
+| encoder mean norm / effective rank | 1.31 / 120 | 0.26 / 8.5 |
+| decoder mean norm / effective rank | 2.44 / 305 | 0.11 / 12 |
+| decoder norm, 1-clip speakers | 1.64 | 0.014 |
+| CE(true sid) | 2.292 | 2.287 |
+| CE(+random sid) - CE(true) | **+0.289** | **+0.170** |
+
+So the *loss* is slightly better while the model uses the speaker id 41 % less:
+predicting the corpus-average voice is easier, and WER cannot see identity.
+`spk_init: zero` makes every speaker start from the same vector, so the model
+learns the mean voice first and the codes stay tiny (a 1-clip speaker is
+effectively unconditioned). Rank is a second, smaller tax: rank 64 keeps 79 % of
+the v2.4 encoder table's variance but only **50 %** of the decoder's (rank 128:
+66 %, rank 256: 83 %).
+
+`scratch/eval_speaker_identity.py` measures this without audio (true vs
+rolled/random `sid`, plus the geometry table above) and should be run before
+trusting any speaker-layout change. `scratch/init_lowrank_speakers.py` fixes the
+initialisation by warm-starting the code/projection from the truncated SVD of an
+existing full table (``code = U S``, ``proj = Vhᵀ``, so ``code @ projᵀ`` is the
+best rank-r fit) and writes a transfer checkpoint:
+
+```bash
+python scratch/init_lowrank_speakers.py \
+    --base_checkpoint checkpoints_stage2/transformer_hints_v2.4/last.ckpt \
+    --speaker_checkpoint checkpoints_stage2/transformer_hints_v2.4/last.ckpt \
+    --rank 128 --out /tmp/spk_init.ckpt
+# then: fresh exp_name, matching spk_rank, --transfer_from /tmp/spk_init.ckpt
+```
+
+At step 0 that reproduces the full-table conditioning (rank 64/128/256: random-id
+delta +0.281/+0.285/+0.287 vs +0.289). **Do not try to patch an already-trained
+zero-init run** by writing the SVD vectors into it: `v2.5` + SVD vectors scores
+CE 2.322 with a random-id delta still at 0.170, because its decoder learned to
+ignore the channel. Warm-start from the full-table checkpoint and fine-tune
+from there; that also means the run cannot be `--resume_from`'d across the
+layout, and `configs/transformer.yaml` must have `spk_init: zero` (the marker
+records the *constructor* flag, not the transferred values).
 
 ### LoRA fine-tuning (stage 2, `--finetune`)
 
@@ -2191,6 +2283,14 @@ and `test_pitch_anchors.py` guard all of it.
   `train.ood_sid` or the first sampled val item's; failures are printed and
   never interrupt training.
 
+  When `train.wer_interval > 0` the run also logs the end-to-end intelligibility
+  probe from `on_train_epoch_end`: `wer/{generated,fim,reference}` plus the raw
+  `wer/<arm>_{sub,del,ins}` counts and a one-line `wer @ step N: ...` printout
+  (with the gap to the reference floor). Tags, arms, config keys and how to read
+  them are in §4 "End-to-end WER probe"; the probe is silent (writes nothing)
+  when disabled, when there is no `train.generator_checkpoint`, or after its
+  first failure, which it prints and then disables for the rest of the run.
+
 ---
 
 ## 6. Footguns & gotchas
@@ -2698,6 +2798,22 @@ python 2_training.py --config configs/transformer_mlp.yaml --finetune \
 python scratch/merge_lora.py \
     --checkpoint checkpoints_stage2/transformer_mlp_v2_lora/last.ckpt \
     --config configs/transformer_mlp.yaml --out /tmp/merged.ckpt
+
+# Speaker-layout health check (no audio): teacher-forced CE with the true sid vs
+# a rolled/random sid (a live channel is +0.2-0.3 nats), plus the per-id vector
+# norms / effective rank.  Run it on any spk_rank/spk_init change; the rank-64
+# zero-init run measured +0.170 vs the full table's +0.289.
+python scratch/eval_speaker_identity.py \
+    --checkpoints checkpoints_stage2/transformer_hints_v2.4/last.ckpt \
+                  checkpoints_stage2/transformer_hints_v2.5/last.ckpt
+
+# Initialise a low-rank speaker layout from a full table's truncated SVD, so a
+# warm start begins from the voices the old model already had instead of one
+# shared zero vector (see §4 "Speaker-embedding structure"):
+python scratch/init_lowrank_speakers.py \
+    --base_checkpoint checkpoints_stage2/transformer_hints_v2.4/last.ckpt \
+    --speaker_checkpoint checkpoints_stage2/transformer_hints_v2.4/last.ckpt \
+    --rank 128 --out /tmp/opencode/spk_init_r128.ckpt
 
 # Conditioning hints for stage 2: one <base>.cond per <base>.phone_ids.
 # intensity/register come from the stage-1 tensors; `semantic` is still
