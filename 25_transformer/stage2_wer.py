@@ -222,7 +222,14 @@ def load_references(paths: Sequence[str]) -> Dict[str, str]:
 
 def resolve_source_filelists(explicit: Optional[Sequence[str]] = None
                              ) -> List[str]:
-    """``--source_filelists`` or every ``filelists_2/*.txt``."""
+    """``--source_filelists`` or every ``filelists_2/*.txt``.
+
+    A config may write a single path as a scalar string rather than a one-item
+    list; ``list("filelists_2/x.txt")`` would silently turn it into a list of
+    characters, so unwrap it here.
+    """
+    if isinstance(explicit, str):
+        explicit = [explicit]
     return list(explicit or sorted(glob.glob("filelists_2/*.txt")))
 
 

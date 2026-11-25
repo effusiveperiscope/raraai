@@ -67,7 +67,7 @@ transformer:
   # All are parameter-set changes -> fresh exp_name + --transfer_from.
   spk_rank: 128
   spk_norm: "none"
-  spk_init: "default"
+  spk_init: "zero"
   spk_kl_weight: 0.0
   spk_film_memory: false
   # ---- coarse conditioning hints (v0.8) -----------------------------------
@@ -789,7 +789,7 @@ train:
   wer_asr_model: "Qwen/Qwen3-ASR-0.6B"
   wer_language: "English"
   # Transcript sources (path|sid|text); null -> every filelists_2/*.txt.
-  wer_source_filelists: filelists_2/mlp_linux.txt
+  wer_source_filelists: filelists_2/mlp_main_linux.txt
   # Optional scratch/audit_transcripts.py --out-references JSON.  Only the
   # Genshin v2 references were audited; the MLP corpus uses its raw filelist
   # text.  Null = raw filelist text.
