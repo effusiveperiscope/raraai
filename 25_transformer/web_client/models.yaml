@@ -39,20 +39,20 @@ defaults:
 
 models:
   genshin_v2:
-    label: "Genshin v2.4"
+    label: "Genshin v2.6"
     notes: >-
-      Hints v2 (per-word pitch anchors + word BERT), decoder RoPE, FIM, EOS.
+      Hints v2.6
       Stage-1 vocoder: base_v0.7.
     config: configs/transformer.yaml
-    checkpoint: checkpoints_stage2/transformer_hints_v2.4/last.ckpt
+    checkpoint: checkpoints_stage2/transformer_hints_v2.6_spk128/last.ckpt
     generator_checkpoint: checkpoints_stage1/base_v0.7/last.ckpt
     variants:
       base:
-        label: "v2.4 · last"
-        checkpoint: checkpoints_stage2/transformer_hints_v2.4/last.ckpt
+        label: "v2.6 · last"
+        checkpoint: checkpoints_stage2/transformer_hints_v2.6_spk128/last.ckpt
       best:
-        label: "v2.4 · best val"
-        checkpoint: checkpoints_stage2/transformer_hints_v2.4/best-checkpoint.ckpt
+        label: "v2.6 · best val"
+        checkpoint: checkpoints_stage2/transformer_hints_v2.6_spk128/best-checkpoint.ckpt
 
   mlp_lora:
     label: "MLP LoRA v2"

@@ -510,6 +510,47 @@ PyTorch updates these numbers; the way to re-measure is a short run of the same
 config for the current code and for `git stash`ed code, then median
 `Δt/Δstep` from the `loss_g` scalars in the TensorBoard events.
 
+### End-of-clip decode click (stage-1 decoder; affects every stage-2 sample)
+
+Synthesised stage-2 samples ended with a small **blip** even when the speech had
+already stopped and the tail was silence. It is not the transformer: every
+convolutional block in the two codec decoders and in the NSF decoder pads its
+right edge with zeros, so the *last* code frame is decoded without the right-hand
+context it had inside the clip, and on a quiet/unvoiced tail the missing context
+becomes a ~20 ms burst at the end of the waveform. Measured on a constant
+*silent* code frame (pure decoder test, averaged over noise draws): the last
+frame's RMS is **14.8x** the steady state before the fix (0.0078 vs 0.0005), and
+the burst is concentrated in the last ~20 ms (per-ms RMS rises to 0.017-0.025).
+Ground-truth codes show the same tail burst (0.0060 vs 0.0012 on the frame
+before), so it is a decoder artefact, not a code prediction.
+
+`Generator.infer_from_codes` / `infer` now decode `DECODE_TAIL_FRAMES` (**4**)
+extra code frames -- copies of the last frame -- before the codec decoders and
+again at the 100 Hz level before the NSF decoder, and trim the extra audio
+(`Generator._decode_from_indices` / `_decode_wave`). The extra frames only
+provide right context; the returned waveform has the same length and is
+unchanged outside the last ~40 ms. Measured after the fix: the constant-silence
+tail drops to **0.0005** (0.86x steady, i.e. the last frame is just a normal
+frame), and ground-truth decodes drop to 0.0004-0.0014. Free-running samples
+whose final frame is itself noisy (a low-probability sampled frame right before
+EOS -- at `temperature: 0` the same items end cleanly) keep that frame; that is
+sampling variance, not the decoder.
+
+Notes:
+
+- `tail_frames=0` reproduces the pre-fix waveform (e.g. for a paired
+  comparison); the value is a module constant, not a config key, because it
+  changes no parameter and no checkpoint.
+- Only inference is affected: stage-1 training still decodes random slices
+  through `self.dec` directly, and `2_preprocess.py` does not decode at all. No
+  re-preprocessing, no checkpoint change, no config change.
+- Consumers get it for free (TensorBoard samples, `wer/*`, `stage2_repl.py`,
+  `web_client`, `scratch/test_stage1_codes.py`). The WER `reference` floor is
+  computed through the same call, so a run's floor can move by a few errors when
+  compared across this change.
+- `scratch/check_decode_tail.py` reproduces the numbers (silent-code frame +
+  real GT/generated items, `tail=0` vs the default, averaged over noise draws).
+
 ### Pitch codec loss balance (stage 1, v0.6)
 
 The pitch codec (2 RVQ books over a 64-wide latent at 1/4 the frame rate) is
@@ -2879,6 +2920,15 @@ python scratch/test_stage1_codes.py test.wav \
 # --codebook_levels writes one wav per progressive spec-codebook level
 # (<name>_spec_k<K>.wav decodes with only the first K of 8 books; 'all' or
 # '1,2,4'; pitch codes always stay complete) plus a per-level mel L1.
+
+# End-of-clip transient ("blip" at the end of a generated sample, see §4): the
+# stage-1 decoder zero-pads its right edge; `tail=0` is the pre-fix path, the
+# default appends `DECODE_TAIL_FRAMES` copies of the last code frame before
+# decoding and trims them.  Numbers are averaged over decoder noise draws, as
+# unvoiced frames use random excitation.
+python scratch/check_decode_tail.py \
+    --stage1_checkpoint checkpoints_stage1/base_v0.7/last.ckpt \
+    --stage2_checkpoint checkpoints_stage2/<exp>/last.ckpt
 
 # Per-channel hint liveness + level sweeps on a stage-2 checkpoint (read-only,
 # no Trainer): CE[channel dropped] - CE[all hints] per channel, plus `all`

@@ -7,7 +7,19 @@
 # Expected filelists (written by 2_preprocess):
 #   data/base/train_stage2.txt
 #   data/base/val_stage2.txt
-exp_name: transformer_mlp_lora_v2
+
+# This file mirrors the *layout* of configs/transformer.yaml (same keys, same
+# comments) and differs only where the MLP corpus needs it: the full speaker
+# tables (25 speakers -- no low-rank speaker layout), no Genshin-specific
+# blocklists / transcript audits, and the LoRA fine-tune recipe enabled by
+# default.  Release history and per-switch details live in git log, AGENTS.md §4
+# and the comments in configs/transformer.yaml.
+#
+# MLP fine-tune history: transformer_mlp_v1 was a *full* fine-tune of the 136 M
+# parameter model on this corpus (41 869 train / 2 202 val clips, 25 speakers)
+# and overfit within a few thousand steps; transformer_mlp_lora_v1/v2 freeze the
+# base model and train ~2 % of the parameters instead (see `finetune` below).
+exp_name: transformer_mlp_lora_v3
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -18,11 +30,19 @@ transformer:
   decoder_layers: 12
   dim_feedforward: 2048
   dropout: 0.05
-  # Training-only decoder input-token dropout (see configs/transformer.yaml and
-  # AGENTS.md §4 "Decoder input-token dropout"): zero the code embedding of a
-  # random subset of past columns so the model learns to recover from a bad
-  # frame.  No new parameters, so it can be resumed/toggled like `dropout`; 0
-  # reproduces the historical behaviour.
+  # Training-only input-token dropout on the decoder (see
+  # DelayCodebookDecoder._forward_impl): zero the code embedding of a random
+  # subset of *past* columns, so the next-token target has to be predicted from
+  # a partially missing history.  This is the cheap analogue of scheduled
+  # sampling (no sampling loop, no new parameters, no state_dict change, so a
+  # resume with a different value is a plain loss change) and it targets the
+  # failure mode a purely teacher-forced AR model has when decoding freely: one
+  # bad frame is an input it has never seen.  Only the code content is dropped
+  # -- position, speaker, FIM region/length and the hint vectors still reach the
+  # decoder -- and column 0 (the start token, always real at inference) is never
+  # masked.  0 reproduces the historical behaviour bit-identically.  0.05-0.1
+  # is the useful range; watch val_loss / val_text_delta, a too-large value
+  # shows up as a text-delta collapse before it shows up in the loss.
   input_dropout: 0.05
   max_positions: 4096
   phone_vocab_size: 1024   # g2pen_tokenizer_clean vocab
@@ -31,6 +51,25 @@ transformer:
   # this must be large enough to hold every stage-1 id you use
   # (see speaker_map.py and train.speaker_map).
   n_speakers: 4096
+  # ---- speaker-embedding structure (optional; off = historical tables) ----
+  # Both sites condition on an independent nn.Embedding row per id, so nothing
+  # is shared between speakers and a 1-5-clip speaker has to learn 768 numbers.
+  # spk_rank > 0 replaces each table with a per-id code (rank,) + a SHARED
+  # (rank -> hidden) projection: the projection is trained by every speaker, so
+  # a rare id only learns `rank` numbers.  Start with 16 or 32.
+  # spk_norm "l2" fixes the code's norm (direction only); spk_init "zero" starts
+  # every speaker at the neutral vector (no random direction for rare ids).
+  # spk_kl_weight > 0 adds a per-id logvar and a Gaussian KL (VAE-style smooth
+  # latent): rare ids stay at the prior, high-data ids move; eval uses the mean.
+  # spk_film_memory adds the post-_temporal_norm FiLM injection site (the
+  # additive encoder path is before the norm, which removes a per-clip
+  # constant); zero-init, so a --transfer_from starts identical.
+  # All are parameter-set changes -> fresh exp_name + --transfer_from.
+  spk_rank: 128
+  spk_norm: "none"
+  spk_init: "default"
+  spk_kl_weight: 0.0
+  spk_film_memory: false
   # ---- coarse conditioning hints (v0.8) -----------------------------------
   # Five optional side channels built by hints/build.py (see HINTS_PLAN.md and
   # hints/README.md).  Each continuous value is bucketed at load time with the
@@ -207,8 +246,33 @@ transformer:
   # (2_training.py:check_special_layout refuses the mismatch).
   length_cond: true
   n_len_buckets: 9
+  # FIM seam continuity (v0.7-seam).  Two independent knobs, both about the
+  # *join* between the generated span and the suffix (the audible weak point of
+  # PSM: the middle is the last thing in the sequence, and nothing is ever
+  # predicted after it, so plain PSM never supervises the transition).
+  #
+  # fim_seam_frames/fim_seam_weight up-weight the CE of the last N *middle*
+  # targets -- the frames time-adjacent to the suffix.  Objective only: no
+  # tensors, no shape change, safe to --resume_from an existing FIM run.  The
+  # loss is renormalised (sum(w*ce)/sum(w)), so only the gradient allocation
+  # moves, not the loss scale.  0 / 1.0 disables it.  Watch
+  # val_fim_seam_acc / fim_middle_acc_late.  If the span starts pacing badly
+  # (content crammed into the last frames), lower fim_seam_weight first --
+  # 4 frames at 4x is a deliberately strong push on a short span.
   fim_seam_frames: 4
   fim_seam_weight: 4.0
+  #
+  # fim_lookahead repeats the first N suffix frames after the middle:
+  #   prefix <SUF> suffix <MID> middle <SUF> suffix[:N]
+  # so "predict the real continuation of the span" becomes a training target
+  # (fim_lookahead_loss/_acc, val_fim_lookahead_loss) instead of something the
+  # model can only infer.  It also enables CodeTransformer.infill(best_of=N),
+  # which ranks candidates by the teacher-forced CE of the true suffix start --
+  # i.e. "does this span actually join up?".  Training layout only (no new
+  # parameters), but it IS a contract: the persistent net.fim_layout_marker
+  # records the value and 2_training.py:check_special_layout refuses to mix
+  # them.  0 disables (the historical layout).  Enable it on a fresh exp_name
+  # and warm-start with --transfer_from.
   fim_lookahead: 4
   # Span sampling for FIM items (training only; val stays plain AR so val_loss is
   # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
@@ -226,7 +290,7 @@ transformer:
   # inaudible), and the pitch books have a 2x larger vocabulary so a much
   # flatter cross-entropy (log 128 vs log 64).
   # Set to [1, 1, 1, 1, 1, 1, 1, 1, 1, 1] (or delete) for the old uniform mean.
-  codebook_weights: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.4, 0.7, 0.5]
+  codebook_weights: [1.0, 0.9, 0.9, 0.8, 0.7, 0.6, 0.5, 0.5, 0.7, 0.5]
   # Soft curriculum: linearly interpolate the weights from uniform (epoch 0)
   # to the list above (epoch >= N), so early training is not dominated by the
   # fine books before the coarse structure exists.  0 = apply immediately.
@@ -309,35 +373,59 @@ gen:
   upsample_input: 192
 
 # ----------------------------------------------------------- finetune ----
-# LoRA fine-tuning: `python 2_training.py --config configs/transformer_mlp.yaml
-# --finetune --transfer_from <base>.ckpt`.  See modeling/lora.py and the long
-# note in configs/transformer.yaml.
+# LoRA fine-tuning (``python 2_training.py --finetune --transfer_from <ckpt>``,
+# see modeling/lora.py).  The flag is a *training mode*, not part of the model
+# definition: adapters are injected into the model tree when ``enabled`` is
+# true, everything else is frozen, and a single AdamW at ``lr`` (below) trains
+# only the adapters plus the speaker rows.
 #
-# This block is why the run exists: a full fine-tune of the 136 M-parameter
-# model on the MLP corpus (41 869 clips, 25 speakers) overfits within a few
-# thousand steps -- on transformer_mlp_v1 train CE went 2.35 -> 1.96 while val
-# CE turned around at ~2.6 k steps (2.25) and rose to 2.36 by 15.7 k, with
-# val_acc 0.334 -> 0.317.  LoRA freezes the base and trains a ~2 % subspace,
-# which slows that drift without touching the code space (no re-preprocessing).
+# Why: a full fine-tune of this 136 M-parameter model on a small corpus overfits
+# within a few thousand steps (measured on ``transformer_mlp_v1``: train CE
+# 2.35 -> 1.96 while val CE turned around at ~2.6 k steps, 2.25 -> 2.36 by
+# 15.7 k, with val_acc 0.334 -> 0.317).  With ``lora_B`` zero-initialised the
+# adapters start as an exact identity, so ``--transfer_from`` reproduces the
+# base checkpoint bit-for-bit.
 #
-# Contract: changes the parameter set -> fresh exp_name + --transfer_from (a
-# plain checkpoint cannot be --resume_from'd into it, and a LoRA checkpoint
-# into enabled: false is fatal).  rank/alpha/targets must match the run.
+# Contract: this changes the *parameter set*, so
+#   * a plain checkpoint cannot be ``--resume_from``'d into a LoRA run (use
+#     ``--transfer_from`` with a fresh ``exp_name``);
+#   * a LoRA checkpoint into ``enabled: false`` is a hard error (dropping the
+#     adapters would silently evaluate the base model);
+#   * ``rank``/``alpha``/``targets`` are part of that contract and are checked
+#     in ``2_training.check_special_layout`` (rank/alpha are recorded in the
+#     ``lora_marker`` buffer).
+# No re-preprocessing: the codes and the whole code space are untouched.
 finetune:
   enabled: true
-  # FFN adapters on every block + the rotary decoder self-attention (out_proj
-  # and qkv).  The stock nn.MultiheadAttention modules are not adapted; see the
-  # long note in configs/transformer.yaml / modeling/lora.py.
+  # What to adapt.  encoder_ffn / decoder_ffn wrap the FFN nn.Linear modules of
+  # every block; decoder_attn wraps the rotary self-attention out_proj and
+  # decoder_qkv adds a low-rank delta to its fused qkv projection (both need
+  # transformer.rope: true).  The *stock* nn.MultiheadAttention modules (encoder
+  # self-attention, decoder cross-attention) are not adapted on purpose: they
+  # never call out_proj as a module (torch passes its weight tensors into
+  # F.multi_head_attention_forward), so an adapter there would be silently
+  # inert -- see modeling/lora.py.  A target that matches no module is an error,
+  # so a config cannot train fewer adapters than it names.
   targets: [encoder_ffn, decoder_ffn, decoder_attn, decoder_qkv]
   rank: 16
   alpha: 32.0
+  # Dropout on the adapter's *input* (training only); the base path is frozen.
   dropout: 0.05
-  # The MLP corpus has its own ids, so the frozen rows would be whatever the
-  # base run learned for them; keep weight_decay 0 (see weight_decay below).
+  # Unfreeze both speaker-embedding tables: the MLP corpus conditions on the
+  # stage-1 mlp_main generator's ids, but a fresh corpus can have its own, and
+  # their frozen rows would be whatever the base run learned for those ids.
+  # Keep weight_decay at 0 so the (mostly unused) rows are not decayed towards
+  # zero.
   train_spk_emb: true
+  # The 2 * hidden_size memory_norm gains (tiny, off by default).
   train_memory_norm: false
+  # Separate from train.lr: this is the MLP LoRA operating point (fresh
+  # low-rank weights want ~1e-3 in general; 1e-4 is the value this run uses).
   lr: 1.0e-4
   weight_decay: 0.0
+  # Cosine budget for this mode; null -> train.cosine_anneal_end.  A fine-tune
+  # is short, so set this (and train.max_steps) to the number of steps you
+  # actually want -- the anneal is periodic, see the note under train.
   cosine_anneal_end: null
 
 # -------------------------------------------------------------- train ----
@@ -347,12 +435,26 @@ train:
   # (measured on a 16 GB 5060 Ti: 804 ms/step); 16 gives 527 ms/step at
   # 7.4 GB and the same items/hour, so it is the safer point.
   batch_size: 16
-  # Length-bucketed batching (dataset_codes.LengthBucketBatchSampler, see
-  # AGENTS.md §4): batches are padded to their own width instead of the corpus
-  # max, measured 2.5x steps/s on the Genshin corpus.  false = historical
-  # uniform shuffle.
+  # Length-bucketed batching (dataset_codes.LengthBucketBatchSampler).  The
+  # collator pads every batch to its longest item, and stage-2 clips are very
+  # uneven (mean 124 code frames, median 99, p90 234, max 512 on this corpus),
+  # so a uniformly shuffled batch of 16 averages ~330 frames of which 60 % is
+  # padding -- the loss masks it, but the decoder still runs over it.  Bucketing
+  # groups similarly long clips and pads only to the group's width.  Measured on
+  # this repo's real step: 161k -> 396k items/h at bs=16, 464k at bs=24 (the
+  # Muon step is batch-independent, so the larger batch amortises it; 24 is also
+  # the memory ceiling here -- 32 OOMs on a 16 GB card).  Same items, same
+  # crops, same FIM draws, same optimiser: only the order changes, so
+  # `max_steps`/`cosine_anneal_end` keep their meaning.  false = the historical
+  # uniform shuffle (reproduce an older run's batch composition).
   bucket_batches: true
+  # Pool size in *batches*: shuffle, then sort each pool and cut it into
+  # batches, re-drawn every epoch.  Larger = tighter batches and more speed, but
+  # each batch becomes more length-homogeneous (less within-batch diversity).
+  # 8 = 128 items at bs=16, i.e. 0.09 % of the corpus per pool.
   bucket_pool_batches: 8
+  # Base-model LR.  In `--finetune` mode the optimizer is the single AdamW at
+  # `finetune.lr` above; this value matters for a plain (non-LoRA) run.
   lr: 5e-6
   betas:
   - 0.9
@@ -442,8 +544,8 @@ train:
   # (the historical values) the run spends 700 k steps un-annealing and is back
   # at full LR by step 600 k.  2_training.py now warns once when a run crosses
   # `cosine_anneal_end` (see TrainModule._check_anneal_end).
-  cosine_anneal_end: 300000
-  max_steps: 300000
+  cosine_anneal_end: 40000
+  max_steps: 40000
   max_epochs: -1
   # Code frames per training segment.  Code rate is 25 Hz (48 kHz / hop 480 /
   # Generator down_factor 4), so 512 frames = 20.5 s and covers 99.0 % of the
@@ -493,6 +595,11 @@ train:
   # Until then, the blocklist from scratch/find_stage_directions.py drops those
   # clips.  Set this to null when the corpus has been rebuilt.
   stage_direction_blocklist: null
+  # Transcript-audit drops: basenames whose filelist text disagrees with the
+  # spoken audio (scratch/audit_transcripts.py --out-drops).  Only the Genshin
+  # v2 corpus was audited (it was built with --phones_from transcript), so the
+  # MLP corpus keeps this off.  null disables it.
+  transcript_blocklist: null
   # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
   # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
   # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run
@@ -546,6 +653,14 @@ train:
   # filelist was preprocessed without a map, the map's `sid_map` is still
   # applied here without re-running preprocessing.
   speaker_map: null
+  # Decode-only stage-2 -> stage-1 speaker-id map (a speaker_map.py JSON).
+  # Use this when the stage-2 filelist was built in a *different* id space than
+  # the stage-1 Generator.  The MLP corpus and its mlp_main Generator share one
+  # id space, so this stays off; `speaker_map` above is the data-time fix and
+  # requires a fresh stage-2 run (both sides see one id).
+  # Set this together with a non-null `speaker_map`: the dataset has already
+  # canonicalised the ids then, and this map would remap them a second time.
+  stage1_speaker_map: null
   # Optional: stage-1 Generator checkpoint used to turn sampled codes into
   # audio for TensorBoard. Set to null to disable audio logging.
   # This is a *stage-1* run, so it lives in checkpoints_stage1/ (stage 2 writes
@@ -641,4 +756,45 @@ train:
   ood_samples: 1
   ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
   ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
-  ood_sid: 3             # null -> speaker of the first sampled val item
+  ood_sid: 3                # null -> speaker of the first sampled val item
+
+  # ---- end-to-end WER probe (v2.4) ----------------------------------------
+  # Every `wer_interval` epochs, decode `wer_items` val utterances through the
+  # frozen stage-1 Generator + Qwen3-ASR and log the recognised-text WER.  The
+  # machinery is `stage2_wer.py`, shared with `scratch/eval_stage2_wer.py`, so
+  # training-time and offline numbers are the same computation.  Costs one ASR
+  # load (~1.2 GB, first probe only) and a few seconds per epoch; 0 disables it
+  # and nothing is loaded.  Off here by default; the MLP fine-tune is short and
+  # the val CE is the decision metric (set e.g. 5 to enable it).
+  #   wer/generated   plain AR sampling (the real number)
+  #   wer/fim         middle third of the GROUND-TRUTH codes regenerated with
+  #                   `infill` and spliced back (prefix/suffix real): isolates
+  #                   span generation + seam continuity from content errors
+  #   wer/reference   ground-truth codes through the same vocoder (the floor)
+  # Read it as a trend: 8-24 utterances is noisy (+/-3 pp at 24), and the
+  # teacher-forced val_loss remains the low-variance decision metric.
+  wer_interval: 5           # 0 = off; e.g. 5 = every 5 epochs
+  wer_items: 50
+  wer_fim: true
+  wer_reference: true       # the floor is computed once and cached
+  # Hint state for generation: "null" (the trained level-0 state -- the honest
+  # no-oracle default) or "cond" (each item's real .cond).
+  wer_hints: "null"
+  wer_temperature: null     # null -> sample_temperature
+  wer_top_k: null           # null -> sample_top_k
+  wer_max_frames: 1000
+  wer_batch_size: 4
+  wer_ignore_eos: false
+  wer_seed: 0               # fixed so epochs draw the same items/samples
+  wer_asr_model: "Qwen/Qwen3-ASR-0.6B"
+  wer_language: "English"
+  # Transcript sources (path|sid|text); null -> every filelists_2/*.txt.
+  wer_source_filelists: filelists_2/mlp_linux.txt
+  # Optional scratch/audit_transcripts.py --out-references JSON.  Only the
+  # Genshin v2 references were audited; the MLP corpus uses its raw filelist
+  # text.  Null = raw filelist text.
+  wer_reference_audit: null
+  # drop = remove untrusted references (honest benchmark); override = replace
+  # truncated/mismatched refs with the ASR text (circular, different length).
+  wer_reference_audit_mode: "drop"
+

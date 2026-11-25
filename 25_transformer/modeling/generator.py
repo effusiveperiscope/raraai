@@ -13,6 +13,21 @@ import torch.nn.functional as F
 # ~[0, 1000 Hz] to ~[0, 1] for stable codec training.
 PITCH_LOG_SCALE = math.log1p(1000.0)
 
+# Right-context frames used when a *full* clip is decoded (`infer` /
+# `infer_from_codes`).  Every convolutional block in the codec decoders and in
+# the NSF decoder pads its right edge with zeros, so the last code frame is
+# decoded without the right-hand context it saw inside the clip -- and for a
+# quiet/unvoiced tail the missing context blows up into a ~20 ms transient at
+# the very end of the waveform (measured on a constant silent code frame: the
+# last frame's RMS is 14.9x the steady state, a clearly audible click/pop at
+# the end of every sample).  Appending copies of the last code frame moves that
+# discontinuity past the real content; the extra audio is trimmed off again, so
+# the returned waveform is unchanged except for the fixed last frames.  4 code
+# frames (160 ms) is comfortably past the decoders' effective right receptive
+# field and costs ~4/T extra decode work.  Set to 0 to reproduce the old
+# behaviour (e.g. for a bit-exact comparison).
+DECODE_TAIL_FRAMES = 4
+
 # Module-level parameter-name prefixes of the *pitch codec path*: the analysis
 # conv, the pitch RVQ codec, the synthesis conv, the f0 output head and the
 # voicing (V/UV) head. These are exactly the weights stage-1 ``--pitch_only``
@@ -506,7 +521,7 @@ class Generator(nn.Module):
                 p_uv_logits)
 
     def infer(self, spec, spec_l, f0, sid, use_pitch_recon=False,
-              predict_voicing=False, return_pitch=False):
+              predict_voicing=False, return_pitch=False, tail_frames=None):
         """Synthesise audio from a spectrogram + f0 contour.
 
         Args:
@@ -522,6 +537,10 @@ class Generator(nn.Module):
                 ``use_pitch_recon``).
             return_pitch: also return the f0 contour (Hz) that was fed to
                 the decoder, e.g. for visualisation.
+            tail_frames: code frames of repeated right context used while
+                decoding (``None`` -> :data:`DECODE_TAIL_FRAMES`, ``0``
+                reproduces the pre-fix waveform); see
+                :meth:`infer_from_codes`.
         Returns:
             audio: (B, 1, T_audio) waveform, or ``(audio, f0_used)`` when
             ``return_pitch`` is True.
@@ -555,7 +574,9 @@ class Generator(nn.Module):
                 f0 = F.pad(f0, (0, yq.shape[-1] - f0.shape[-1]))
             else:
                 f0 = f0[..., : yq.shape[-1]]
-        audio = self.dec(g, yq, f0)
+        tail = DECODE_TAIL_FRAMES if tail_frames is None else int(tail_frames)
+        audio = self._decode_wave(g, yq, f0, yq.shape[-1] * int(self.dec.upp),
+                                  tail * self.down_factor)
         if return_pitch:
             return audio, f0
         return audio
@@ -651,9 +672,43 @@ class Generator(nn.Module):
                 px_ds, with_indices=True)
         return spec_codes, pitch_codes
 
+    def _decode_from_indices(self, codec, indices, g, tail_frames,
+                             num_layers=None):
+        """Indices -> codec decoder output, with right context for the last frame.
+
+        ``indices`` is ``(Q, B, T)``.  The last ``tail_frames`` code frames are
+        replicated before the quantiser lookup so the *convolutional* decoder
+        does not see zero padding where the clip continues (see
+        ``DECODE_TAIL_FRAMES``); the replicated frames are trimmed off again, so
+        the returned latent is ``(B, C, T)`` exactly.  ``num_layers`` is
+        forwarded to :meth:`_residual_lookup` (progressive RVQ decoding).
+        """
+        T = int(indices.shape[-1])
+        if tail_frames > 0:
+            indices = torch.cat(
+                [indices, indices[..., -1:].expand(-1, -1, int(tail_frames))],
+                dim=-1)
+        zq = self._residual_lookup(codec.quantizer, indices, num_layers)
+        return codec.decode_latent(zq, g)[..., :T]
+
+    def _decode_wave(self, g, yq, f0, n_samples, tail_frames):
+        """NSF decoder with ``tail_frames`` of repeated right context, trimmed.
+
+        Same reasoning as :meth:`_decode_from_indices`, one level up: the NSF
+        decoder's transposed convs also zero-pad the right edge, which is what
+        produces the end-of-clip transient even when the *codes* are clean.
+        """
+        if tail_frames > 0:
+            yq = torch.cat(
+                [yq, yq[..., -1:].expand(-1, -1, int(tail_frames))], dim=-1)
+            f0 = torch.cat(
+                [f0, f0[..., -1:].expand(-1, int(tail_frames))], dim=-1)
+        return self.dec(g, yq, f0)[..., :n_samples]
+
     def infer_from_codes(self, spec_codes, pitch_codes, sid,
                          out_len=None, voiced=None, uv_threshold=None,
-                         return_pitch=False, spec_codebooks=None):
+                         return_pitch=False, spec_codebooks=None,
+                         tail_frames=None):
         """Synthesize audio directly from integer spec + pitch codes.
 
         Args:
@@ -677,6 +732,11 @@ class Generator(nn.Module):
                 those levels would produce. Pitch codes are never truncated --
                 the f0 contour (and the voicing decision that rides on it) is
                 identical at every level.
+            tail_frames: code frames of repeated right context used while
+                decoding, so the convolutional decoders do not zero-pad the
+                final frame (``None`` -> :data:`DECODE_TAIL_FRAMES`; ``0``
+                reproduces the pre-fix waveform). The extra frames are trimmed,
+                so this only changes the last ~20 ms of the returned audio.
         Returns:
             audio: (B, 1, T_audio) waveform, or ``(audio, f0)`` when
             ``return_pitch`` is True. ``f0`` is ``(B, T_audio // hop_length)``
@@ -702,9 +762,12 @@ class Generator(nn.Module):
                 f"sid batch {sid.shape[0]} != codes batch {spec_idx.shape[1]}")
 
         # Spec path: indices -> quantized latent -> codec decoder -> upsample.
-        zq = self._residual_lookup(self.codec.quantizer, spec_idx,
-                                   spec_codebooks)
-        y = self.codec.decode_latent(zq, g)  # (B, C, T)
+        # ``tail_frames`` replicates the last code frame so the decoders have
+        # right context instead of zero padding (see DECODE_TAIL_FRAMES); the
+        # replicated frames are trimmed inside the helpers / by ``t_full``.
+        tail = DECODE_TAIL_FRAMES if tail_frames is None else int(tail_frames)
+        y = self._decode_from_indices(self.codec, spec_idx, g, tail,
+                                      spec_codebooks)
         yq = self.upsample(y)  # (B, C, T * down_factor)
         t_full = yq.shape[-1]
         if out_len is not None:
@@ -713,8 +776,7 @@ class Generator(nn.Module):
 
         # Pitch path: indices -> quantized latent -> codec decoder ->
         # upsample -> 1-channel log-norm pitch -> Hz.
-        pzq = self._residual_lookup(self.pitch_codec.quantizer, pitch_idx)
-        py = self.pitch_codec.decode_latent(pzq, g)
+        py = self._decode_from_indices(self.pitch_codec, pitch_idx, g, tail)
         py_up = self.pitch_upsample(py)[..., :t_full]
         f0_norm = self.pitch_out_proj(py_up).squeeze(1)  # (B, T_full)
         uv_logits = self.pitch_uv_proj(py_up).squeeze(1)  # (B, T_full)
@@ -741,7 +803,8 @@ class Generator(nn.Module):
         f0 = (torch.expm1(torch.clamp(
             f0_norm, min=0.0) * PITCH_LOG_SCALE) * v)
 
-        audio = self.dec(g, yq, f0)
+        n_samples = t_full * int(self.dec.upp)
+        audio = self._decode_wave(g, yq, f0, n_samples, tail * self.down_factor)
         if return_pitch:
             return audio, f0
         return audio
