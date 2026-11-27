@@ -804,6 +804,7 @@ class TrainModule(pl.LightningModule):
             max_frames=hp.train.get("max_frames", None),
             max_phone_length=hp.train.get("max_phone_length", None),
             speaker_map=hp.train.get("speaker_map", None),
+            word_progress=bool(hp.transformer.get("word_progress", False)),
         )
         self.test_collator = CodeCollator(config=hp)
         self.test_dataloader = DataLoader(
@@ -1928,7 +1929,10 @@ class TrainModule(pl.LightningModule):
                     "fim_middle_loss", "fim_middle_acc",
                     "fim_middle_acc_early", "fim_middle_acc_mid",
                     "fim_middle_acc_late", "fim_seam_acc",
-                    "fim_lookahead_loss", "fim_lookahead_acc", "fim_frac"):
+                    "fim_lookahead_loss", "fim_lookahead_acc", "fim_frac",
+                    "word_progress_loss", "word_progress_mse",
+                    "word_progress_mae", "word_progress_mono",
+                    "word_progress_frac", "code_ce"):
             if key in out:
                 self.log(f"{prefix}_{key}", out[key], **kw)
 
@@ -2826,6 +2830,10 @@ def train(config, resume_from=None, transfer_from=None):
         # written by `hints/build.py --words`, otherwise it falls back to the
         # historical "full transcript + random audio window" pairing.
         word_crop=bool(config.train.get("word_crop", True)),
+        # Per-frame word clock for the duration/monotonicity auxiliary loss.
+        # Uses the same `.cond` word timings; clips without them are skipped by
+        # the masked loss, not by the dataset.
+        word_progress=bool(config.transformer.get("word_progress", False)),
         # Optional list of clips whose forced alignment gave a word an
         # impossible duration (see scratch/audit_word_alignment.py).  Those
         # teach the model to swallow the word; dropping them is the cheap fix.
@@ -2846,6 +2854,7 @@ def train(config, resume_from=None, transfer_from=None):
         max_phone_length=config.train.get("max_phone_length", None),
         speaker_map=config.train.get("speaker_map", None),
         word_crop=bool(config.train.get("word_crop", True)),
+        word_progress=bool(config.transformer.get("word_progress", False)),
         # A blocklist built from the whole corpus may also hit val items; if it
         # was built from train only this is a no-op.
         alignment_blocklist=config.train.get("alignment_blocklist", None),
@@ -2872,6 +2881,12 @@ def train(config, resume_from=None, transfer_from=None):
               f"decoder-side={'yes' if config.transformer.get('decoder_hints', True) else 'no'}")
         print(f"       dropout={train_dataset.hint_dropout}, "
               f"null_all={train_dataset.hint_null_all}")
+    if train_dataset.word_progress:
+        print("Word-progress loss: on -- "
+              f"weight={net.word_progress_weight}, "
+              f"mono_weight={net.word_progress_mono_weight}, "
+              f"margin={net.word_progress_margin}; clips without usable word "
+              "timings are masked out, not skipped.")
 
     # Guard against speaker ids that fall outside the transformer's speaker
     # embedding table (and, since ids are canonicalised into the stage-1

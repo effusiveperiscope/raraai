@@ -155,6 +155,7 @@ class CodeDataset(Dataset):
         hint_pitch_edges=None,
         n_slot_buckets: int = DEFAULT_SLOT_BUCKETS,
         word_crop: bool = True,
+        word_progress: bool = False,
         alignment_blocklist: Optional[str] = None,
         stage_direction_blocklist: Optional[str] = None,
         transcript_blocklist: Optional[str] = None,
@@ -173,6 +174,16 @@ class CodeDataset(Dataset):
         # ``n_word_crop_fallback``.
         self.word_crop = bool(word_crop)
         self.n_word_crop_fallback = 0
+        # Per-code-frame word-progress targets for the duration/monotonicity
+        # auxiliary loss (``transformer.word_progress``).  This is a *text
+        # clock*, not another conditioning channel: target[t] is the position
+        # of the word being spoken at code frame t, normalised to (0, 1).
+        # It is built from the forced-alignment word timings already in the
+        # sibling ``.cond`` file, so no re-preprocessing is needed.  Clips
+        # without usable word fields simply return an all-False mask; the
+        # model then trains on code CE only.
+        self.word_progress = bool(word_progress)
+        self.n_word_progress_missing = 0
         # Optional blocklists, dropped at filelist-build time.  The first comes
         # from ``scratch/audit_word_alignment.py`` (a word given < 1 code frame
         # per phone => ~40 ms/phone, which teaches the model to swallow it);
@@ -728,6 +739,78 @@ class CodeDataset(Dataset):
         complete = end >= n
         return spec, pitch, start, complete, phone_span
 
+    def _word_progress_targets(
+        self,
+        cond: Optional[Dict[str, object]],
+        n_frames: int,
+        start: int,
+        p0: int,
+        p1: int,
+        n_phone: int,
+        stale: bool = False,
+    ):
+        """Per-code-frame word position in ``(0, 1)``, plus its valid mask.
+
+        The target is the normalised *word index* being spoken at each code
+        frame, built from the forced-alignment word timings (``word_start_f``
+        / ``word_slot_f``) that ``hints/build.py --words`` already stores in
+        the sibling ``.cond``.  It is deliberately a monotone scalar rather
+        than a per-word classifier: the head then generalises to any sentence
+        length, and the monotonicity penalty below can act on consecutive
+        frames without a vocabulary.
+
+        ``start`` is the code-frame offset of the crop, and ``p0:p1`` is the
+        phone slice the word-boundary crop kept.  Only words that own at least
+        one kept phone are emitted; a frame outside every kept word (possible
+        on the no-word-timings fallback path) is masked out instead of being
+        assigned a wrong word.
+
+        Returns ``(target, mask)``, both length ``n_frames``, or ``None`` when
+        the ``.cond`` cannot describe this phone sequence.  A missing target is
+        not an error: the auxiliary loss is simply skipped for that clip.
+        """
+        if stale or cond is None:
+            return None
+        needed = ("word_start_f", "word_slot_f", "phone_word_idx")
+        if any(k not in cond for k in needed):
+            return None
+        pwi = cond["phone_word_idx"].long().reshape(-1).numpy()
+        starts = cond["word_start_f"].long().reshape(-1).numpy()
+        slots = cond["word_slot_f"].long().reshape(-1).numpy()
+        if (pwi.size != n_phone or starts.size == 0
+                or slots.shape != starts.shape):
+            return None
+        if p0 < 0 or p1 > pwi.size or p1 <= p0:
+            return None
+
+        # Words represented by the kept phones.  ``np.unique`` also removes a
+        # duplicate at the crop boundary if the aligner gave two words the same
+        # start; the word *order* is what the progress target needs.
+        kept = np.unique(pwi[p0:p1])
+        kept = kept[(kept >= 0) & (kept < starts.size)]
+        if kept.size == 0:
+            return None
+
+        target = torch.zeros(int(n_frames), dtype=torch.float32)
+        mask = torch.zeros(int(n_frames), dtype=torch.bool)
+        n_kept = int(kept.size)
+        for local, word in enumerate(kept.tolist()):
+            word_start = int(starts[word])
+            word_end = word_start + int(slots[word])
+            lo = max(0, word_start - int(start))
+            hi = min(int(n_frames), word_end - int(start))
+            if hi <= lo:
+                continue
+            # Midpoint of the word's normalised span.  Using the midpoint, not
+            # the start, keeps a one-word clip at 0.5 and gives the model a
+            # non-degenerate target; the exact choice cancels in the
+            # monotonicity term.
+            target[lo:hi] = (local + 0.5) / n_kept
+            mask[lo:hi] = True
+        if not bool(mask.any()):
+            return None
+        return target, mask
+
     def __getitem__(self, index: int) -> dict:
         item = self.items[index]
         phone_ids = torch.load(item["phone_ids"], weights_only=True).long().reshape(-1)
@@ -743,7 +826,7 @@ class CodeDataset(Dataset):
         word_spans = (self._word_spans(cond, min(spec.shape[1], pitch.shape[1]),
                                        n_phone, stale=cond_stale)
                       if self.word_crop else None)
-        spec, pitch, _start, complete, phone_span = self._crop_frames(
+        spec, pitch, start, complete, phone_span = self._crop_frames(
             spec, pitch, word_spans)
 
         p0, p1 = phone_span if phone_span is not None else (0, n_phone)
@@ -751,6 +834,14 @@ class CodeDataset(Dataset):
         if (self.max_phone_length is not None
                 and phone_ids.numel() > self.max_phone_length):
             phone_ids = phone_ids[: self.max_phone_length]
+
+        word_progress = None
+        if self.word_progress:
+            word_progress = self._word_progress_targets(
+                cond, spec.shape[1], start, p0, p1, n_phone,
+                stale=cond_stale)
+            if word_progress is None:
+                self.n_word_progress_missing += 1
 
         hint: Dict[str, object] = {}
         if self.hints:
@@ -766,7 +857,7 @@ class CodeDataset(Dataset):
                     hint[key] = hint[key][p0:p1][: phone_ids.numel()]
 
         fim_flag, prefix_len, mid_len = self._sample_fim(spec.shape[1])
-        return {
+        out = {
             "phone_ids": phone_ids,
             "spec_codes": spec,
             "pitch_codes": pitch,
@@ -777,6 +868,14 @@ class CodeDataset(Dataset):
             "fim_mid_len": mid_len,
             **hint,
         }
+        if self.word_progress:
+            n_frames = int(spec.shape[1])
+            if word_progress is None:
+                out["word_progress"] = torch.zeros(n_frames, dtype=torch.float32)
+                out["word_progress_mask"] = torch.zeros(n_frames, dtype=torch.bool)
+            else:
+                out["word_progress"], out["word_progress_mask"] = word_progress
+        return out
 
     def _sample_fim(self, n_frames: int):
         """Draw a (prefix, middle) split with probability ``fim_rate``.
@@ -940,6 +1039,17 @@ class CodeCollator:
         fim = torch.zeros(len(batch), dtype=torch.bool)
         fim_prefix_len = torch.zeros(len(batch), dtype=torch.long)
         fim_mid_len = torch.zeros(len(batch), dtype=torch.long)
+        # Per-frame word-progress targets (no-op unless the dataset emits them,
+        # i.e. unless transformer.word_progress is on).  A clip without usable
+        # word timings contributes an all-False mask, so the auxiliary loss
+        # skips it rather than regressing toward 0.
+        has_word_progress = bool(batch) and "word_progress" in batch[0]
+        word_progress = word_progress_mask = None
+        if has_word_progress:
+            word_progress = torch.zeros(len(batch), max_frames,
+                                        dtype=torch.float32)
+            word_progress_mask = torch.zeros(len(batch), max_frames,
+                                             dtype=torch.bool)
         # Conditioning hints (no-op unless the dataset emits them, i.e. unless
         # transformer.hints is on).  Level 0 is the trained "not provided"
         # state, so padding with zeros is correct.
@@ -994,6 +1104,14 @@ class CodeCollator:
             fim[i] = bool(x.get("fim", False))
             fim_prefix_len[i] = int(x.get("fim_prefix_len", 0))
             fim_mid_len[i] = int(x.get("fim_mid_len", 0))
+            if has_word_progress:
+                wp = x.get("word_progress")
+                wm = x.get("word_progress_mask")
+                if wp is not None and wm is not None:
+                    n_wp = min(int(wp.numel()), int(wm.numel()), max_frames)
+                    if n_wp > 0:
+                        word_progress[i, :n_wp] = wp[:n_wp].float()
+                        word_progress_mask[i, :n_wp] = wm[:n_wp].bool()
             if has_hints:
                 hint_int[i] = int(x.get("hint_int", 0))
                 hint_reg[i] = int(x.get("hint_reg", 0))
@@ -1040,6 +1158,11 @@ class CodeCollator:
             "fim_prefix_len": fim_prefix_len,
             "fim_mid_len": fim_mid_len,
         }
+        if has_word_progress:
+            out.update({
+                "word_progress": word_progress,
+                "word_progress_mask": word_progress_mask,
+            })
         if has_hints:
             out.update({
                 "hint_int": hint_int,

@@ -832,6 +832,7 @@ class DelayCodebookDecoder(nn.Module):
         length: Optional[torch.Tensor] = None,  # (B, L) long, span-length buckets
         hint_vec: Optional[torch.Tensor] = None,  # (B, H) clip-level hints
         use_mask_cache: bool = True,
+        return_hidden: bool = False,
     ) -> List[torch.Tensor]:
         """Body of :meth:`forward`, with the causal-mask source selectable.
 
@@ -918,7 +919,12 @@ class DelayCodebookDecoder(nn.Module):
         # Post-norm hint injection (beyond the norm, so nothing can cancel it).
         if self.hint_out is not None and hint_vec is not None:
             out = out + self.hint_out(hint_vec.to(out.dtype)).unsqueeze(1)
-        return [head(out) for head in self.heads]
+        logits = [head(out) for head in self.heads]
+        if return_hidden:
+            # Used by the word-progress auxiliary loss, which needs the shared
+            # pre-head state rather than the per-codebook logits.
+            return logits, out
+        return logits
 
 
     def forward(
@@ -933,6 +939,27 @@ class DelayCodebookDecoder(nn.Module):
     ) -> List[torch.Tensor]:
         return self._forward_impl(codes, memory, memory_mask, sid, region, length,
                                   hint_vec, use_mask_cache=True)
+
+    def forward_with_hidden(
+        self,
+        codes: torch.Tensor,
+        memory: torch.Tensor,
+        memory_mask: Optional[torch.Tensor] = None,
+        sid: Optional[torch.Tensor] = None,
+        region: Optional[torch.Tensor] = None,
+        length: Optional[torch.Tensor] = None,
+        hint_vec: Optional[torch.Tensor] = None,
+    ):
+        """Decoder logits plus the shared pre-head hidden state.
+
+        Only the word-progress auxiliary loss uses this.  It deliberately calls
+        ``_forward_impl`` directly (with the eager mask cache), so it stays
+        correct when ``train.compile_decoder`` has replaced ``forward`` with a
+        compiled wrapper; the new config leaves that off anyway.
+        """
+        return self._forward_impl(codes, memory, memory_mask, sid, region,
+                                  length, hint_vec, use_mask_cache=True,
+                                  return_hidden=True)
 
 
 class CodeTransformer(nn.Module):
@@ -1136,6 +1163,26 @@ class CodeTransformer(nn.Module):
         self.codebook_weight_warmup_epochs = float(
             _get_cfg(tcfg, "codebook_weight_warmup_epochs", 0) or 0)
 
+        # Duration / word-progress auxiliary loss.  A small head on the decoder
+        # hidden state predicts the normalised position of the word currently
+        # being spoken; the target comes from the forced-alignment word timings.
+        # The monotonicity term penalises going *backwards* in the sentence,
+        # which is the "skips a word / repeats a word" failure mode, while the
+        # regression term penalises pacing drift (stretched or compressed
+        # words).  The head is a separate parameter set, so a warm start from a
+        # checkpoint without it works through ``--transfer_from`` (the head is
+        # freshly initialised and only the auxiliary loss uses it).
+        self.word_progress = bool(_get_cfg(tcfg, "word_progress", False))
+        self.word_progress_weight = float(
+            _get_cfg(tcfg, "word_progress_weight", 0.1) or 0.0)
+        self.word_progress_mono_weight = float(
+            _get_cfg(tcfg, "word_progress_mono_weight", 0.02) or 0.0)
+        self.word_progress_margin = float(
+            _get_cfg(tcfg, "word_progress_margin", 0.0) or 0.0)
+        if self.word_progress and self.word_progress_weight < 0:
+            raise ValueError(
+                "transformer.word_progress_weight must be >= 0")
+
         self.encoder = PhonemeEncoder(
             phone_vocab_size=phone_vocab,
             n_speakers=n_speakers,
@@ -1188,6 +1235,18 @@ class CodeTransformer(nn.Module):
         self.input_dropout = input_dropout
         self.rope = rope
         self.rope_base = rope_base
+        # Word-progress head (``transformer.word_progress``): one scalar per
+        # code frame, read from the same decoder hidden state the codebook heads
+        # use.  A plain linear layer is enough -- the target is a smooth
+        # monotone curve and the decoder already carries the timing state.
+        if self.word_progress:
+            self.word_progress_head = nn.Linear(hidden_size, 1)
+            # Small init keeps the auxiliary loss from perturbing the pretrained
+            # decoder before it has learned the target.
+            nn.init.normal_(self.word_progress_head.weight, std=0.02)
+            nn.init.zeros_(self.word_progress_head.bias)
+        else:
+            self.word_progress_head = None
         if self.rope:
             # Persistent marker (a buffer is the only thing a checkpoint can
             # carry for a parameter-free functional flag).  Readers detect it
@@ -2267,6 +2326,8 @@ class CodeTransformer(nn.Module):
         ablate_region: bool = False,
         ablate_length: bool = False,
         hints: Optional[dict] = None,
+        word_progress: Optional[torch.Tensor] = None,  # (B, T) float, (0,1)
+        word_progress_mask: Optional[torch.Tensor] = None,  # (B, T) bool
     ) -> dict:
         """Delayed next-token loss over all codebooks.
 
@@ -2300,6 +2361,14 @@ class CodeTransformer(nn.Module):
                 ``hint_reg``) whose clip-level channels are added to every
                 decoder column
                 (``transformer.hints``).  ``None`` is a no-op.
+            word_progress, word_progress_mask: optional ``(B, T)`` per-code-frame
+                target in ``(0, 1)`` and its valid mask, built by
+                ``dataset_codes.CodeDataset._word_progress_targets`` from the
+                forced-alignment word timings.  When both are present and
+                ``transformer.word_progress`` is on, a small head predicts the
+                normalised word position from the decoder hidden state and the
+                auxiliary regression + monotonicity loss is added to ``loss``.
+                FIM-reordered items are masked out (the clock is in time order).
 
         Returns a dict with the total loss plus per-group (spec/pitch) losses
         and diagnostics that make "is it learning?" answerable from
@@ -2420,9 +2489,16 @@ class CodeTransformer(nn.Module):
             len_col = None
 
         # list of (B, L, v + 1) -- or (B, L, v + 2) with the EOS class
-        logits = self.decoder(inputs, memory, memory_mask, sid=sid,
-                              region=region_col, length=len_col,
-                              hint_vec=self._dec_hint(hints))
+        if self.word_progress_head is not None and word_progress is not None:
+            logits, decoder_hidden = self.decoder.forward_with_hidden(
+                inputs, memory, memory_mask, sid=sid,
+                region=region_col, length=len_col,
+                hint_vec=self._dec_hint(hints))
+        else:
+            decoder_hidden = None
+            logits = self.decoder(inputs, memory, memory_mask, sid=sid,
+                                  region=region_col, length=len_col,
+                                  hint_vec=self._dec_hint(hints))
 
         losses, accs, entropies = [], [], []
         fim_num = None
@@ -2621,6 +2697,51 @@ class CodeTransformer(nn.Module):
             if la_den is not None and float(la_den) > 0:
                 out["fim_lookahead_loss"] = la_num / la_den.clamp_min(1e-6)
                 out["fim_lookahead_acc"] = la_acc_num / la_den.clamp_min(1e-6)
+        # ---- word-progress / duration auxiliary loss ---------------------- #
+        # The decoder hidden state at column t is the state that predicts code
+        # frame t (codebook 0 leads the delay pattern), so it is aligned with
+        # the per-frame word target without any extra shift.  ``T`` is the
+        # original frame count, captured before the EOS frame was appended.
+        if (decoder_hidden is not None and word_progress is not None
+                and word_progress_mask is not None
+                and self.word_progress_head is not None):
+            # Keep the pure weighted code CE visible: ``loss`` now includes the
+            # auxiliary term, so ``code_ce`` is the number comparable to older
+            # runs and to ``val_loss`` from before this feature existed.
+            out["code_ce"] = out["loss"]
+            Tp = min(int(word_progress.shape[1]), int(T),
+                     int(decoder_hidden.shape[1]))
+            if Tp > 0:
+                target = word_progress[:, :Tp].float()
+                mask = word_progress_mask[:, :Tp].bool()
+                if fim_mask is not None:
+                    # FIM reorders whole frames; the word clock is in time
+                    # order, so a reordered item cannot be scored.  The new
+                    # run disables FIM sampling anyway (train.fim_rate: 0).
+                    mask = mask & ~fim_mask.to(mask.device).bool().unsqueeze(1)
+                pred = torch.sigmoid(
+                    self.word_progress_head(decoder_hidden[:, :Tp])
+                ).squeeze(-1).float()
+                m = mask.to(pred.dtype)
+                denom = m.sum().clamp_min(1.0)
+                diff = pred - target
+                reg = (diff.square() * m).sum() / denom
+                mae = (diff.abs() * m).sum() / denom
+                if Tp > 1:
+                    pair = mask[:, :-1] & mask[:, 1:]
+                    backwards = torch.relu(
+                        pred[:, :-1] - pred[:, 1:] + self.word_progress_margin)
+                    mono = ((backwards * pair.to(backwards.dtype)).sum()
+                            / pair.to(backwards.dtype).sum().clamp_min(1.0))
+                else:
+                    mono = pred.new_zeros(())
+                wp_loss = reg + self.word_progress_mono_weight * mono
+                out["word_progress_loss"] = wp_loss
+                out["word_progress_mse"] = reg
+                out["word_progress_mae"] = mae
+                out["word_progress_mono"] = mono
+                out["word_progress_frac"] = mask.to(pred.dtype).mean()
+                out["loss"] = out["loss"] + self.word_progress_weight * wp_loss
         if fim_mask is not None:
             out["fim_frac"] = fim_mask.to(losses.dtype).mean()
         return out
@@ -2652,6 +2773,8 @@ class CodeTransformer(nn.Module):
         fim_prefix_len: Optional[torch.Tensor] = None,
         fim_mid_len: Optional[torch.Tensor] = None,
         hints: Optional[dict] = None,
+        word_progress: Optional[torch.Tensor] = None,
+        word_progress_mask: Optional[torch.Tensor] = None,
     ) -> dict:
         """Training forward pass: phonemes + speaker -> spec/pitch code loss.
 
@@ -2679,7 +2802,9 @@ class CodeTransformer(nn.Module):
             memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch,
             complete=complete, diagnostics=diagnostics,
             fim_mask=fim_mask, fim_prefix_len=fim_prefix_len,
-            fim_mid_len=fim_mid_len, hints=hints)
+            fim_mid_len=fim_mid_len, hints=hints,
+            word_progress=word_progress,
+            word_progress_mask=word_progress_mask)
 
     #: Sentinel for "no explicit hints argument" (see ``compute_batch_loss``).
     _USE_BATCH_HINTS = object()
@@ -2716,6 +2841,8 @@ class CodeTransformer(nn.Module):
             fim_prefix_len=batch.get("fim_prefix_len"),
             fim_mid_len=batch.get("fim_mid_len"),
             hints=hints,
+            word_progress=batch.get("word_progress"),
+            word_progress_mask=batch.get("word_progress_mask"),
         )
 
     #: Per-channel keys a probe can drop, in the order they are logged.
@@ -3388,6 +3515,9 @@ class CodeTransformer(nn.Module):
                else ", pos=sinusoidal")
             + (f", input_dropout={self.input_dropout:g}"
                if self.input_dropout > 0 else "")
+            + (f", word_progress(w={self.word_progress_weight:g}, "
+               f"mono={self.word_progress_mono_weight:g})"
+               if self.word_progress else "")
             + hints
             + (f", finetune=lora(r{self.lora_config['rank']})"
                if self.lora_enabled else "")
