@@ -35,7 +35,7 @@ defaults:
   register: 0
   pitch_shift: 0             # semitones, per word
   slot_shift: 0              # log2 duration, per word
-  word_semantics: "null"     # null | text (per-word BERT states)
+  word_semantics: "text"     # null | text (per-word BERT states)
 
 models:
   genshin_v2:
@@ -63,7 +63,19 @@ models:
     checkpoint: checkpoints_stage2/transformer_mlp_lora_v2/last.ckpt
     generator_checkpoint: checkpoints_stage1/mlp_main/last.ckpt
     variants:
-      base:
+      v3.4:
+        label: "LoRA v3.4 · last"
+        checkpoint: checkpoints_stage2/transformer_mlp_lora_v3.4/last.ckpt
+      v3.2:
+        label: "LoRA v3.2 · last"
+        checkpoint: checkpoints_stage2/transformer_mlp_lora_v3.2/last.ckpt
+      v3.1_b:
+        label: "LoRA v3.1 · best v1"
+        checkpoint: checkpoints_stage2/transformer_mlp_lora_v3.1/best-checkpoint-v1.ckpt
+      v3.1:
+        label: "LoRA v3.1 · last"
+        checkpoint: checkpoints_stage2/transformer_mlp_lora_v3.1/last.ckpt
+      v2:
         label: "LoRA v2 · last"
         checkpoint: checkpoints_stage2/transformer_mlp_lora_v2/last.ckpt
       v1:

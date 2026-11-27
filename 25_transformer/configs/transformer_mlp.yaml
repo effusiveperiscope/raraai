@@ -19,7 +19,7 @@
 # parameter model on this corpus (41 869 train / 2 202 val clips, 25 speakers)
 # and overfit within a few thousand steps; transformer_mlp_lora_v1/v2 freeze the
 # base model and train ~2 % of the parameters instead (see `finetune` below).
-exp_name: transformer_mlp_lora_v3
+exp_name: transformer_mlp_lora_v3.4
 tensorboard_version: 0
 
 # ---------------------------------------------------------------- model ---
@@ -65,9 +65,9 @@ transformer:
   # additive encoder path is before the norm, which removes a per-clip
   # constant); zero-init, so a --transfer_from starts identical.
   # All are parameter-set changes -> fresh exp_name + --transfer_from.
-  spk_rank: 128
+  spk_rank: 0
   spk_norm: "none"
-  spk_init: "zero"
+  spk_init: "default"
   spk_kl_weight: 0.0
   spk_film_memory: false
   # ---- coarse conditioning hints (v0.8) -----------------------------------
@@ -407,8 +407,8 @@ finetune:
   # inert -- see modeling/lora.py.  A target that matches no module is an error,
   # so a config cannot train fewer adapters than it names.
   targets: [encoder_ffn, decoder_ffn, decoder_attn, decoder_qkv]
-  rank: 16
-  alpha: 32.0
+  rank: 8
+  alpha: 16.0
   # Dropout on the adapter's *input* (training only); the base path is frozen.
   dropout: 0.05
   # Unfreeze both speaker-embedding tables: the MLP corpus conditions on the
@@ -544,8 +544,8 @@ train:
   # (the historical values) the run spends 700 k steps un-annealing and is back
   # at full LR by step 600 k.  2_training.py now warns once when a run crosses
   # `cosine_anneal_end` (see TrainModule._check_anneal_end).
-  cosine_anneal_end: 40000
-  max_steps: 40000
+  cosine_anneal_end: 200000
+  max_steps: 200000
   max_epochs: -1
   # Code frames per training segment.  Code rate is 25 Hz (48 kHz / hop 480 /
   # Generator down_factor 4), so 512 frames = 20.5 s and covers 99.0 % of the
