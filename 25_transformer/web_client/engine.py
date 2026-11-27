@@ -456,17 +456,15 @@ class StudioEngine:
                 keys.append(k)
                 if torch.is_tensor(value) and k in (
                         "decoder.embeds.0.weight", "lora_marker",
-                        "fim_layout_marker", "pitch_val_dir", "word_proj.weight"):
+                        "pitch_val_dir", "word_proj.weight"):
                     shapes[k] = tuple(value.shape)
                     if k == "lora_marker":
                         marker = [float(x) for x in value.reshape(-1).tolist()]
-                    elif k == "fim_layout_marker":
-                        lookahead = int(value.reshape(-1)[0].item())
             del raw, sd
         except Exception as exc:  # pragma: no cover - unusual checkpoint
             print(f"web_client: could not header-read {path}: {exc}")
         info = {"stamp": stamp, "keys": keys, "shapes": shapes,
-                "lora_marker": marker, "fim_lookahead": lookahead}
+                "lora_marker": marker}
         with self._probe_lock:
             self._state_cache[path] = info
         return info
@@ -486,11 +484,10 @@ class StudioEngine:
 
         vocab = int(cfg.codec.codebook_size)
         eos = bool(cfg.transformer.get("eos_token", False))
-        fim = bool(cfg.transformer.get("fim", False))
         rows = shapes.get("decoder.embeds.0.weight")
         if rows:
             try:
-                eos, fim = layout_from_rows(int(rows[0]), vocab)
+                eos, _ = layout_from_rows(int(rows[0]), vocab)
             except ValueError:
                 pass
 
@@ -543,11 +540,7 @@ class StudioEngine:
             "checkpoint": os.path.relpath(variant.checkpoint, REPO_ROOT),
             "checkpoint_bytes": self._mtime(variant.checkpoint)[1],
             "audio": bool(variant.generator_checkpoint),
-            "fim": bool(fim),
             "eos": bool(eos),
-            "fim_lookahead": int(idx.get("fim_lookahead") or 0),
-            "region_cond": self._has(keys, "decoder.region_emb.weight"),
-            "length_cond": self._has(keys, "decoder.len_emb.weight"),
             "rope": self._has(keys, "rope_marker"),
             "hints": has_hints,
             "decoder_hints": (has_hints and (self._has(keys, "dec_int_emb.weight")
@@ -686,11 +679,7 @@ class StudioEngine:
         n_int, n_reg, n_pitch, n_slot = repl._hint_widths()
         caps.update({
             "loaded": True,
-            "fim": bool(net.fim),
             "eos": bool(net.eos_token),
-            "fim_lookahead": int(getattr(net, "fim_lookahead", 0) or 0),
-            "region_cond": bool(net.region_cond),
-            "length_cond": bool(net.length_cond),
             "rope": bool(getattr(net, "rope", False)),
             "hints": bool(getattr(net, "hints", False)),
             "decoder_hints": bool(getattr(net, "decoder_hints", False)),
@@ -910,139 +899,6 @@ class StudioEngine:
                 notes=notes)
             return render
 
-    def infill(self, model_id: Optional[str], variant_id: Optional[str],
-               source: Render, req: Dict[str, Any], stage=None) -> Render:
-        if source is None:
-            raise RequestError("source generation not found (or expired)")
-        model, variant = self.variant(model_id, variant_id)
-        if (source.model_id != model.id
-                or source.variant_id != variant.id):
-            raise RequestError(
-                "the source clip came from a different model/variant; "
-                "regenerate it with the selected model first")
-        slot = self.ensure_loaded(model.id, variant.id, stage=stage)
-        with slot.lock:
-            repl = slot.repl
-            if not bool(repl.net.fim):
-                raise RequestError(
-                    "this checkpoint has no FIM support (its SUF/MID sentinel "
-                    "classes were never trained), so a span cannot be "
-                    "regenerated -- pick a FIM model")
-
-            codes = source.codes.detach().to(repl.device)
-            n = int(codes.shape[-1])
-            if n < 3:
-                raise RequestError(f"the source clip is only {n} frame(s) "
-                                   f"long; nothing to fill")
-
-            temp = (_req_float(req.get("temperature"), "temperature",
-                               default=source.temperature, lo=0.01, hi=5.0))
-            top_k = (_req_topk(req.get("top_k"))
-                     if req.get("top_k") is not None else source.top_k)
-            seed = _req_seed(req.get("seed"))
-            best_of = _req_int(req.get("best_of"), "best_of", default=1,
-                               lo=1, hi=8)
-            rng = random.Random(seed)
-            random.seed(seed)
-
-            tcfg = repl.config.transformer
-            min_mid = max(1, int(tcfg.get("fim_min_frames", 1) or 1))
-            mid_frac = float(tcfg.get("fim_mid_frac", 0.5) or 0.5)
-            lo = min(min_mid, n - 2)
-            hi = max(lo, min(n - 2, int(round(mid_frac * n))))
-            span = req.get("frames")
-            span = (rng.randint(lo, hi) if span in (None, "")
-                    else _req_int(span, "frames", default=lo, lo=1, hi=n - 1))
-            span = max(1, min(int(span), n - 1))
-            start = req.get("start")
-            if start in (None, ""):
-                lo_s, hi_s = ((1, n - span - 1) if n - span >= 2
-                              else (0, n - span))
-                start = rng.randint(lo_s, hi_s)
-            start = max(0, min(int(start), n - span))
-
-            # Restore the source's conditioning exactly (its phone ids, not a
-            # re-phonemization, so the codes and the text cannot drift apart).
-            repl.text = source.text
-            repl.phone_ids = list(source.phone_ids)
-            repl.word_index = source.word_index
-            repl.word_texts = list(source.word_texts)
-            repl._base_hints = None
-            repl.sid = int(source.sid)
-            repl.temperature = temp
-            repl.top_k = top_k
-            hint_params = dict(source.hints_params)
-            for key in ("intensity", "register", "pitch_shift", "slot_shift",
-                        "word_semantics", "base"):
-                if req.get(key) is not None:
-                    hint_params[key] = req[key]
-            self._apply_hints(repl, hint_params)
-
-            phone = torch.tensor([list(source.phone_ids)], dtype=torch.long,
-                                 device=repl.device)
-            plen = torch.tensor([len(source.phone_ids)], dtype=torch.long,
-                                device=repl.device)
-            sid_t = torch.tensor([int(source.sid)], dtype=torch.long,
-                                 device=repl.device)
-            prefix = codes[:, :start].unsqueeze(0)
-            suffix = codes[:, start + span:].unsqueeze(0)
-
-            if stage:
-                stage(f"regenerating frames {start}..{start + span - 1} "
-                      f"of {n}")
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-            t0 = time.perf_counter()
-            try:
-                with repl._autocast(), torch.no_grad():
-                    middle = repl.net.infill(
-                        phone, plen, sid_t, prefix, suffix, span,
-                        temperature=temp, top_k=top_k,
-                        hints=repl._hints_for(len(source.phone_ids)),
-                        best_of=best_of)
-            except Exception as exc:
-                raise EngineError(f"infill failed: {exc}") from exc
-            gen_ms = (time.perf_counter() - t0) * 1e3
-            middle = middle[0].detach()
-            filled = torch.cat([codes[:, :start], middle,
-                                codes[:, start + span:]], dim=-1)
-
-            seam_ce = None
-            if (int(getattr(repl.net, "fim_lookahead", 0) or 0) > 0
-                    and suffix.shape[-1] > 0):
-                try:
-                    with repl._autocast(), torch.no_grad():
-                        seam = repl.net.infill_seam_score(
-                            phone, plen, sid_t, prefix, middle.unsqueeze(0),
-                            suffix, hints=repl._hints_for(len(source.phone_ids)))
-                    seam_ce = float(seam[0])
-                except Exception as exc:
-                    print(f"web_client: seam score failed: {exc}")
-
-            if stage:
-                stage("decoding the filled clip")
-            t1 = time.perf_counter()
-            audio, f0 = self._decode(repl, filled, source.sid)
-            decode_ms = (time.perf_counter() - t1) * 1e3
-            notes = []
-            if audio is None:
-                notes.append("audio decode unavailable (no stage-1 generator)")
-
-            render = self._make_render(
-                slot, kind="infill", text=source.text, sid=int(source.sid),
-                phone_ids=list(source.phone_ids), phones=source.phones,
-                word_index=source.word_index,
-                word_texts=list(source.word_texts),
-                frames=int(filled.shape[-1]), temperature=temp, top_k=top_k,
-                seed=seed, hints_state=repl.hint_state(),
-                hints_params=self._hint_params(hint_params), codes=filled,
-                eos_length=None, audio=audio, f0=f0,
-                timings={"generate_ms": gen_ms, "decode_ms": decode_ms},
-                notes=notes, source_job=source.job_id,
-                span={"start": int(start), "frames": int(span)},
-                seam_ce=seam_ce, best_of=int(best_of))
-            return render
 
     # ------------------------------------------------------------------ #
     # Shared render assembly / decode

@@ -36,7 +36,7 @@ Usage::
     # one checkpoint, 8 val items, ground-truth control included
     python scratch/eval_stage2_repetition.py \
         --checkpoints checkpoints_stage2/transformer_v0.9/last.ckpt \
-                    checkpoints_stage2/5090_v0.7_fim2/best-checkpoint.ckpt
+                    checkpoints_stage2/transformer_hints_v2.7_spk256/best-checkpoint.ckpt
 
     # real .cond hints instead of the trained null state (the generation default)
     python scratch/eval_stage2_repetition.py --hints --num_items 10 ...

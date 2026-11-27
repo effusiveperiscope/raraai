@@ -4,19 +4,18 @@ A small, mobile-first web app for the stage-2 TTS model: type text, pick a
 voice, sample the codec codes and listen.  It mirrors what
 `scratch/stage2_repl.py` exposes (phonemization incl. `{ARPAbet}` groups,
 speaker ids, temperature/top-k, EOS-clamped lengths, conditioning hints,
-FIM span regeneration, checkpoint switching) but as an HTTP service + browser
-UI.
+checkpoint switching) but as an HTTP service + browser UI.
 
 ```
 web_client/
   server.py          FastAPI app + job queue (single worker owns the GPU)
-  engine.py          model registry, checkpoint inspection, generation/infill
+  engine.py          model registry, checkpoint inspection, generation
   models.yaml        which models / LoRA checkpoints are exposed
   static/            index.html, app.js, styles.css (no build step)
 ```
 
 The engine reuses `scratch/stage2_repl.py`'s inference glue on purpose (layout
-discovery for EOS/FIM/RoPE/hints, phonemization, hint handling, stage-1 audio
+discovery for EOS/RoPE/hints, phonemization, hint handling, stage-1 audio
 decode), so the browser output is the same function the REPL produces.
 
 ## Run
@@ -80,7 +79,7 @@ right parameter set; a LoRA checkpoint can never silently fall back to its base
 model.  Variants can override `config` when the fine-tune ran with a different
 config file (see the shipped `mlp_lora` entry).
 
-All layout switches (EOS, FIM/region/length conditioning, RoPE, hints,
+All layout switches (EOS, RoPE, hints,
 monotone hints, pitch anchors, word BERT, LoRA) are derived from the loaded
 checkpoint as well, so a picker entry cannot be scored with the wrong
 parameter layout.
@@ -99,10 +98,6 @@ parameter layout.
   and, when the checkpoint has them, the hint channels: intensity, register,
   word-pitch shift (semitones), word-timing shift (log2 duration) and the
   per-word BERT channel (`off` / `from current text`).
-* **Regenerate a span** — FIM models only.  The start/span sliders show the
-  kept prefix/suffix (`#`-style map); the job keeps the original clip and
-  resamples exactly the hole, then reports the seam CE when the run was trained
-  with `fim_lookahead`.
 * **History / server log** — per browser session; job ids remain valid for the
   lifetime of the server's bounded job store.
 * **Seeds** — a blank seed is replaced by a random one that is returned in the
@@ -116,7 +111,6 @@ GET  /api/options                  models, variants, per-checkpoint capabilities
 GET  /api/speakers?model=&variant= [{id,label,count}]
 POST /api/preview  {text}          {phones,n_phone_ids,words}
 POST /api/generate {text,...}      -> {job_id}
-POST /api/infill   {source_job,...}-> {job_id}
 GET  /api/jobs/{id}                {status:queued|running|done|error, stage, result}
 GET  /api/jobs/{id}/audio.wav      (also ?download=1)
 GET  /api/jobs/{id}/codes.pt       torch.save({codes,sid,frame_rate,text,...})

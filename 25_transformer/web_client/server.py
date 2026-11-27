@@ -13,7 +13,6 @@ What it serves
 * ``/api/speakers``      speaker ids + labels from the run's val filelist
 * ``/api/preview``       phonemize a sentence (no model required)
 * ``/api/generate``      queue a text -> audio generation
-* ``/api/infill``        regenerate a span of a finished clip (FIM models)
 * ``/api/jobs/{id}``     poll one job (queued / running / done / error)
 * ``/api/jobs/{id}/audio.wav``, ``/api/jobs/{id}/codes.pt``
 * ``/api/health``        device, GPU memory, loaded models, queue state
@@ -86,9 +85,6 @@ class GenerateBody(BaseModel):
     word_semantics: Optional[str] = None
     base: Optional[str] = None
 
-
-class InfillBody(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
 
     source_job: str
     model: Optional[str] = None
@@ -285,10 +281,6 @@ class StudioRuntime:
             if job.kind == "generate":
                 render = self.engine.generate(
                     job.model_id, job.variant_id, job.request, stage=stage)
-            elif job.kind == "infill":
-                render = self.engine.infill(
-                    job.model_id, job.variant_id, job.source, job.request,
-                    stage=stage)
             else:
                 raise EngineError(f"unknown job kind {job.kind!r}")
 
@@ -563,31 +555,6 @@ def create_app(config_path: Optional[str] = None,
             model_id=model.id,
             variant_id=variant.id,
             request={**params, "text": text},
-        )
-        runtime.submit(job)
-        return {"job_id": job.id, "status": job.status}
-
-    @app.post("/api/infill")
-    async def infill(body: InfillBody, request: Request):
-        session = session_of(request)
-        params = body.model_dump(exclude_none=True, by_alias=True)
-        source_id = str(params.pop("source_job"))
-        source_job = runtime.jobs.get(source_id, session)
-        if source_job is None or source_job.render is None:
-            raise HTTPException(404, "source generation not found (or expired)")
-        if source_job.status != "done":
-            raise HTTPException(409, "the source generation is not finished")
-        model_id = params.pop("model", None) or source_job.model_id
-        variant_id = params.pop("variant", None) or source_job.variant_id
-        model, variant = runtime.engine.variant(model_id, variant_id)
-        job = Job(
-            id=uuid.uuid4().hex[:16],
-            session=session,
-            kind="infill",
-            model_id=model.id,
-            variant_id=variant.id,
-            request=params,
-            source=source_job.render,
         )
         runtime.submit(job)
         return {"job_id": job.id, "status": job.status}

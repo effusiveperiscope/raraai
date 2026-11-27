@@ -312,8 +312,7 @@ def _cfg(hints_json: str, anchors: int = 3, **over):
         "hidden_size": 32, "n_heads": 2, "encoder_layers": 1,
         "decoder_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
         "max_positions": 512, "phone_vocab_size": 1024, "n_speakers": 4096,
-        "eos_token": True, "fim": True, "region_cond": True,
-        "length_cond": True, "hints": True, "hints_json": hints_json,
+        "eos_token": True, "hints": True, "hints_json": hints_json,
         "semantic_dim": 384, "decoder_hints": True,
         "hint_pitch_mode": "anchors", "hint_pitch_anchors": anchors,
         "relative_register": True,
@@ -354,7 +353,6 @@ def test_model(batch, hints_json):
     b["pitch_codes"] = torch.randint(0, 32, (B, 1, T))
     b["code_lengths"] = torch.full((B,), T, dtype=torch.long)
     b["complete"] = torch.ones(B, dtype=torch.bool)
-    b["fim"] = torch.zeros(B, dtype=torch.bool)
     out = net.compute_batch_loss(b, epoch=0, diagnostics=False)
     check("zero-init anchors leave the loss untouched",
           bool(torch.isfinite(out["loss"])))

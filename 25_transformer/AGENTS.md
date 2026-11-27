@@ -5,6 +5,14 @@ repository. It explains what the project does, how the pipeline is wired
 together, and the conventions and footguns you must respect before making
 changes.
 
+> **FIM removed (working tree):** fill-in-the-middle / span regeneration
+> (``transformer.fim``, ``region_cond``, ``length_cond``, ``fim_lookahead``,
+> ``infill`` and their probes/logs) has been stripped from the active model,
+> dataset, training loop, configs and eval scripts.  A warm start from an old
+> FIM checkpoint is supported: ``adapt_state_dict_special`` slices the retired
+> SUF/MID rows and folds the AR region/length row 0 into ``decoder.input_bias``.
+> Historical FIM notes below describe older releases and are kept for context.
+
 ---
 
 ## 1. What this project is

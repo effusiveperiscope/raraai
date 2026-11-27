@@ -7,15 +7,9 @@ from a single-keystroke menu: phonemize a sentence, pick a speaker, sample
 codes, listen to / save the result, or compare a free-running sample against a
 validation item's ground truth.
 
-Fill-in-the-middle is wired in as ``n``: it drops a random span from the *last*
-sample and re-generates it with :meth:`CodeTransformer.infill`, keeping the
-untouched prefix and suffix, and prints an ASCII map of where in the clip the
-span sat.  The sample itself is left alone -- the filled clip is a separate
-result, so ``n`` can be repeated on the same generation -- and only a FIM-trained
-checkpoint can do it (right now that means
-``checkpoints_stage2/transformer_fim.ckpt``): a pre-FIM run has untrained
-SUF/MID sentinel classes, so ``n`` refuses with a note instead of sampling
-garbage.  ``generate`` (plain AR) is the other sampling path.
+Generation is plain autoregressive (EOS-clamped when the checkpoint has EOS).
+Old FIM checkpoints still load: their retired SUF/MID rows are sliced off and
+their AR region/length embedding is folded into ``decoder.input_bias``.
 
 Usage
 -----
@@ -49,11 +43,6 @@ Keys (press ``m`` inside the REPL for the same list)
     b  play the last audio (pydub; space does the same)
     z  report GPU / CPU memory usage (models, peaks, allocator cache)
 
-    n  fill a random span of the last sample -- re-generate it from its own
-       kept prefix/suffix without touching the sample (prompt: frames, or
-       start:frames; blank = random span, as training draws it).  FIM
-       checkpoints only; a/b/c/w/x then act on the filled clip.
-
     s  switch stage-2 checkpoint (prompt: run name or path; ``?`` lists runs)
 
 Notes
@@ -69,11 +58,11 @@ Notes
   concatenated, exactly like g2p writes a pronunciation); use several groups
   for several words. The whole result is tokenized once, so the ids are the
   same shape a whole-sentence phonemization produces.
-* ``transformer.eos_token`` / ``fim`` / ``region_cond`` change the codebook
-  embedding/head shapes, so a config that disagrees with its checkpoint would
-  silently re-initialise them (``load_state_dict_mismatch`` skips whole
-  tensors). The layout is therefore read back **from the checkpoint** and the
-  config adjusted before the model is built; the printed notes say when.
+* ``transformer.eos_token`` changes the codebook embedding/head shapes, so a
+  config that disagrees with its checkpoint would silently re-initialise them
+  (``load_state_dict_mismatch`` skips whole tensors). The EOS flag is therefore
+  read back **from the checkpoint** and the config adjusted before the model is
+  built; the printed notes say when.
 * Read-only: this never writes a checkpoint or touches a log tree.
 """
 from __future__ import annotations
@@ -114,6 +103,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from commons import load_state_dict_mismatch  # noqa: E402
+from modeling.transformer import adapt_state_dict_special  # noqa: E402
 from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
 
 
@@ -129,7 +119,6 @@ LINE_ALIASES = {
     "save": "w", "dump": "x", "codes": "c", "play": "b", "hear": "b",
     "switch": "s", "load": "s", "open": "s", "ckpt": "s",
     "checkpoint": "s", "checkpoints": "s",
-    "fill": "n", "infill": "n", "in_fill": "n", "middle": "n", "fim": "n",
     "intensity": "e", "effort": "e", "register": "r",
     "pitch": "j", "word_pitch": "j",
     "slot": "u", "timing": "u", "duration": "u",
@@ -755,19 +744,14 @@ class Stage2REPL:
             config.train.get("sample_temperature", 1.0) or 1.0)
         top_k = config.train.get("sample_top_k", None)
         self.top_k: Optional[int] = int(top_k) if top_k else None
-        # Fill (`n`) candidate count: >1 ranks by the suffix-lookahead seam CE
-        # (needs a checkpoint trained with transformer.fim_lookahead > 0).
-        self.infill_best_of: int = 1
-
         self.net: Optional[CodeTransformer] = None
-        # The eos/fim/region_cond layout is *derived from the checkpoint* (see
+        # The EOS/hint layout is *derived from the checkpoint* (see
         # `_align_special_layout`), so the config is mutated on every load.  The
         # values as configured are kept here so switching checkpoints at runtime
         # (`s`) always starts from the same place instead of compounding.
         self._layout_originals = {
             k: config.transformer.get(k, None)
-            for k in ("eos_token", "fim", "region_cond", "length_cond",
-                      "fim_lookahead",
+            for k in ("eos_token",
                       "hints", "decoder_hints", "hint_monotone",
                       "hint_film_memory", "hint_decoder_proj",
                       "hint_word_sem", "hint_word_dim")}
@@ -792,8 +776,8 @@ class Stage2REPL:
 
     @property
     def current_codes(self):
-        """What ``a``/``b``/``c``/``w``/``x`` look at: filled clip if any."""
-        return self.fill_codes if self.fill_codes is not None else self.last_codes
+        """What ``a``/``b``/``c``/``w``/``x`` look at."""
+        return self.last_codes
 
     def clear_fill(self) -> None:
         """Forget the last fill result (a new generation, or a new model)."""
@@ -837,6 +821,7 @@ class Stage2REPL:
         # GPU (and the memory report measures halved weight storage).
         self.net = CodeTransformer(self.config).to(
             device=self.device, dtype=self._module_dtype())
+        state = adapt_state_dict_special(self.net, state)
         print(self.net.describe())
         if self.precision != "fp32":
             print(f"Precision: {self.precision} weights "
@@ -863,7 +848,7 @@ class Stage2REPL:
                 print("         Sampling still works; audio decode is off.")
 
     def _reset_layout(self) -> None:
-        """Restore the configured eos/fim/region_cond before re-deriving them."""
+        """Restore the configured layout before re-deriving it."""
         if not hasattr(self, "_layout_originals"):
             return
         tcfg = self.config.transformer
@@ -872,13 +857,15 @@ class Stage2REPL:
 
     def _align_special_layout(self, state: dict,
                               source: Optional[str] = None) -> None:
-        """Match eos/fim/region_cond to the checkpoint's class layout.
+        """Match ``eos_token`` to the checkpoint's class layout.
 
-        ``num_classes`` grew with every stage-2 feature (EOS in v0.5, SUF/MID in
-        v0.6-fim), and ``load_state_dict_mismatch`` *skips* a tensor whose shape
-        disagrees -- so a config that is newer than its checkpoint would silently
-        re-initialise every codebook embedding and head. Infer the layout from
-        the checkpoint instead and say so.
+        ``num_classes`` grew with every stage-2 feature (EOS in v0.5, the
+        retired FIM SUF/MID classes in v0.6).  ``load_state_dict_mismatch``
+        *skips* a tensor whose shape disagrees, so a config that is newer than
+        its checkpoint would silently re-initialise every codebook embedding
+        and head.  Infer the EOS flag from the checkpoint here; the caller then
+        runs :func:`adapt_state_dict_special`, which slices the retired FIM
+        rows off old checkpoints.
 
         Called before *every* model build, so it starts by restoring the
         configured values (`_reset_layout`): switching checkpoints at runtime
@@ -891,31 +878,21 @@ class Stage2REPL:
         w = state.get(key)
         if w is None:
             print(f"WARNING: {key} not in {source}; keeping the config's "
-                  f"layout (eos_token={tcfg.get('eos_token')}, "
-                  f"fim={tcfg.get('fim')}).")
+                  f"layout (eos_token={tcfg.get('eos_token')}).")
             return
         vocab = int(self.config.codec.codebook_size)
         try:
-            eos, fim = layout_from_rows(int(w.shape[0]), vocab)
+            eos, has_fim = layout_from_rows(int(w.shape[0]), vocab)
         except ValueError as exc:
             raise SystemExit(f"ERROR: {source}: {exc}")
-        if bool(tcfg.get("eos_token")) != eos or bool(tcfg.get("fim")) != fim:
-            print(f"NOTE: {source} uses eos_token={eos}, fim={fim} "
-                  f"(config said eos_token={tcfg.get('eos_token')}, "
-                  f"fim={tcfg.get('fim')}); using the checkpoint's layout.")
+        if bool(tcfg.get("eos_token")) != eos:
+            print(f"NOTE: {source} uses eos_token={eos} "
+                  f"(config said eos_token={tcfg.get('eos_token')}); using "
+                  f"the checkpoint's layout.")
             tcfg.eos_token = eos
-            tcfg.fim = fim
-        region = "decoder.region_emb.weight" in state
-        if bool(tcfg.get("region_cond")) != region:
-            print(f"NOTE: region_cond={region} in {source}; using that.")
-            tcfg.region_cond = region
-        # Span-length conditioning (v0.6-fim2) adds its own table; a config that
-        # is newer than its checkpoint would otherwise build a fresh, untrained
-        # len_emb and quietly degrade every infill.
-        length = "decoder.len_emb.weight" in state
-        if bool(tcfg.get("length_cond")) != length:
-            print(f"NOTE: length_cond={length} in {source}; using that.")
-            tcfg.length_cond = length
+        if has_fim:
+            print(f"NOTE: {source} is a retired FIM checkpoint; its SUF/MID "
+                  f"rows will be sliced off on load.")
         # RoPE is parameter-free, so a checkpoint can only record it with the
         # persistent ``rope_marker`` buffer.  A model built with the wrong flag
         # would load *every* tensor and silently score positions differently.
@@ -923,19 +900,7 @@ class Stage2REPL:
         if bool(tcfg.get("rope", False)) != rope:
             print(f"NOTE: rope={rope} in {source}; using that.")
             tcfg.rope = rope
-        # FIM suffix lookahead is parameter-free too: it only changes the order
-        # the *training* stream was laid out in, so the persistent
-        # `fim_layout_marker` is the only trace.  A wrong value loads every
-        # tensor and silently disables `infill_seam_score` / `best_of`.
-        look = 0
         keys = set(state)
-        for key in keys:
-            if key == "fim_layout_marker" or key.endswith(".fim_layout_marker"):
-                look = int(state[key].reshape(-1)[0].item())
-                break
-        if int(tcfg.get("fim_lookahead", 0) or 0) != look:
-            print(f"NOTE: fim_lookahead={look} in {source}; using that.")
-            tcfg.fim_lookahead = look
         # Conditioning-hint layout.  These are *not* shape-compatible: a hint
         # model loaded into a non-hint config silently drops every hint tensor,
         # and a monotone/FiLM checkpoint loaded into the table model loses the
@@ -1072,7 +1037,7 @@ class Stage2REPL:
     def switch_checkpoint(self, raw: str) -> bool:
         """(Re)load a different stage-2 checkpoint without restarting.
 
-        The model is rebuilt from scratch: the eos/fim/region_cond layout is
+        The model is rebuilt from scratch: the EOS layout is
         re-derived from the new checkpoint, so a run with a different special
         layout loads correctly in the same session.  The build happens *before*
         the swap, so a bad path or an unloadable file leaves the current model
@@ -1095,11 +1060,12 @@ class Stage2REPL:
             print(f"Could not read {target}: {exc}")
             return False
 
-        # Re-derive eos/fim/region_cond for *this* checkpoint (the config is
+        # Re-derive eos_token for *this* checkpoint (the config is
         # reset to its configured values first, see `_align_special_layout`).
         self._align_special_layout(state, source=target)
         net = CodeTransformer(self.config).to(
             device=self.device, dtype=self._module_dtype())
+        state = adapt_state_dict_special(net, state)
         print(net.describe())
         n_loaded, n_ckpt, n_bad, n_missing = load_weights(net, state)
         print(f"Loaded {n_loaded}/{n_ckpt} checkpoint tensor(s)"
@@ -1294,7 +1260,7 @@ class Stage2REPL:
         return out
 
     def _hints_for(self, n_phone: int):
-        """Hints argument for ``generate``/``infill`` with the controls applied."""
+        """Hints argument for ``generate`` with the controls applied."""
         if not getattr(self.net, "hints", False):
             return None
         if self.hint_mode == "omit":
@@ -1608,137 +1574,6 @@ class Stage2REPL:
     # ------------------------------------------------------------------ #
     # Fill-in-the-middle
     # ------------------------------------------------------------------ #
-    def fill_middle(self, span: Optional[int] = None,
-                    start: Optional[int] = None) -> bool:
-        """Re-generate a span of the *last generation* (``n``, ``fill``).
-
-        This is the "regenerate the bad bit" direction of FIM: throw away
-        ``span`` code frames starting at ``start`` of the last sampled codes and
-        sample them again with :meth:`CodeTransformer.infill`, conditioned on
-        the untouched prefix *and* suffix of the same clip.  Nothing else
-        changes, so the clip keeps its length and its speaker.
-
-        With ``span``/``start`` left at ``None`` the draw mirrors
-        ``dataset_codes.CodeDataset._sample_fim`` (training conditions the model
-        on exactly that span distribution): ``span`` in
-        ``[fim_min_frames, fim_mid_frac * n]``, ``start`` uniform -- except
-        that a non-empty prefix *and* suffix are preferred, because a "middle"
-        needs two sides to be interesting.
-
-        The result goes to :attr:`fill_codes` and **not** to
-        :attr:`last_codes`: the generation stays pristine, so a second ``n``
-        fills a different span of the same clean sample instead of re-filling
-        whatever the previous fill produced (which would compound the
-        damage).  ``a``/``b``/``c``/``w``/``x`` look at
-        :attr:`current_codes`, i.e. the filled clip while a fill exists, so you
-        can still listen to and save it; ``g``/``v``/``s`` drop it.
-
-        Needs a FIM checkpoint (``net.fim``, i.e. the SUF/MID classes were
-        trained) and something already sampled to work on.
-        """
-        if self.net is None:
-            print("Model not loaded.")
-            return False
-        if not self.net.fim:
-            print("This checkpoint has no FIM support (fim=False): its SUF/MID "
-                  "sentinel classes were never trained, so an infill would be "
-                  "noise.")
-            print("  Only checkpoints_stage2/transformer_fim.ckpt can do this "
-                  "-- press s to switch to it.")
-            return False
-        if self.last_codes is None or self.last_sid is None:
-            print("Nothing sampled yet -- press g (generate) or v (val item) "
-                  "first; n fills a span of what those produced.")
-            return False
-        if not self.phone_ids:
-            print("No phonemes for the current codes -- press t (text) first.")
-            return False
-
-        n = int(self.last_codes.shape[-1])
-        if n < 2:
-            print(f"The last sample is only {n} frame(s) long, nothing to fill.")
-            return False
-
-        # Span length: the training distribution, capped so the clip keeps at
-        # least one known frame (`infill` splices prefix + middle + suffix).
-        tcfg = self.config.transformer
-        min_mid = max(1, int(tcfg.get("fim_min_frames", 1) or 1))
-        mid_frac = float(tcfg.get("fim_mid_frac", 0.5) or 0.5)
-        lo = min(min_mid, n - 1)
-        hi = max(lo, min(n - 1, int(round(mid_frac * n))))
-        if span is None:
-            span = random.randint(lo, hi)
-        span = max(1, min(int(span), n - 1))
-        if start is None:
-            # Prefer both sides non-empty (a real "middle"); any split is
-            # allowed when the span leaves room for only one of them.
-            lo_s, hi_s = (1, n - span - 1) if n - span >= 2 else (0, n - span)
-            start = random.randint(lo_s, hi_s)
-        start = max(0, min(int(start), n - span))
-
-        print(f"fill: frames {start}..{start + span - 1} of {n} "
-              f"({span / self.frame_rate:.2f} s at "
-              f"{start / self.frame_rate:.2f} s .. "
-              f"{(start + span) / self.frame_rate:.2f} s of "
-              f"{n / self.frame_rate:.2f} s)")
-        print(f"  # = re-generated, . = kept "
-              f"(kept prefix {start}, suffix {n - start - span} frames)")
-        for line in ascii_fill_map(n, start, span):
-            print("  " + line)
-
-        codes = self.last_codes.to(self.device)
-        prefix = codes[:, :start].unsqueeze(0)        # (1, K, start)
-        suffix = codes[:, start + span:].unsqueeze(0)  # (1, K, n-start-span)
-        original = codes[:, start:start + span]
-        phone = torch.tensor([list(self.phone_ids)], dtype=torch.long,
-                             device=self.device)
-        plen = torch.tensor([len(self.phone_ids)], dtype=torch.long,
-                            device=self.device)
-        sid_t = torch.tensor([int(self.last_sid)], dtype=torch.long,
-                             device=self.device)
-        t0 = time.perf_counter()
-        try:
-            with self._autocast():
-                middle = self.net.infill(
-                    phone, plen, sid_t, prefix, suffix, span,
-                    temperature=self.temperature, top_k=self.top_k,
-                    hints=self._hint_arg(),
-                    best_of=self.infill_best_of)
-
-        except Exception as exc:
-            print(f"  infill failed: {exc}")
-            return False
-        dt = time.perf_counter() - t0
-        middle = middle[0]
-
-        self.fill_codes = torch.cat(
-            [codes[:, :start], middle, codes[:, start + span:]], dim=-1)
-        self.last_fill = (start, span)
-        self.last_audio = self.last_f0 = None
-        print(f"  sampled {span} middle frames in {dt * 1e3:.0f} ms "
-              f"(sid {self.last_sid}, temp {self.temperature:g}, "
-              f"top_k {self.top_k})")
-        if (getattr(self.net, "fim_lookahead", 0) > 0
-                and suffix.shape[-1] > 0):
-            try:
-                seam = self.net.infill_seam_score(
-                    phone, plen, sid_t, prefix, middle.unsqueeze(0), suffix,
-                    hints=self._hint_arg())
-                print(f"  seam CE {float(seam[0]):.3f} nats -- teacher-forced "
-                      f"CE of the true suffix start given this span "
-                      f"(lower = joins up better)")
-            except Exception as exc:
-                print(f"  seam score failed: {exc}")
-        self._report_codes(self.fill_codes)
-        # How close the re-generated span is to the codes it replaced.  Both
-        # sides are in-distribution, so this is the "did it actually use the
-        # context" number, not a sampling-quality score.
-        print("  re-generated middle vs the span it replaced:")
-        self._report_match(original, middle)
-        self._decode_audio(self.fill_codes, self.last_sid)
-        print("  (a/b/c/w/x now act on the filled clip, g/v/s drop it; the "
-              "next n fills another span of the same generation)")
-        return True
 
     # ------------------------------------------------------------------ #
     # Validation-item comparison
@@ -1945,9 +1780,7 @@ class Stage2REPL:
 
     def print_status(self) -> None:
         if self.net is not None:
-            layout = (f"eos_token={self.net.eos_token}, fim={self.net.fim}, "
-                      f"region_cond={self.net.region_cond}, "
-                      f"length_cond={self.net.length_cond}")
+            layout = f"eos_token={self.net.eos_token}"
         else:
             layout = "model not loaded"
         if self._audio_disabled:
@@ -2089,20 +1922,14 @@ Commands (single keystroke; keys marked (prompt) ask for a value afterwards)
 
   Blank at a prompt keeps the current value; blank at a wav/codes prompt
   writes into the output directory with a generated name.  `s` rebuilds the
-  model in place, re-deriving eos_token/fim/region_cond from the new
-  checkpoint, and clears the last codes/audio (they came from the old one).
+  model in place, re-deriving eos_token from the new checkpoint, and clears the
+  last codes/audio (they came from the old one).
   `--play` plays every clip as soon as it is decoded (`b` replays it).
   `--precision bf16|fp16` builds the transformer in that dtype (weights *and*
   activations; fp32 is the default, matching stage 2's 32-true convention,
   while the stage-1 vocoder always decodes fp32 -- its pitch path hard-codes
   fp32).  `z` prints the GPU allocator/peak numbers and the model footprint,
   so the two precisions can be compared directly.
-  `n` needs a FIM checkpoint (checkpoints_stage2/transformer_fim.ckpt) and a
-  sample to work on: it drops a span of the last codes and re-generates it
-  from the kept prefix + suffix, printing a `#`/`.` map of where the span sat.
-  The generation itself is untouched, so `n` again fills another span of the
-  same sample, and `a`/`b`/`c`/`w`/`x` look at the filled clip until the next
-  `g`/`v`/`s` clears it.
 """
 
 
@@ -2284,12 +2111,6 @@ def dispatch(repl: "Stage2REPL", key: str, rest: str = "") -> bool:
             repl.play()
         elif key == "z":
             repl.report_memory()
-        elif key == "n":
-            raw = rest or repl.reader.read_line(
-                "Fill span (frames, or start:frames; blank = random): ")
-            spec = _parse_fill_spec(raw)
-            if spec is not None:
-                repl.fill_middle(span=spec[1], start=spec[0])
         elif key == "w":
             path = rest or repl.reader.read_line(
                 f"Wav path [{repl.out_dir}/...]: ")
@@ -2416,10 +2237,6 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "instead of the current text's (word-swap test)")
     parser.add_argument("--seed", type=int, default=None,
                         help="torch seed, so paired A/B draws are comparable")
-    parser.add_argument("--infill_best_of", type=int, default=1,
-                        help="fill (`n`): draw this many candidate spans and "
-                             "keep the one that best predicts the real suffix "
-                             "start (needs a fim_lookahead checkpoint)")
     parser.add_argument("--stage1_sid_map", default=None,
                         help="speaker_map.py JSON (stage-2 -> stage-1 ids), "
                              "applied only when the frozen Generator decodes; "
@@ -2483,8 +2300,6 @@ def main(argv=None) -> int:
         torch.manual_seed(int(args.seed))
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(args.seed))
-    if args.infill_best_of and int(args.infill_best_of) > 1:
-        repl.infill_best_of = int(args.infill_best_of)
     if args.topk is not None:
         text = str(args.topk).strip().lower()
         if text in ("none", "off", "0"):

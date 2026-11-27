@@ -361,8 +361,7 @@ def test_model(batch, hints_json):
             "hidden_size": 32, "n_heads": 2, "encoder_layers": 1,
             "decoder_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
             "max_positions": 512, "phone_vocab_size": 1024, "n_speakers": 4096,
-            "eos_token": True, "fim": True, "region_cond": True,
-            "length_cond": True, "hints": True, "hints_json": hints_json,
+            "eos_token": True, "hints": True, "hints_json": hints_json,
             "decoder_hints": True,
         },
     })
@@ -418,12 +417,6 @@ def test_model(batch, hints_json):
           tuple(codes.shape[:2]) == (B, 3)
           and codes.shape[2] == int(lengths.max()),
           f"{tuple(codes.shape)}")
-    codes_all = torch.cat([b["spec_codes"], b["pitch_codes"]], dim=1)
-    mid = net.infill(b["phone_ids"], b["phone_lengths"], b["sid"],
-                     codes_all[:, :, :4], codes_all[:, :, 8:],
-                     middle_frames=3, hints=b)
-    check("infill with hints", tuple(mid.shape) == (B, 3, 3), f"{tuple(mid.shape)}")
-
     # ---- null-hint state (Phase 0) ------------------------------------ #
     # ``None`` must mean the *trained* "not provided" state (level 0 rows),
     # **not** "send no vectors": every generation path used to pass None, which
@@ -546,8 +539,7 @@ def test_injection_and_guidance(batch, hints_json):
             "hidden_size": 32, "n_heads": 2, "encoder_layers": 1,
             "decoder_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
             "max_positions": 512, "phone_vocab_size": 1024, "n_speakers": 4096,
-            "eos_token": True, "fim": True, "region_cond": True,
-            "length_cond": True, "hints": True, "hints_json": hints_json,
+            "eos_token": True, "hints": True, "hints_json": hints_json,
             "decoder_hints": True,
         }
         tcfg.update(over)
@@ -719,8 +711,7 @@ def test_monotone(batch, hints_json):
         "hidden_size": 32, "n_heads": 2, "encoder_layers": 1,
         "decoder_layers": 1, "dim_feedforward": 64, "dropout": 0.0,
         "max_positions": 512, "phone_vocab_size": 1024, "n_speakers": 4096,
-        "eos_token": True, "fim": True, "region_cond": True,
-        "length_cond": True, "hints": True, "hints_json": hints_json,
+        "eos_token": True, "hints": True, "hints_json": hints_json,
         "decoder_hints": True, "hint_monotone": True,
     }
     cfg = OmegaConf.create({

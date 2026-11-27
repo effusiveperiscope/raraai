@@ -10,9 +10,6 @@ model actually generates.
 Per checkpoint it prints:
 
   * teacher-forced ``val_loss`` (+ spec/pitch split and per-codebook accuracy),
-  * the FIM probe's base arm (middle CE / teacher-forced accuracy) and its
-    ``text`` / ``suffix`` / ``region`` / ``length`` control-arm deltas -- the
-    same numbers ``2_training.py:_fim_probe`` logs per epoch,
   * free-running (sampled) code match for the spec and pitch codebooks on a few
     val items, i.e. the analogue of ``sample/{spec,pitch}_code_match_frac_*``.
 
@@ -101,70 +98,6 @@ def teacher_forced(net, loader, batches, device) -> Dict[str, object]:
     return res
 
 
-@torch.no_grad()
-def fim_probe(net, loader, batches, device) -> Dict[str, float]:
-    """``2_training.py:_fim_probe``'s numbers, averaged over val batches."""
-    if not net.fim:
-        return {}
-    tot = {"middle_loss": 0.0, "middle_acc": 0.0,
-           "text": 0.0, "suffix": 0.0, "region": 0.0, "length": 0.0}
-    n = 0
-    for batch in loader:
-        if n >= batches:
-            break
-        batch = to_device(batch, device)
-        codes = torch.cat([batch["spec_codes"], batch["pitch_codes"]],
-                          dim=1).long()
-        lengths = batch["code_lengths"]
-        T = int(lengths.min())
-        p = max(1, T // 3)
-        m = max(1, T // 3)
-        if p + m >= T:               # keep at least one suffix frame
-            m = max(1, T - p - 1)
-        if T < 4 or m < 1:
-            continue
-        B = codes.shape[0]
-        fim = torch.ones(B, dtype=torch.bool, device=device)
-        pfx = torch.full((B,), p, dtype=torch.long, device=device)
-        mid = torch.full((B,), m, dtype=torch.long, device=device)
-        rot = torch.roll(torch.arange(B, device=device), 1)
-
-        hint_arg = batch if "hint_int" in batch else "null"
-        mem, mmask = net.encode(batch["phone_ids"], batch["phone_lengths"],
-                                batch["sid"], hints=hint_arg)
-        mem_rot, mmask_rot = net.encode(batch["phone_ids"][rot],
-                                        batch["phone_lengths"][rot],
-                                        batch["sid"], hints=hint_arg)
-
-
-        def run(memory, mask, codes_use=None, **override):
-            return net.code_loss(
-                memory, mask, codes if codes_use is None else codes_use,
-                code_lengths=lengths, sid=batch["sid"],
-                complete=batch["complete"], diagnostics=True,
-                hints=hint_arg,
-                fim_mask=fim, fim_prefix_len=pfx, fim_mid_len=mid,
-                **override)
-
-
-        base = run(mem, mmask)
-        if "fim_middle_loss" not in base:
-            continue
-        ce = float(base["fim_middle_loss"])
-        swapped = codes.clone()
-        swapped[:, :, p + m:] = codes[rot][:, :, p + m:]
-        tot["middle_loss"] += ce
-        tot["middle_acc"] += float(base["fim_middle_acc"])
-        tot["text"] += float(run(mem_rot, mmask_rot)["fim_middle_loss"]) - ce
-        tot["suffix"] += float(run(mem, mmask, codes_use=swapped)
-                               ["fim_middle_loss"]) - ce
-        tot["region"] += float(run(mem, mmask, ablate_region=True)
-                               ["fim_middle_loss"]) - ce
-        if net.decoder.len_emb is not None:
-            tot["length"] += float(run(mem, mmask, ablate_length=True)
-                                   ["fim_middle_loss"]) - ce
-        n += 1
-    return {k: v / max(n, 1) for k, v in tot.items()}
 
 
 @torch.no_grad()
@@ -208,7 +141,7 @@ def main():
     ap.add_argument("--val_filelist", default=None,
                     help="default: config.train.val_filelist")
     ap.add_argument("--batches", type=int, default=8,
-                    help="val batches for the teacher-forced / FIM metrics")
+                    help="val batches for the teacher-forced metrics")
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--sample_items", type=int, default=4,
                     help="val items to free-run for the code-match numbers")
@@ -264,9 +197,8 @@ def main():
             current_rope = rope
         epoch, step = load_checkpoint(net, path)
         tf = teacher_forced(net, loader, args.batches, device)
-        fim = fim_probe(net, loader, args.batches, device)
         fr = free_running(net, dataset, args.sample_items, device)
-        results.append((tf, fim, fr))
+        results.append((tf, fr))
         print(f"=== {os.path.basename(os.path.dirname(path))}/"
               f"{os.path.basename(path)}  (epoch {epoch}, step {step})")
         print(f"    teacher-forced val_loss {tf['loss']:.4f} "
@@ -276,23 +208,15 @@ def main():
         if "code_accs" in tf:
             print("    per-book acc: " +
                   " ".join(f"{v:.3f}" for v in tf["code_accs"]))
-        if fim:
-            print(f"    FIM middle CE {fim['middle_loss']:.4f} "
-                  f"acc {fim['middle_acc']:.4f} | deltas (nats) "
-                  f"text {fim['text']:+.3f} suffix {fim['suffix']:+.3f} "
-                  f"region {fim['region']:+.3f} length {fim['length']:+.3f}")
         print(f"    free-running match spec {fr['spec_match']:.4f} / "
               f"pitch {fr['pitch_match']:.4f} ({fr['items']} items)\n")
 
     if len(results) > 1:
-        tf0, fim0, fr0 = results[0]
-        tf1, fim1, fr1 = results[-1]
+        tf0, fr0 = results[0]
+        tf1, fr1 = results[-1]
         print("delta (last minus first):")
         print(f"    val_loss {tf1['loss'] - tf0['loss']:+.4f}   "
               f"acc {tf1['acc'] - tf0['acc']:+.4f}")
-        if fim0 and fim1:
-            print(f"    FIM middle CE {fim1['middle_loss'] - fim0['middle_loss']:+.4f}"
-                  f"   acc {fim1['middle_acc'] - fim0['middle_acc']:+.4f}")
         print(f"    free-running spec {fr1['spec_match'] - fr0['spec_match']:+.4f}   "
               f"pitch {fr1['pitch_match'] - fr0['pitch_match']:+.4f}")
 

@@ -10,7 +10,7 @@
 
 # Release history lives in git log and AGENTS.md §4; each switch below points at
 # its own section there.  Summary by version: v0.4.1 memory norm + residual
-# scaling, v0.5 EOS token, v0.6-fim / v0.7-fim2 span regeneration + length cond,
+# scaling, v0.5 EOS token,
 # v0.8 conditioning hints, v0.9 relative register + zero-init tables,
 # hints v1.0 post-norm hint injection + guidance (ablations, off), v1.1 monotone
 # hint encoding + counterfactual margin (recipe: scratch/hints_v1_runs/),
@@ -47,8 +47,8 @@ transformer:
   # resume with a different value is a plain loss change) and it targets the
   # failure mode a purely teacher-forced AR model has when decoding freely: one
   # bad frame is an input it has never seen.  Only the code content is dropped
-  # -- position, speaker, FIM region/length and the hint vectors still reach the
-  # decoder -- and column 0 (the start token, always real at inference) is never
+  # -- position, speaker and the hint vectors still reach the decoder -- and
+  # column 0 (the start token, always real at inference) is never
   # masked.  0 reproduces the historical behaviour bit-identically.  0.05-0.1
   # is the useful range; watch val_loss / val_text_delta, a too-large value
   # shows up as a text-delta collapse before it shows up in the loss.
@@ -229,69 +229,6 @@ transformer:
   # End-of-utterance class (v0.5)
   eos_token: true
 
-  # Fill-in-the-middle (v0.6-fim).  Adds two sentinel classes per codebook
-  # (SUF, MID) and, with train.fim_rate > 0, mixes prefix-suffix-middle
-  # reordered samples with plain AR samples.  The order is prefix <SUF> suffix
-  # <MID> middle, so the *middle* is generated last and its length is free --
-  # for "regenerate a bad span" we fix that length (see CodeTransformer.infill).
-  #
-  # It changes the codebook embedding/head shapes (+2 rows), so a pre-FIM
-  # checkpoint cannot be --resume_from'd: start a fresh exp_name and warm-start
-  # with --transfer_from (expand_state_dict_with_special zero-pads the new rows).
-  # No re-preprocessing: the codes are unchanged.
-  fim: true
-  # Region tag (prefix/suffix/middle) added to every decoder column, like the
-  # speaker embedding.  It is a dense side channel that tells the decoder the
-  # role of a position; the SUF/MID sentinels only mark the boundaries and are
-  # smeared across K columns by the delay pattern.  Independent of `fim` so the
-  # "sentinel-only" variant can be ablated (region_cond: false).
-  region_cond: true
-  # Span-length conditioning (v0.6-fim2).  Adds a second decoder-side embedding
-  # (decoder.len_emb, n_len_buckets rows) telling every column inside a middle
-  # span how many frames are *left* in it, as a log2 bucket (bucket 1 = 1 frame
-  # left, 2 = 2-3, 3 = 4-7, ... bucket 0 = "not in a span").  Training takes the
-  # tag from the drawn span, CodeTransformer.infill from the caller's
-  # middle_frames.  Without it the model has no length signal at all: the prompt,
-  # region tags and positions are identical for a 6-frame and a 72-frame hole, so
-  # it can only emit its best continuation and have it chopped -- which is what
-  # "infill ignores the span length" looked like.  Shape change (one
-  # (n_len_buckets, 768) table), so a fresh exp_name + --transfer_from is needed
-  # (2_training.py:check_special_layout refuses the mismatch).
-  length_cond: true
-  n_len_buckets: 9
-  # FIM seam continuity (v0.7-seam).  Two independent knobs, both about the
-  # *join* between the generated span and the suffix (the audible weak point of
-  # PSM: the middle is the last thing in the sequence, and nothing is ever
-  # predicted after it, so plain PSM never supervises the transition).
-  #
-  # fim_seam_frames/fim_seam_weight up-weight the CE of the last N *middle*
-  # targets -- the frames time-adjacent to the suffix.  Objective only: no
-  # tensors, no shape change, safe to --resume_from an existing FIM run.  The
-  # loss is renormalised (sum(w*ce)/sum(w)), so only the gradient allocation
-  # moves, not the loss scale.  0 / 1.0 disables it.  Watch
-  # val_fim_seam_acc / fim_middle_acc_late.  If the span starts pacing badly
-  # (content crammed into the last frames), lower fim_seam_weight first --
-  # 4 frames at 4x is a deliberately strong push on a short span.
-  fim_seam_frames: 4
-  fim_seam_weight: 4.0
-  #
-  # fim_lookahead repeats the first N suffix frames after the middle:
-  #   prefix <SUF> suffix <MID> middle <SUF> suffix[:N]
-  # so "predict the real continuation of the span" becomes a training target
-  # (fim_lookahead_loss/_acc, val_fim_lookahead_loss) instead of something the
-  # model can only infer.  It also enables CodeTransformer.infill(best_of=N),
-  # which ranks candidates by the teacher-forced CE of the true suffix start --
-  # i.e. "does this span actually join up?".  Training layout only (no new
-  # parameters), but it IS a contract: the persistent net.fim_layout_marker
-  # records the value and 2_training.py:check_special_layout refuses to mix
-  # them.  0 disables (the historical layout).  Enable it on a fresh exp_name
-  # and warm-start with --transfer_from.
-  fim_lookahead: 4
-  # Span sampling for FIM items (training only; val stays plain AR so val_loss is
-  # a fixed yardstick).  mid_len is drawn in [fim_min_frames, fim_mid_frac*T].
-  fim_min_frames: 8
-  fim_mid_frac: 0.5
-
   # Coarse-to-fine loss weighting over the K = 8 spec + 2 pitch codebooks
   # (order: spec0..spec7, pitch8, pitch9).  The optimised loss is
   #   sum_k w_k * CE_k / sum_k w_k
@@ -455,7 +392,7 @@ train:
   # this repo's real step: 161k -> 396k items/h at bs=16, 464k at bs=24 (the
   # Muon step is batch-independent, so the larger batch amortises it; 24 is also
   # the memory ceiling here -- 32 OOMs on a 16 GB card).  Same items, same
-  # crops, same FIM draws, same optimiser: only the order changes, so
+  # crops, same optimiser: only the order changes, so
   # `max_steps`/`cosine_anneal_end` keep their meaning.  false = the historical
   # uniform shuffle (reproduce an older run's batch composition).
   bucket_batches: true
@@ -614,26 +551,6 @@ train:
   # built with --phones_from transcript, so a truncated line is the training
   # text; dropping the clip is the conservative fix.  null disables it.
   transcript_blocklist: data/genshin_plus_extras/transcript_drops.txt
-  # Fill-in-the-middle mixing (v0.6-fim): probability that a *training* item is
-  # reordered to prefix <SUF> suffix <MID> middle instead of plain AR.  0.5 was
-  # the original recipe; v0.9 runs 0.2 (HINTS_PLAN.md §9) because the v0.8 run
-  # that spent half its gradient on FIM degenerated into a repetition attractor
-  # (WER 42 % vs 15 % for the checkpoint it was warm-started from, 24 paired
-  # utterances): "continue from a given context" is not the same skill as
-  # "advance monotonically through the text", and plain AR is what free-running
-  # generation does.  0.0 disables it (leaving only transformer.fim's extra
-  # classes, unused).  Validation is always plain AR, so val_loss/val_text_delta
-  # stay comparable.
-  fim_rate: 0.2
-  # FIM diagnostics (v0.6-fim2): every epoch, teacher-force a synthetic
-  # prefix/middle/suffix split on the first N validation batches and log the
-  # middle-only CE / teacher-forced accuracy (split into span thirds) plus three
-  # control-arm deltas in nats: val_fim_{text,suffix,region,length}_delta.  This
-  # is the "is FIM actually working, and on which input?" signal --
-  # sample/fim_middle_code_match_* cannot provide it (free-running code match is
-  # at chance even for a healthy model).  Costs N * 5 teacher-forced forwards per
-  # epoch, no sampling.  0 disables the probe.
-  fim_probe_batches: 2
   val_interval: 1
   # Optional cap on the number of *training batches per epoch* (Lightning's
   # `limit_train_batches`).  Absent/null = the natural epoch length.  Only
@@ -733,7 +650,7 @@ train:
   # Which clip-level channels to shift (they have a level to move).
   counterfactual_channels: "intensity,register"
 
-  # Hint state for *generation* (TensorBoard samples, FIM/speaker/OOD probes,
+  # Hint state for *generation* (TensorBoard samples, speaker/OOD probes,
   # the REPL default).  None is NOT "no hints": the trained null state (level 0)
   # is the only hint-free state the model saw.  "cond" = the item's real .cond
   # (OOD falls back to null); "omit" = no vectors (pre-Phase-0, ablation only).
@@ -784,15 +701,11 @@ train:
   # load (~1.2 GB, first probe only) and a few seconds per epoch; 0 disables it
   # and nothing is loaded.
   #   wer/generated   plain AR sampling (the real number)
-  #   wer/fim         middle third of the GROUND-TRUTH codes regenerated with
-  #                   `infill` and spliced back (prefix/suffix real): isolates
-  #                   span generation + seam continuity from content errors
   #   wer/reference   ground-truth codes through the same vocoder (the floor)
   # Read it as a trend: 8-24 utterances is noisy (+/-3 pp at 24), and the
   # teacher-forced val_loss remains the low-variance decision metric.
   wer_interval: 1           # 0 = off; e.g. 5 = every 5 epochs
   wer_items: 50
-  wer_fim: true
   wer_reference: true       # the floor is computed once and cached
   # Hint state for generation: "null" (the trained level-0 state -- the honest
   # no-oracle default) or "cond" (each item's real .cond).
