@@ -44,6 +44,10 @@ transformer:
   # is the useful range; watch val_loss / val_text_delta, a too-large value
   # shows up as a text-delta collapse before it shows up in the loss.
   input_dropout: 0.05
+  word_progress: true
+  word_progress_weight: 0.1
+  word_progress_mono_weight: 0.02
+  word_progress_margin: 0.0
   max_positions: 4096
   phone_vocab_size: 1024   # g2pen_tokenizer_clean vocab
   phone_pad_id: 0
@@ -670,10 +674,21 @@ train:
   # Phonemisation is CPU-only (FeatureExtractor with load_qwen=False, i.e. no
   # ASR/aligner weights) and cached after the first pass; failures are logged
   # and never interrupt training. Set ood_samples: 0 to disable.
-  ood_samples: 1
+  ood_samples: 3
   ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
-  ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
-  ood_sid: 3                # null -> speaker of the first sampled val item
+  ood_texts:
+    - >
+      The quick brown fox jumps over the lazy dog while the orchestra
+      rehearses a brand new symphony in the courtyard.
+    - >
+      I was taken aback, and all I could say was “Huh?”
+      but he kept cutting me off and going “huh? huh? huh?”
+      and closing his hand shut in front of my face.
+    - >
+      One Ring to rule them all, one Ring to find them,
+      One Ring to bring them all, and in the darkness bind them,
+      In the Land of Mordor where the Shadows lie.
+  ood_sid: 20                # null -> speaker of the first sampled val item
 
   # ---- end-to-end WER probe (v2.4) ----------------------------------------
   # Every `wer_interval` epochs, decode `wer_items` val utterances through the

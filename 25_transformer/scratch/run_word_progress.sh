@@ -11,4 +11,4 @@ cd "$(dirname "$0")/.."
 
 python 2_training.py \
     --config configs/transformer_word_progress.yaml \
-    --transfer_from checkpoints_stage2/transformer_hints_v2.7_spk256/best-checkpoint.ckpt
+    --transfer_from checkpoints_stage2/transformer_hints_v2.4/last.ckpt

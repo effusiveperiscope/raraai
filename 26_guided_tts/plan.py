@@ -186,6 +186,24 @@ class Plan:
             idx[s:e] = p
         return idx
 
+    def frame_phone(self) -> np.ndarray:
+        """``(T,)`` dominant phone index per code frame; ``-1`` on silence.
+
+        Used by the renderer's phone-identity auxiliary loss: the frame hidden
+        must retain which phone it is rendering, otherwise the code head can
+        settle on a speaker prior (measured: removing all phone input from the
+        first conv baseline moved spec CE only 3.53 -> 3.74 nats).
+        """
+        idx = self.phone_index_100()
+        out = np.full(int(self.n_frames), -1, dtype=np.int64)
+        for t in range(int(self.n_frames)):
+            seg = idx[4 * t:4 * t + 4]
+            seg = seg[seg >= 0]
+            if seg.size:
+                vals, counts = np.unique(seg, return_counts=True)
+                out[t] = int(vals[np.argmax(counts)])
+        return out
+
     def word_table(self) -> list[dict]:
         """Per-word rows, for inspection and for authoring a JSON plan."""
         rows, p = [], 0

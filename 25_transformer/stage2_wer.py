@@ -73,13 +73,17 @@ def normalize_text(text: str) -> str:
     return " ".join(_WORD_RE.findall(text))
 
 
-def edit_counts(ref: Sequence[str], hyp: Sequence[str]) -> Tuple[int, int, int]:
-    """Minimum (substitutions, insertions, deletions) turning ``ref`` into ``hyp``.
+def align_words(ref: Sequence[str], hyp: Sequence[str]
+                ) -> List[Tuple[str, int, int]]:
+    """Levenshtein alignment between two word lists, in time order.
 
-    Plain Levenshtein DP with a back-pointer table; ties are resolved
-    substitution > deletion > insertion so the breakdown is stable.  Returned
-    counts give ``WER = (S + D + I) / len(ref)``, i.e. the standard definition
-    with ``ref`` as the denominator.
+    Returns ``(op, ref_index, hyp_index)`` tuples with ``op`` one of
+    ``"match"``, ``"sub"``, ``"del"``, ``"ins"``; ``ref_index`` (resp.
+    ``hyp_index``) is ``-1`` for an insertion (resp. a deletion).  The DP and
+    the tie-breaking (substitution > deletion > insertion) are the ones
+    :func:`edit_counts` has always used -- that function is now defined in
+    terms of this one, so the headline counts and the position diagnostics
+    cannot disagree.
     """
     n, m = len(ref), len(hyp)
     dp = [[0] * (m + 1) for _ in range(n + 1)]
@@ -94,35 +98,225 @@ def edit_counts(ref: Sequence[str], hyp: Sequence[str]) -> Tuple[int, int, int]:
             dp[i][j] = min(dp[i - 1][j - 1] + cost,   # match / substitute
                            dp[i - 1][j] + 1,          # delete from ref
                            dp[i][j - 1] + 1)          # insert from hyp
-    sub = ins = dele = 0
+    ops: List[Tuple[str, int, int]] = []
     i, j = n, m
     while i > 0 or j > 0:
         if i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + (
                 0 if ref[i - 1] == hyp[j - 1] else 1):
-            if ref[i - 1] != hyp[j - 1]:
-                sub += 1
+            ops.append(("match" if ref[i - 1] == hyp[j - 1] else "sub",
+                        i - 1, j - 1))
             i, j = i - 1, j - 1
         elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
-            dele += 1
+            ops.append(("del", i - 1, -1))
             i -= 1
         else:
-            ins += 1
+            ops.append(("ins", -1, j - 1))
             j -= 1
+    ops.reverse()
+    return ops
+
+
+def edit_counts(ref: Sequence[str], hyp: Sequence[str]) -> Tuple[int, int, int]:
+    """Minimum (substitutions, insertions, deletions) turning ``ref`` into ``hyp``.
+
+    Returned counts give ``WER = (S + D + I) / len(ref)``, i.e. the standard
+    definition with ``ref`` as the denominator.  See :func:`align_words` for
+    the DP and the tie-breaking.
+    """
+    sub = ins = dele = 0
+    for op, _, _ in align_words(ref, hyp):
+        if op == "sub":
+            sub += 1
+        elif op == "ins":
+            ins += 1
+        elif op == "del":
+            dele += 1
     return sub, ins, dele
+
+
+def item_errors(ref: str, hyp: str) -> Dict[str, float]:
+    """Per-utterance error counts -- the unit of the paired bootstrap."""
+    r, h = normalize_text(ref).split(), normalize_text(hyp).split()
+    a, b, c = edit_counts(r, h)
+    return {"sub": a, "ins": b, "del": c, "errors": a + b + c,
+            "words": len(r), "hyp_words": len(h)}
+
+
+def wer_per_item(pairs: Sequence[Tuple[str, str]]) -> List[Dict[str, float]]:
+    """``item_errors`` for every ``(reference, hypothesis)`` pair."""
+    return [item_errors(ref, hyp) for ref, hyp in pairs]
 
 
 def wer_summary(pairs: Sequence[Tuple[str, str]]) -> Dict[str, float]:
     """Corpus-level WER over ``(reference, hypothesis)`` text pairs."""
     s = i = d = words = 0
-    for ref, hyp in pairs:
-        r, h = normalize_text(ref).split(), normalize_text(hyp).split()
-        words += len(r)
-        a, b, c = edit_counts(r, h)
-        s, i, d = s + a, i + b, d + c
+    for e in wer_per_item(pairs):
+        s, i, d = s + e["sub"], i + e["ins"], d + e["del"]
+        words += e["words"]
     errors = s + i + d
     return {"wer": errors / words if words else float("nan"),
             "sub": s, "ins": i, "del": d, "errors": errors, "words": words,
             "n": len(pairs)}
+
+
+def _rate(count: float, total: float) -> float:
+    return count / total if total else float("nan")
+
+
+def wer_diagnostics(pairs: Sequence[Tuple[str, str]],
+                    n_bins: int = 10) -> Dict[str, object]:
+    """Where the deletions are, and how long the hypotheses are.
+
+    :func:`wer_summary` says *how many* words are missing; this says *where*.
+    A deletion concentrated in the last 20 % of the utterance is the model
+    stopping early (EOS / duration), while deletions spread through the middle
+    are the "skips a word" failure -- and the two need completely different
+    fixes.  ``hyp_words`` length is reported the same way, because a short
+    hypothesis produces deletions everywhere by construction.
+
+    Bin ``b`` holds the reference words whose normalised position falls in
+    ``[b/n_bins, (b+1)/n_bins)``, so every bin holds about the same number of
+    words and ``del_rate_by_bin`` is comparable across bins: a flat profile
+    means "no positional bias", a rising one means the tail is being lost.
+    """
+    counts = [0] * n_bins
+    words_in = [0] * n_bins
+    words = del_total = 0
+    ratios: List[float] = []
+    for ref, hyp in pairs:
+        r, h = normalize_text(ref).split(), normalize_text(hyp).split()
+        words += len(r)
+        if r:
+            ratios.append(len(h) / len(r))
+        for b in range(len(r)):
+            words_in[min(int(n_bins * b / max(len(r), 1)), n_bins - 1)] += 1
+        for op, ri, _ in align_words(r, h):
+            if op == "del":
+                del_total += 1
+                counts[min(int(n_bins * ri / max(len(r), 1)), n_bins - 1)] += 1
+    n_edge = max(1, n_bins // 5)                       # first / last 20 %
+    head, head_w = sum(counts[:n_edge]), sum(words_in[:n_edge])
+    tail, tail_w = sum(counts[-n_edge:]), sum(words_in[-n_edge:])
+    mid, mid_w = del_total - head - tail, words - head_w - tail_w
+    return {
+        "words": words, "del": del_total,
+        "del_rate": _rate(del_total, words),
+        "del_rate_head": _rate(head, head_w),
+        "del_rate_mid": _rate(mid, mid_w),
+        "del_rate_tail": _rate(tail, tail_w),
+        "del_counts_by_bin": counts,
+        "del_rate_by_bin": [_rate(c, w) for c, w in zip(counts, words_in)],
+        "len_ratio_median": float(np.median(ratios)) if ratios
+        else float("nan"),
+        "short_frac": (sum(1 for x in ratios if x < 0.8) / len(ratios)
+                       if ratios else float("nan")),
+        "long_frac": (sum(1 for x in ratios if x > 1.2) / len(ratios)
+                      if ratios else float("nan")),
+        "n": len(pairs),
+    }
+
+
+def format_diagnostics(diag: Dict[str, object], indent: str = "    ") -> str:
+    """One-line-per-fact rendering of :func:`wer_diagnostics`."""
+    deciles = " ".join(f"{100.0 * x:5.1f}" for x in diag["del_rate_by_bin"])
+    return "\n".join([
+        f"{indent}deletions {diag['del']}/{diag['words']} words "
+        f"({100.0 * diag['del_rate']:.1f}%)   positions: "
+        f"head {100.0 * diag['del_rate_head']:.1f}% / "
+        f"mid {100.0 * diag['del_rate_mid']:.1f}% / "
+        f"tail {100.0 * diag['del_rate_tail']:.1f}%",
+        f"{indent}delete rate by ref decile: {deciles}",
+        f"{indent}hyp/ref words: median {diag['len_ratio_median']:.3f}   "
+        f"short (<0.8) {100.0 * diag['short_frac']:.1f}%   "
+        f"long (>1.2) {100.0 * diag['long_frac']:.1f}%",
+    ])
+
+
+def wer_by_length(pairs: Sequence[Tuple[str, str]], n_bins: int = 4
+                  ) -> List[Dict[str, float]]:
+    """WER / deletion rate by utterance length (reference word count).
+
+    Splits the items into ``n_bins`` equal-count groups ordered by how many
+    words the reference has, and reports the corpus WER and deletion rate of
+    each.  A rising curve means the failure is length-dependent -- the model
+    loses the thread / wraps up as the sentence grows -- which is a completely
+    different diagnosis from a fixed per-word error rate.
+    """
+    rows = []
+    for ref, hyp in pairs:
+        r, h = normalize_text(ref).split(), normalize_text(hyp).split()
+        a, b, c = edit_counts(r, h)
+        rows.append({"words": len(r), "errors": a + b + c, "del": c,
+                     "pair": (ref, hyp)})
+    if not rows:
+        return []
+    rows.sort(key=lambda x: x["words"])
+    out: List[Dict[str, float]] = []
+    n_bins = max(1, min(n_bins, len(rows)))
+    for b in range(n_bins):
+        lo = round(b * len(rows) / n_bins)
+        hi = round((b + 1) * len(rows) / n_bins)
+        chunk = rows[lo:hi]
+        if not chunk:
+            continue
+        words = sum(x["words"] for x in chunk)
+        errors = sum(x["errors"] for x in chunk)
+        dels = sum(x["del"] for x in chunk)
+        out.append({
+            "items": len(chunk),
+            "words": words,
+            "ref_words_mean": words / len(chunk),
+            "wer": _rate(errors, words),
+            "del_rate": _rate(dels, words),
+        })
+    return out
+
+
+def format_by_length(rows: Sequence[Dict[str, float]],
+                     indent: str = "    ") -> str:
+    """Render :func:`wer_by_length` as one line per length quartile."""
+    return "\n".join(
+        f"{indent}  {r['ref_words_mean']:5.1f} ref words  "
+        f"WER {100.0 * r['wer']:5.1f}%   delete {100.0 * r['del_rate']:4.1f}%"
+        f"   [{r['items']} utts]" for r in rows)
+
+
+def paired_wer_delta(pairs_a: Sequence[Tuple[str, str]],
+                     pairs_b: Sequence[Tuple[str, str]], *,
+                     n_boot: int = 2000, seed: int = 0,
+                     alpha: float = 0.05) -> Dict[str, float]:
+    """Paired bootstrap of ``WER(a) - WER(b)`` over the same utterances.
+
+    Both arms must be scored on the *same* utterances in the same order -- true
+    for every checkpoint in ``eval_stage2_wer.py``, which reuses the item list
+    and the sampling seed.  Resampling *utterances* (not errors) keeps the
+    pairing, which is what makes a 1-2 pp difference resolvable at 100-200
+    items; comparing two independent corpus WERs at 50 items cannot.
+
+    Returns ``delta`` (a - b; negative means ``a`` is better), its
+    ``[lo, hi]`` percentile interval and ``p_better`` (bootstrap fraction with
+    ``a`` better).
+    """
+    a = wer_per_item(pairs_a)
+    b = wer_per_item(pairs_b)
+    n = min(len(a), len(b))
+    if n == 0:
+        return {"delta": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "p_better": float("nan"), "n_boot": 0}
+    ea = np.array([x["errors"] for x in a[:n]], dtype=np.float64)
+    wa = np.array([x["words"] for x in a[:n]], dtype=np.float64)
+    eb = np.array([x["errors"] for x in b[:n]], dtype=np.float64)
+    wb = np.array([x["words"] for x in b[:n]], dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    delta = (ea[idx].sum(1) / np.maximum(wa[idx].sum(1), 1)
+             - eb[idx].sum(1) / np.maximum(wb[idx].sum(1), 1))
+    point = ea.sum() / max(wa.sum(), 1) - eb.sum() / max(wb.sum(), 1)
+    lo, hi = np.percentile(delta, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    # Ties count half, so two identical arms report 0.5 rather than 0.0.
+    p_better = float((delta < 0).mean() + 0.5 * (delta == 0).mean())
+    return {"delta": float(point), "lo": float(lo), "hi": float(hi),
+            "p_better": p_better, "n_boot": n_boot}
 
 
 # --------------------------------------------------------------------------- #
@@ -240,13 +434,19 @@ def chunked(seq: Sequence, size: int):
         yield seq[i:i + max(size, 1)]
 
 
-def build_wer_dataset(config, *, hints: bool = True, blocklists: bool = True):
+def build_wer_dataset(config, *, hints: bool = True, blocklists: bool = True,
+                      duration: bool = True):
     """A whole-utterance ``CodeDataset`` for WER (no ``max_frames`` clamp).
 
     The training/validation datasets crop to ``train.max_frames``; WER must score
     the utterance the reference text describes.  Hint channels are built when
     the model has them (``hints=False`` reproduces the old, hint-less numbers),
     exactly like ``scratch/eval_stage2_wer.py`` does.
+
+    ``duration`` emits the oracle phone-progress schedule
+    (``transformer.duration_cond``) for the whole utterance.  Pass ``False`` to
+    score the same checkpoint in the trained "no schedule" state, which is the
+    control arm for the duration-channel prototype.
     """
     from dataset_codes import CodeDataset
 
@@ -263,6 +463,12 @@ def build_wer_dataset(config, *, hints: bool = True, blocklists: bool = True):
         max_frames=None,
         max_phone_length=None,
         speaker_map=config.train.get("speaker_map", None),
+        # The schedule is used by two independent features: as a decoder input
+        # (``duration_cond``) and as the alignment target
+        # (``align_supervision``).  Emit it when either is on.
+        duration=(bool(tc.get("duration_cond", False))
+                  or bool(tc.get("align_supervision", False))) and duration,
+        duration_dropout=0.0,
         alignment_blocklist=(config.train.get("alignment_blocklist", None)
                              if blocklists else None),
         stage_direction_blocklist=(
@@ -546,16 +752,24 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
                          hint_arg_fn=None,
                          hint_guidance: Optional[float] = None,
                          hint_guidance_books=None,
-                         sid_map: Optional[Dict[int, int]] = None
-                         ) -> List[np.ndarray]:
+                         sid_map: Optional[Dict[int, int]] = None,
+                         return_lengths: bool = False,
+                         duration: bool = False):
     """Sample codes per item (oracle length cap) and decode them to audio.
 
     ``hint_arg_fn(chunk)`` (a ``CodeCollator`` closure, typically) turns the
     chunk into the hint dict the model expects; without it generation runs in
     the model's **trained null state** (level 0 everywhere), the state
     ``hint_dropout`` trains and the one ``resolve_hints(None)`` maps to.
+
+    Returns the waveforms, or ``(wavs, lengths)`` when ``return_lengths`` is
+    set -- ``lengths[i]`` is the number of *code frames* the model produced for
+    item ``i`` (its own EOS decision unless ``stop_on_eos=False``).  Comparing
+    that with the item's ground-truth frame count is the direct "is it
+    under-generating?" measurement.
     """
     wavs = []
+    out_lengths: List[int] = []
     hop = code_frame_samples(net_g)
     for chunk in chunked(items, batch_size):
         B = len(chunk)
@@ -572,6 +786,20 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
             plen[i] = p.numel()
             sid[i] = int(it["sid"])
             lens.append(min(int(it["spec_codes"].shape[1]), max_frames))
+        prog = prog_mask = None
+        if duration:
+            # Oracle phone-progress schedule, one row per item, padded to the
+            # longest schedule in the chunk (column tags are masked per frame).
+            widths = [min(int(it["dur_prog"].numel()), max_frames)
+                      for it in chunk]
+            Tp = max(widths)
+            prog = torch.zeros(B, Tp, dtype=torch.float32)
+            prog_mask = torch.zeros(B, Tp, dtype=torch.bool)
+            for i, (it, w) in enumerate(zip(chunk, widths)):
+                if w > 0:
+                    prog[i, :w] = it["dur_prog"][:w].float()
+                    prog_mask[i, :w] = it["dur_prog_mask"][:w].bool()
+            prog, prog_mask = prog.to(device), prog_mask.to(device)
         gen, glen = net.generate(
             phone, plen, sid, max_frames=max(lens),
             temperature=temperature, top_k=top_k,
@@ -579,6 +807,7 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
             hints=(hint_arg_fn(chunk) if hint_arg_fn is not None else None),
             hint_guidance=hint_guidance,
             hint_guidance_books=hint_guidance_books,
+            progress=prog, progress_mask=prog_mask,
             return_lengths=True)
         spec = gen[:, :Qs].transpose(0, 1).contiguous()
         pitch = gen[:, Qs:Qs + Qp].transpose(0, 1).contiguous()
@@ -591,7 +820,10 @@ def synthesize_generated(net, net_g, items, pad_id, device, *,
         audio = net_g.infer_from_codes(spec, pitch, gen_sid)     # (B, 1, N)
         for i in range(B):
             n = min(int(glen[i]), lens[i]) * hop
+            out_lengths.append(min(int(glen[i]), lens[i]))
             wavs.append(audio[i, 0, :n].float().cpu().numpy())
+    if return_lengths:
+        return wavs, out_lengths
     return wavs
 
 

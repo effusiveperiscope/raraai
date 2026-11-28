@@ -102,11 +102,16 @@ class GuidedRenderer(nn.Module):
                  width: int = 512, phone_layers: int = 4,
                  frame_layers: int = 6, kernel: int = 5,
                  dropout: float = 0.1, depth_ar_pitch: bool = True,
-                 f0_aux: bool = True):
+                 f0_aux: bool = True, phone_attn_layers: int = 0,
+                 frame_attn_layers: int = 0, nhead: int = 8,
+                 phone_aux: bool = False, zq_aux: bool = False,
+                 zq_dim: int = 1024):
         super().__init__()
         d = int(width)
         self.depth_ar_pitch = bool(depth_ar_pitch)
         self.f0_aux = bool(f0_aux)
+        if (phone_attn_layers or frame_attn_layers) and d % nhead:
+            raise ValueError(f"width {d} must be divisible by nhead {nhead}")
 
         # -- phones -------------------------------------------------------- #
         self.phone_emb = nn.Embedding(vocab, d, padding_idx=0)
@@ -114,6 +119,17 @@ class GuidedRenderer(nn.Module):
             ConvBlock(d, kernel, dilation=1 << (i % 3), dropout=dropout)
             for i in range(phone_layers)])
         self.phone_norm = nn.LayerNorm(d)
+        # Global phone context: the conv RF is only ~33 phones, which is not a
+        # sentence for a long line.  Non-causal, so every phone sees every
+        # other phone; this is text context, not an alignment mechanism.
+        self.phone_attn = None
+        if phone_attn_layers:
+            self.phone_attn = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d, nhead, dim_feedforward=4 * d, dropout=dropout,
+                    activation="gelu", batch_first=True, norm_first=True),
+                num_layers=int(phone_attn_layers),
+                enable_nested_tensor=False)
         #: frames with no sounding phone (lead/pause)
         self.silence = nn.Parameter(torch.zeros(d))
 
@@ -126,6 +142,17 @@ class GuidedRenderer(nn.Module):
             ConvBlock(d, kernel, dilation=1 << (i % 4), dropout=dropout)
             for i in range(frame_layers)])
         self.out_norm = nn.LayerNorm(d)
+        # Global frame context: 73-code-frame conv RF = 2.9 s, so a long clip
+        # cannot see its own plan as a whole.  Attention is O(T^2) with T<=400
+        # in training; at CPU inference it is still cheaper than the convs.
+        self.frame_attn = None
+        if frame_attn_layers:
+            self.frame_attn = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d, nhead, dim_feedforward=4 * d, dropout=dropout,
+                    activation="gelu", batch_first=True, norm_first=True),
+                num_layers=int(frame_attn_layers),
+                enable_nested_tensor=False)
 
         # -- heads --------------------------------------------------------- #
         self.spec_head = nn.Linear(d, N_SPEC_BOOKS * SPEC_SIZE)
@@ -137,6 +164,15 @@ class GuidedRenderer(nn.Module):
         self.pitch_emb = nn.ModuleList([
             nn.Embedding(PITCH_SIZE, d) for _ in range(N_PITCH_BOOKS)])
         self.f0_head = nn.Linear(d, 1) if f0_aux else None
+        # Content-forcing auxiliary: predict which phone each code frame is
+        # rendering.  Without it the code head can ignore the phone path and
+        # fit a speaker prior (measured on the first baseline).
+        self.phone_aux_head = nn.Linear(d, vocab) if phone_aux else None
+        # Continuous target: predict the codec decoder's input directly
+        # (zq = sum of codebook embeddings).  The 64-way CE is metric-blind;
+        # the vocoder is not (nearest-other code changes log-mel 1.37x less
+        # than a random code, and 10% latent noise is nearly inaudible).
+        self.zq_head = nn.Linear(d, int(zq_dim)) if zq_aux else None
 
     # ------------------------------------------------------------------ #
 
@@ -185,7 +221,10 @@ class GuidedRenderer(nn.Module):
             self.phone_emb.weight.dtype)
         for blk in self.phone_blocks:
             ph = blk(ph, phone_mask)
-        ph = self.phone_norm(ph) * phone_mask.unsqueeze(-1)
+        ph = self.phone_norm(ph)
+        if self.phone_attn is not None:
+            ph = self.phone_attn(ph, src_key_padding_mask=~phone_mask)
+        ph = ph * phone_mask.unsqueeze(-1)
 
         h = self.expanded_phones(ph, phone_index)
         h = h + self.feat_proj(frame_feats)
@@ -195,6 +234,11 @@ class GuidedRenderer(nn.Module):
         h = h * frame_mask.unsqueeze(-1).to(h.dtype)
         for blk in self.frame_blocks:
             h = blk(h, frame_mask)
+        if self.frame_attn is not None:
+            # positions again, after the convs have mixed the first copy
+            h = h + _sinusoidal(T, h.shape[-1], h.device).unsqueeze(0).to(h.dtype)
+            h = self.frame_attn(h, src_key_padding_mask=~frame_mask)
+            h = h * frame_mask.unsqueeze(-1).to(h.dtype)
         h = self.out_norm(h) * frame_mask.unsqueeze(-1).to(h.dtype)
 
         spec = self.spec_head(h).view(B, T, N_SPEC_BOOKS, SPEC_SIZE)
@@ -205,6 +249,10 @@ class GuidedRenderer(nn.Module):
             out["pitch_codes"] = torch.stack(pitch_codes, dim=1)  # (B,2,T)
         if self.f0_head is not None:
             out["f0_pred"] = self.f0_head(h).squeeze(-1)
+        if self.phone_aux_head is not None:
+            out["phone_logits"] = self.phone_aux_head(h)
+        if self.zq_head is not None:
+            out["zq_pred"] = self.zq_head(h)
         return out
 
 
@@ -221,7 +269,10 @@ def _masked_ce(logits: torch.Tensor, target: torch.Tensor,
 def renderer_loss(out: dict, batch: dict, *,
                   spec_weight: float = 1.0,
                   pitch_weight: float = 1.0,
-                  f0_weight: float = 0.05) -> dict:
+                  f0_weight: float = 0.05,
+                  phone_weight: float = 0.0,
+                  zq_target: torch.Tensor | None = None,
+                  zq_weight: float = 0.0) -> dict:
     """Masked code CE + optional f0 L1.
 
     ``spec_weight``/``pitch_weight`` are per-codebook means, not sums, so the
@@ -242,6 +293,18 @@ def renderer_loss(out: dict, batch: dict, *,
 
     losses = {"spec_ce": spec_ce, "pitch_ce": pitch_ce,
               "loss": spec_weight * spec_ce + pitch_weight * pitch_ce}
+    if ("zq_pred" in out and zq_target is not None and zq_weight > 0):
+        zq_l1 = (out["zq_pred"] - zq_target).abs().mean(-1)[mask].mean()
+        losses["zq_l1"] = zq_l1
+        losses["loss"] = losses["loss"] + zq_weight * zq_l1
+    if ("phone_logits" in out and batch.get("frame_phone") is not None
+            and phone_weight > 0):
+        tgt = batch["frame_phone"]
+        m = tgt >= 0
+        if bool(m.any()):
+            phone_ce = F.cross_entropy(out["phone_logits"][m], tgt[m])
+            losses["phone_ce"] = phone_ce
+            losses["loss"] = losses["loss"] + phone_weight * phone_ce
     if "f0_pred" in out and batch.get("f0_valid") is not None:
         f0 = batch["f0"].reshape(B, T, 4)
         ok = batch["f0_valid"].reshape(B, T, 4) & mask.unsqueeze(-1)

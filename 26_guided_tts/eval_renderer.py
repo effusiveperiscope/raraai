@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT))
 import shared  # noqa: E402  (adds ../25_transformer to sys.path)
 from dataset_plan import PlanDataset, collate_plans  # noqa: E402
 from renderer import GuidedRenderer, sample_codes  # noqa: E402
-from audio_utils import codes_to_audio, original_wave  # noqa: E402
+from audio_utils import codes_to_audio, original_wave, zq_to_audio  # noqa: E402
 from plan import F0_REF_HZ  # noqa: E402
 from stage2_wer import (  # noqa: E402
     Asr, code_frame_samples, item_basename, load_references, load_sid_map,
@@ -68,6 +68,12 @@ def load_model(path: str, device: str) -> tuple[GuidedRenderer, int]:
         dropout=float(a.get("dropout", 0.1)),
         depth_ar_pitch=bool(a.get("depth_ar_pitch", True)),
         f0_aux=bool(a.get("f0_aux", True)),
+        phone_attn_layers=int(a.get("phone_attn_layers", 0)),
+        frame_attn_layers=int(a.get("frame_attn_layers", 0)),
+        nhead=int(a.get("nhead", 8)),
+        phone_aux=bool(a.get("phone_aux", False)),
+        zq_aux=bool(a.get("zq_aux", False)),
+        zq_dim=int(a.get("zq_dim", 1024)),
     )
     model.load_state_dict(ck["model"])
     model.to(device).eval()
@@ -129,21 +135,24 @@ def _agg(rows: list[dict], key: str) -> dict:
             "p90": float(np.percentile(a, 90))}
 
 
-def _generated_codes(model, batch, args) -> tuple[torch.Tensor, torch.Tensor]:
+def _generate(model, batch, args):
+    """Return ``(codes_or_None, pitch_codes, out)``; None means continuous zq."""
     with torch.no_grad():
         out = model(**{k: batch[k] for k in MODEL_KEYS},
                     pitch_targets=None, temperature=args.temperature,
                     top_k=args.top_k)
-    spec = sample_codes(out["spec_logits"], args.temperature, args.top_k)
     pitch = out["pitch_codes"]
+    if "zq_pred" in out:
+        return None, pitch, out
+    spec = sample_codes(out["spec_logits"], args.temperature, args.top_k)
     codes = torch.cat([spec.permute(0, 2, 1), pitch], dim=1)     # (B,10,T)
-    return codes, out["pitch_logits"][0]
+    return codes, pitch, out
 
 
 @torch.no_grad()
-def _decode(net_g, codes: torch.Tensor, sids: torch.Tensor):
-    """``(B,10,T)`` -> ``(audio list, f0 (B,4T))`` through the frozen decoder."""
-    return codes_to_audio(net_g, codes, sids, return_f0=True)
+def _decode(net_g, codes: torch.Tensor, sids: torch.Tensor, lengths):
+    """``(B,10,T)`` -> per-item ``(audio list, f0 list)`` at their own T."""
+    return codes_to_audio(net_g, codes, sids, lengths=lengths, return_f0=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,14 +235,19 @@ def main() -> int:
         if args.level_shift:
             batch["frame_feats"][..., 2] += args.level_shift
 
-        codes, _ = _generated_codes(model, batch, args)
+        codes, pitch, out = _generate(model, batch, args)
         gt_codes = torch.cat([batch["spec_codes"], batch["pitch_codes"]], dim=1)
         sids = torch.tensor(map_sids(batch["sid"].tolist(), sid_map),
                             dtype=torch.long, device=args.device)
+        lengths = batch["lengths"].tolist()
 
-        wavs, f0g = _decode(net_g, codes, sids)
+        if codes is None:
+            wavs, f0s = zq_to_audio(net_g, out["zq_pred"], pitch, sids,
+                                    lengths=lengths, return_f0=True)
+        else:
+            wavs, f0s = _decode(net_g, codes, sids, lengths)
         if args.oracle:
-            owavs, of0 = _decode(net_g, gt_codes, sids)
+            owavs, of0s = _decode(net_g, gt_codes, sids, lengths)
 
         hyps = asr.transcribe(to_16k(wavs, sr)) if asr else [""] * len(wavs)
         oh = asr.transcribe(to_16k(owavs, sr)) if (asr and args.oracle) else [""] * len(wavs)
@@ -247,7 +261,7 @@ def main() -> int:
                  + batch["pitch_st"][i].cpu().numpy()) / 12.0)
             plan_v = batch["voiced"][i].cpu().numpy()
             plan_hz = np.where(plan_v, plan_hz, 0.0)[: 4 * n]
-            gen = f0g[i, : 4 * n]
+            gen = f0s[i][: 4 * n]
             gt = batch["f0"][i].cpu().numpy()[: 4 * n]
 
             wdb = batch["word_db"][i].cpu().numpy() + args.level_shift
@@ -291,11 +305,11 @@ def main() -> int:
                         writer.add_audio(name, torch.from_numpy(w).unsqueeze(0),
                                          global_step=ckpt_step, sample_rate=sr)
 
-                    _log(f"gen/{tag}", wavs[i])
+                    _log(f"audio/gen/{tag}", wavs[i])
                     if args.oracle:
-                        _log(f"oracle/{tag}", owavs[i])
+                        _log(f"audio/oracle/{tag}", owavs[i])
                     if orig is not None:
-                        _log(f"orig/{tag}", orig)
+                        _log(f"audio/orig/{tag}", orig)
 
                 manifest.append({"tag": tag, "ref": ref, "hyp": hyps[i],
                                  "path": path, "n_frames": n,
@@ -307,7 +321,7 @@ def main() -> int:
             if args.oracle:
                 oracle_rows.append({
                     "index": int(batch["index"][i]),
-                    "gt_vs_oracle": _f0_compare(gt, of0[i, : 4 * n]),
+                    "gt_vs_oracle": _f0_compare(gt, of0s[i][: 4 * n]),
                     "level_oracle": _level_compare(
                         wdb, _word_db_from_wave(owavs[i], wst, wdu, hop)),
                 })

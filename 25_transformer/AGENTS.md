@@ -2225,6 +2225,132 @@ to `F AO0 R` (it used to be identical to `FOUR`). `scratch/audit_oov.py`
 generates the remaining OOV list per filelist; `test_phonemize.py --regress`
 and `test_pitch_anchors.py` guard all of it.
 
+### Text-driven duration (prototype, `transformer.duration_cond`)
+
+The word-progress *auxiliary loss* (`transformer.word_progress`) is a per-frame
+regression on the decoder hidden state. It converges in ~10 k steps and changes
+nothing downstream, for a structural reason: its target
+`(word_index + 0.5) / n_words` is a monotone function of **time**, not of the
+text, so the head learns "roughly where am I in the clip" from positions and the
+codes it has already heard; and being a masked mean over ~50 frames at weight
+0.1 it delivers a decoder-side gradient ~4 orders of magnitude below the code
+CE. Measured on the resulting run (`transformer_word_progress_v1`, 136 k steps
+from `v2.4`): val_code_ce drifts **2.3035 → 2.3212** (memorisation) and WER is
+unchanged (paired, 120 val utts, greed-free sampling: **−0.99 pp, 95 % CI
+[−3.46, +1.30]**).
+
+What the WER analysis did find (same 120 items, floor = ground-truth codes
+through the vocoder + ASR = **6.08 %**):
+
+| arm | WER | S | D | I |
+|---|---|---|---|---|
+| ground-truth codes | 6.08 % | – | 0.6 % | – |
+| v2.4 (warm start) | 15.75 % | 117 | 8.4 % | 25 |
+| word-progress run | 14.76 % | 115 | 7.7 % | 20 |
+
+* Deletions are **tail-weighted** (last 20 % of the sentence: 18-23 %, mid 5 %,
+  ground truth 0.6 %) -- ~1 word in 5 of the final fifth is never spoken.
+* It is **not** a frame-budget problem: decoding every item at exactly its
+  ground-truth code length makes WER *worse* (14.76 → 20.27 %, insertions
+  20 → 68) because the model fills the extra frames with babble.
+* It is **not** long-context drift: WER by utterance length quartile is flat
+  (18.8 / 15.1 / 10.3 / 16.5 %).
+* **Halving the phoneme sequence barely changes the generated length** (e.g.
+  154 → 154 → 88 frames for 100 / 75 / 50 % of the text). The utterance length
+  and pacing are an acoustic prior, not a function of the text -- which is the
+  single root cause of both the swallowed final words and the drawn-out
+  prosody.
+
+`transformer.duration_cond` therefore conditions on duration **as an input**
+instead of regressing it out of the hidden state: one additive vector per
+decoder column, `prog_dir * (2p - 1)`, where `p ∈ [0,1]` is the normalised
+position of the phone that should be sounding at that frame. `prog_absent` is
+the trained "no schedule" vector (`train.duration_dropout`, whole clip, 0.1),
+which is what inference without a duration predictor runs in.
+
+* Dataset: `_phone_progress_targets` splits each word's `word_start_f` /
+  `word_slot_f` span evenly over the phones that word owns (the same `.cond`
+  fields the word crop uses), giving `dur_prog` `(T,)` + `dur_prog_mask`
+  `(T,)`. Monotone and clipped to [0, 1] by construction.
+* Model: `DelayCodebookDecoder.prog_dir` / `prog_absent`, both zero-init, so a
+  warm start is an exact identity (verified: identical loss and identical
+  `generate` output before training). Column `j` carries the tag of the frame
+  it *predicts* (`progress[j]`, carried past `T`); `generate` slices the
+  schedule per step, and the absent/short-schedule columns get `prog_absent`.
+* Eval: `scratch/eval_stage2_wer.py --duration` supplies each item's oracle
+  schedule from its `.cond`; **without** the flag the same checkpoint runs in
+  the absent state, which is the paired control. `train.wer_duration: true`
+  logs both every probe (`wer/generated` and `wer/generated_nodur`, same items
+  and seed).
+* This measured the **ceiling** of the mechanism, and the ceiling is zero:
+  `transformer_duration_v1` (30 k steps from the word-progress checkpoint,
+  `lr: 1e-5`) logs `wer/generated` 22.6/18.5/19.9 % against
+  `wer/generated_nodur` 26.2/20.0/19.8 % -- a 3.6 pp gap that decays to 0.1 pp.
+  The channel was **never learned**: `decoder.prog_dir` ends at norm 0.27
+  against `input_bias` 13.2 on the same input, i.e. a ~1 % perturbation.
+* Why: **the decoder has no alignment at all.** `scratch/check_alignment.py`
+  captures the cross-attention of every layer: entropy / log N is **0.96-0.99**
+  (1.0 = uniform) on `transformer_hints_v2.7_spk256` *and* on the prototype, at
+  every layer, with the expected phone position pinned at ~0.48 whatever the
+  frame. The memory is healthy (phone vectors pairwise cosine ~0, adjacent
+  ~0.1), so this is the decoder ignoring a usable memory, not a collapsed one.
+  A side channel cannot create an alignment that attention never learned --
+  and the two earlier prototypes failed for exactly that reason.
+* The text is still *read*: swapping one item's `phone_ids` for another's makes
+  the model speak the swapped sentence (WER vs the swapped references 57.7 %,
+  vs its own 103 %). So the model maps a **pooled** sentence representation to
+  a memorised realisation; order comes from the corpus prior, not from
+  attending to phones. That is why length/pacing is not text-driven, why the
+  final word goes missing, and why a new corpus (the MLP fine-tunes) degrades.
+* The next mechanism has to be **alignment supervision** (guided attention):
+  a KL/CE from the `.cond` schedule onto the cross-attention of a few layers,
+  with `need_weights=True` (the fused path does not expose weights). Judge it
+  on the entropy above (low variance, no ASR) before WER. Note §4 "Encoder →
+  decoder conditioning (v0.4.1)" measured 0.12 entropy after `memory_norm`;
+  the current runs are back at 0.98, and nothing was watching.
+
+### Alignment supervision (guided attention, `transformer.align_supervision`)
+
+The fix for the above. It adds **no parameters**: the `multihead_attn` of
+`align_layers` is replaced at build time by `CapturingCrossAttention` (a
+subclass whose state-dict keys are exactly the parent's, like
+`RotaryMultiheadAttention`), and capture is enabled only around the decoder call
+inside `code_loss` -- `generate` and validation without a schedule stay on
+torch's fused path. Because no tensor changes, an alignment checkpoint loads
+into a non-alignment config and vice versa with no marker and no guard; only the
+training loss differs.
+
+* Target: the same `dur_prog` schedule the duration channel consumes, turned
+  into a Gaussian over phones of width `align_sigma` (default 1.0 phone),
+  centred on `dur_prog * n_phones - 0.5`. Masked to aligned frames and valid
+  phones. `align_ce` is a per-head-averaged cross-entropy; `align_weight`
+  (default 0.1) is its share of the loss, so the target's own entropy
+  (~1.4 nats at sigma 1) is the floor, not 0.
+* Logged: `{train,val}_align_ce` and `{train,val}_align_entropy` (the latter
+  normalised by `log(n_phones)`, so 1.0 = uniform), next to `code_ce` (the pure
+  code term, before any auxiliary loss). **Judge the mechanism on the entropy**,
+  not on WER: it is a direct, low-variance measurement, and a 50-item WER probe
+  cannot resolve the few pp the fix is aiming at.
+* Measured (`transformer_align_v1`, 30 k steps from `v2.4`, lr 2e-5, weight
+  0.1): `align_entropy` 0.82 -> 0.49 within 2.4 k steps and `align_ce`
+  2.69 -> 1.67, with `train_code_ce` +0.06 nats and flat (a real transient, not
+  the +0.45 land-slide the same checkpoint shows at lr 4e-5). The offline
+  `check_alignment.py` number at step 0 is 0.96-0.99 per layer, so this is the
+  first arm that moves it.
+* `test_alignment.py` is the CPU guard: the term is additive and equals
+  `log(n_phones)` at init, a fixed batch's entropy actually falls with only the
+  alignment loss applied, and neither the no-schedule path nor `generate` ever
+  enables capture.
+
+Footguns: the codebook axis is dim 1 of `seq` (`(B, K, columns)`), so the
+per-step slice is `seq.size(2)` -- using `size(1)` silently gives every step a
+`K`-wide schedule and raises a shape error only once the sequence passes the
+number of codebooks. `lr: 4e-5` (Muon 8e-3) on a converged checkpoint raises
+the train CE by +0.45 nats inside 150 steps and does not recover; the prototype
+uses `1e-5` and gains nothing from going higher, because the two channel
+vectors are AdamW parameters (per-step move ≈ lr regardless of gradient
+scale).
+
 
 ---
 
@@ -2966,6 +3092,17 @@ python scratch/hint_semantic_probe.py \
 python scratch/bench_stage2_step.py
 python scratch/bench_stage2_step.py --no_bucket
 python scratch/bench_stage2_step.py --diagnostics_per_step   # no metric gating
+
+# CPU smoke test for guided attention (term additive, entropy falls, capture
+# scoped, config guards) -- safe next to a GPU job
+python test_alignment.py
+# Does the decoder actually align frames to phones?  Per-layer attention
+# entropy / log N, |pos - oracle| and tail pacing error against the .cond
+# schedule.  1.0 entropy = uniform attention = no alignment (what every
+# pre-align run measures).  Use it instead of WER to judge an align arm.
+python scratch/check_alignment.py \
+    --checkpoint checkpoints_stage2/transformer_align_v1/last.ckpt \
+    --config configs/transformer_align.yaml
 
 # CPU smoke test for bucketed batching + decoder input-token dropout (sampler
 # coverage/epochs/__len__, the length cache, and the dropout semantics: eval

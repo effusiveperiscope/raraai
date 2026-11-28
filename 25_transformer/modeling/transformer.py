@@ -172,6 +172,39 @@ class RotaryEmbedding(nn.Module):
                 emb.sin().to(x.dtype)[None, None, :, :])
 
 
+class CapturingCrossAttention(nn.MultiheadAttention):
+    """``nn.MultiheadAttention`` that can also hand back its attention map.
+
+    Same parameters and state-dict keys as the parent (so a checkpoint loads
+    unchanged), plus two plain attributes:
+
+    * ``capture`` -- when true, ``forward`` asks for the weights and stores them
+      on ``last_attn`` as ``(B, heads, L, S)``.  Asking for weights disables
+      torch's fused fast path, so this is only enabled around the alignment loss
+      in :meth:`CodeTransformer.code_loss`, never in ``generate`` or validation.
+    * ``last_attn`` -- the captured map, or ``None``.
+
+    Used for the **cross**-attention (queries = decoder columns, keys = phoneme
+    memory), which is where the frame -> phone alignment has to live.  Measured
+    without supervision: entropy / log N = 0.96-0.99 in every layer, i.e. the
+    decoder ignores the memory (see ``scratch/check_alignment.py``).
+    """
+
+    capture: bool = False
+    last_attn = None
+
+    def forward(self, query, key, value, **kw):
+        if not self.capture:
+            kw["need_weights"] = False
+            self.last_attn = None
+            return super().forward(query, key, value, **kw)
+        kw["need_weights"] = True
+        kw["average_attn_weights"] = False
+        out, weights = super().forward(query, key, value, **kw)
+        self.last_attn = weights
+        return out, weights
+
+
 class RotaryMultiheadAttention(nn.MultiheadAttention):
     """``nn.MultiheadAttention`` with RoPE applied to the queries and keys.
 
@@ -629,6 +662,8 @@ class DelayCodebookDecoder(nn.Module):
         spk_norm: str = "none",
         spk_init: str = "default",
         spk_kl_weight: float = 0.0,
+        duration_cond: bool = False,
+        align_layers: Optional[Sequence[int]] = None,
     ):
         super().__init__()
         self.vocab_sizes = list(vocab_sizes)
@@ -678,6 +713,22 @@ class DelayCodebookDecoder(nn.Module):
         # folds their row 0 into this one vector.  It is not FIM functionality:
         # it is just the per-position bias the old model learned for plain AR.
         self.input_bias = nn.Parameter(torch.zeros(hidden_size))
+        # Oracle phone-progress conditioning (``transformer.duration_cond``):
+        # one additive vector per decoder column, ``dir * (2p - 1)`` where
+        # ``p`` is the normalised position of the phone that should be sounding
+        # at that frame, taken from the forced alignment.  This is the *input*
+        # side twin of ``word_progress``: it tells the decoder how far through
+        # the text it is supposed to be, so it can pace and stop from the text
+        # instead of from an acoustic prior.  ``absent`` is the trained
+        # no-schedule state (``duration_dropout``), so inference without a
+        # schedule is in-distribution.  Both are zero-init, so a warm start is
+        # an exact identity and the channel has to earn its effect.
+        if duration_cond:
+            self.prog_dir = nn.Parameter(torch.zeros(hidden_size))
+            self.prog_absent = nn.Parameter(torch.zeros(hidden_size))
+        else:
+            self.prog_dir = None
+            self.prog_absent = None
         # Post-norm hint projection (``transformer.hint_decoder_proj``): the
         # clip-level hints are added to the *output* of the final decoder norm
         # instead of (only) to the input.  The input path runs the hint through
@@ -719,6 +770,23 @@ class DelayCodebookDecoder(nn.Module):
                 dec_layer.self_attn = RotaryMultiheadAttention(
                     hidden_size, n_heads, dropout=dropout,
                     rope_base=self.rope_base)
+
+        # Alignment supervision (``transformer.align_supervision``): the
+        # cross-attention of these layers is replaced by a subclass that can
+        # hand back its map, so :meth:`CodeTransformer.code_loss` can score it
+        # against the forced-alignment phone schedule.  Same state-dict keys, so
+        # a checkpoint loads unchanged and every other layer stays on the fused
+        # path.
+        self.align_layers = sorted({int(i) for i in (align_layers or ())})
+        for idx in self.align_layers:
+            if idx < 0 or idx >= len(self.decoder.layers):
+                raise ValueError(
+                    f"transformer.align_layers has {idx}, but the decoder has "
+                    f"{len(self.decoder.layers)} layers")
+            old = self.decoder.layers[idx].multihead_attn
+            self.decoder.layers[idx].multihead_attn = CapturingCrossAttention(
+                old.embed_dim, old.num_heads, dropout=old.dropout,
+                batch_first=True)
         self.heads = nn.ModuleList(
             [nn.Linear(hidden_size, c) for c in self.num_classes]
         )
@@ -767,6 +835,8 @@ class DelayCodebookDecoder(nn.Module):
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
         hint_vec: Optional[torch.Tensor] = None,  # (B, H) clip-level hints
+        progress: Optional[torch.Tensor] = None,  # (B, L) in [0, 1]
+        progress_mask: Optional[torch.Tensor] = None,  # (B, L) bool
         use_mask_cache: bool = True,
         return_hidden: bool = False,
     ) -> List[torch.Tensor]:
@@ -813,6 +883,24 @@ class DelayCodebookDecoder(nn.Module):
             x = x + self._spk_vector(sid.to(codes.device)).unsqueeze(1)
         x = x + self.input_bias.to(x.dtype)
 
+        # Oracle phone progress (``transformer.duration_cond``), one additive
+        # vector per column.  A column outside the schedule (padding past the
+        # end, or a clip with no usable alignment) gets the trained ``absent``
+        # vector, exactly like the hint channels' level 0.
+        if self.prog_dir is not None:
+            if progress is not None:
+                p = progress.to(codes.device, x.dtype)[:, : x.size(1)]
+                m = (progress_mask.to(codes.device)[:, : x.size(1)]
+                     if progress_mask is not None else
+                     torch.ones_like(p, dtype=torch.bool))
+            else:
+                p = torch.zeros(B, x.size(1), device=codes.device, dtype=x.dtype)
+                m = torch.zeros(B, x.size(1), device=codes.device,
+                                dtype=torch.bool)
+            x = x + torch.where(m.unsqueeze(-1),
+                                self.prog_dir.to(x.dtype) * (2.0 * p - 1.0).unsqueeze(-1),
+                                self.prog_absent.to(x.dtype))
+
         # Clip-level conditioning hints (intensity + semantic), a constant added
         # to every column like ``spk_emb``: the decoder needs to know the target
         # loudness/affect directly, not only through the encoded memory.  Built
@@ -852,9 +940,12 @@ class DelayCodebookDecoder(nn.Module):
         memory_mask: Optional[torch.Tensor] = None,  # (B, N) bool, True == valid
         sid: Optional[torch.Tensor] = None,  # (B,) long
         hint_vec: Optional[torch.Tensor] = None,  # (B, H) clip-level hints
+        progress: Optional[torch.Tensor] = None,  # (B, L) in [0, 1]
+        progress_mask: Optional[torch.Tensor] = None,  # (B, L) bool
     ) -> List[torch.Tensor]:
         return self._forward_impl(codes, memory, memory_mask, sid,
-                                  hint_vec, use_mask_cache=True)
+                                  hint_vec, progress, progress_mask,
+                                  use_mask_cache=True)
 
     def forward_with_hidden(
         self,
@@ -863,6 +954,8 @@ class DelayCodebookDecoder(nn.Module):
         memory_mask: Optional[torch.Tensor] = None,
         sid: Optional[torch.Tensor] = None,
         hint_vec: Optional[torch.Tensor] = None,
+        progress: Optional[torch.Tensor] = None,
+        progress_mask: Optional[torch.Tensor] = None,
     ):
         """Decoder logits plus the shared pre-head hidden state.
 
@@ -872,8 +965,8 @@ class DelayCodebookDecoder(nn.Module):
         compiled wrapper; the new config leaves that off anyway.
         """
         return self._forward_impl(codes, memory, memory_mask, sid,
-                                  hint_vec, use_mask_cache=True,
-                                  return_hidden=True)
+                                  hint_vec, progress, progress_mask,
+                                  use_mask_cache=True, return_hidden=True)
 
 
 class CodeTransformer(nn.Module):
@@ -920,6 +1013,31 @@ class CodeTransformer(nn.Module):
             raise ValueError(
                 "transformer.input_dropout must be in [0, 1), got "
                 f"{input_dropout}")
+        # Oracle phone-progress conditioning (see DelayCodebookDecoder).  Two
+        # H-vectors, zero-init, so a checkpoint without them warm-starts as an
+        # exact identity; a range of 0 makes the channel absent at inference
+        # (the trained ``duration_dropout`` state).
+        duration_cond = bool(_get_cfg(tcfg, "duration_cond", False))
+        # Alignment supervision (guided attention).  ``align_layers`` names the
+        # decoder layers whose cross-attention is scored against the forced
+        # alignment; empty disables it.  ``align_sigma`` is the width of the
+        # target window in *phones*, ``align_weight`` its share of the loss.
+        align_supervision = bool(_get_cfg(tcfg, "align_supervision", False))
+        align_layers = (_get_cfg(tcfg, "align_layers", (8, 9, 10, 11)) or ()
+                        if align_supervision else ())
+        align_layers = [int(i) for i in align_layers]
+        align_sigma = float(_get_cfg(tcfg, "align_sigma", 1.0) or 1.0)
+        align_weight = float(_get_cfg(tcfg, "align_weight", 0.0) or 0.0)
+        if align_supervision and align_weight <= 0:
+            raise ValueError("transformer.align_supervision is on but "
+                             "transformer.align_weight is 0")
+        if align_supervision and align_sigma <= 0:
+            raise ValueError("transformer.align_sigma must be > 0")
+        # Linear ramp of the alignment weight, in optimiser steps.  Forcing a
+        # converged model to attend sharply from step 1 costs real WER before
+        # it pays anything back (measured: 22.6 % -> 32.7 % at epoch 0 with
+        # four layers at full weight), so the term fades in instead.
+        align_warmup = int(_get_cfg(tcfg, "align_warmup_steps", 0) or 0)
 
         # Speaker-embedding structure (optional; see SpeakerEmbedding).
         # Defaults reproduce the historical full per-id table exactly, so a
@@ -1017,6 +1135,7 @@ class CodeTransformer(nn.Module):
         # when this model was built without EOS.  See the module docstring.
         self.eos_token = eos_token
         self.eos_ids = ([v + 1 for v in self.vocab_sizes] if eos_token else None)
+        self.duration_cond = duration_cond
         self.hidden_size = hidden_size
         self.n_speakers = n_speakers
         self.decoder_speaker_cond = decoder_speaker_cond
@@ -1085,10 +1204,17 @@ class CodeTransformer(nn.Module):
             rope_base=rope_base,
             input_dropout=input_dropout,
             spk_rank=spk_rank,
+            duration_cond=duration_cond,
+            align_layers=align_layers,
             spk_norm=spk_norm,
             spk_init=spk_init,
             spk_kl_weight=spk_kl_weight,
         )
+        self.align_layers = [int(i) for i in align_layers]
+        self.align_sigma = align_sigma
+        self.align_weight = align_weight
+        self.align_warmup = align_warmup
+        self._align_step = 0
         self.memory_norm = memory_norm
         self.residual_scale = residual_scale
         self.hint_film_memory = hint_film
@@ -1912,6 +2038,83 @@ class CodeTransformer(nn.Module):
         delayed = torch.where(valid, delayed, pad.expand(B, K, L))
         return delayed
 
+    def _prog_columns(self, progress, progress_mask, L: int, device):
+        """Per-column ``(value, valid)`` arrays of the phone-progress channel.
+
+        ``progress`` is ``(B, T)`` with ``T`` code frames (the oracle schedule
+        from the alignment); column ``j`` predicts frame ``j``, so the column
+        tag is ``progress[j]`` with the last value carried past ``T``.  A
+        missing schedule (``None``) or an all-False mask leaves every column in
+        the trained ``absent`` state, which is what inference without a duration
+        model uses.
+        """
+        if progress is None:
+            return None, None
+        B, T = progress.shape
+        if L <= T:
+            return progress[:, :L], (progress_mask[:, :L]
+                                     if progress_mask is not None else None)
+        pad = L - T
+        p = progress
+        m = progress_mask
+        if T > 0:
+            p = torch.cat([p, p[:, -1:].expand(B, pad)], dim=1)
+            if m is not None:
+                m = torch.cat([m, m[:, -1:].expand(B, pad)], dim=1)
+        else:
+            p = torch.zeros(B, L, device=device, dtype=progress.dtype)
+            m = torch.zeros(B, L, device=device, dtype=torch.bool)
+        return p, m
+
+    def _alignment_loss(self, dur_prog, dur_prog_mask, memory_mask, L: int):
+        """CE between the supervised cross-attention maps and the schedule.
+
+        The target for column ``j`` is a Gaussian over phones centred on the
+        phone the forced alignment says should be sounding at frame ``j``
+        (``dur_prog``), width ``align_sigma`` phones.  Columns outside the
+        aligned span, and phones that are padding, are masked out.
+
+        This is what makes the decoder attend to the *right* phone instead of
+        the near-uniform map it learns from the code CE alone (measured
+        entropy / log N = 0.96-0.99, i.e. no alignment at all).  Only the
+        layers in ``align_layers`` pay the cost of materialising their map.
+
+        Returns ``(ce, entropy_normalised)`` averaged over those layers, or
+        ``None`` when no map was captured.
+        """
+        p, m = self._prog_columns(dur_prog, dur_prog_mask, L, dur_prog.device)
+        if p is None:
+            return None
+        n_cols = memory_mask.shape[1]
+        n_ph = memory_mask.sum(1).clamp_min(1).to(p.dtype)
+        # dur_prog = (phone_index + fraction) / n_phones, so this is the
+        # continuous phone index (0.0 = centre of phone 0).
+        u = p * n_ph[:, None] - 0.5
+        idx = torch.arange(n_cols, device=p.device, dtype=p.dtype)
+        delta = (idx[None, None, :] - u[:, :, None]) / self.align_sigma
+        q = torch.exp(-0.5 * delta.square())
+        q = q * memory_mask[:, None, :].to(q.dtype)
+        q = q / q.sum(-1, keepdim=True).clamp_min(1e-9)      # (B, L, N)
+        frame_mask = (m.to(q.dtype) if m is not None
+                      else torch.ones_like(p))
+        denom = frame_mask.sum().clamp_min(1.0)
+        ces, ents = [], []
+        for li in self.decoder.align_layers:
+            w = self.decoder.decoder.layers[li].multihead_attn.last_attn
+            if w is None:
+                continue
+            a = w[:, :, :L, :].clamp_min(1e-9)
+            a = a / a.sum(-1, keepdim=True)
+            mean = a.mean(1)                                 # average over heads
+            ce = -(q * mean.log()).sum(-1)                   # (B, L)
+            ent = -(mean * mean.log()).sum(-1)
+            ces.append((ce * frame_mask).sum() / denom)
+            ents.append(((ent / math.log(max(n_cols, 2))) * frame_mask).sum()
+                        / denom)
+        if not ces:
+            return None
+        return torch.stack(ces).mean(), torch.stack(ents).mean()
+
     def code_loss(
         self,
         memory: torch.Tensor,
@@ -1925,6 +2128,8 @@ class CodeTransformer(nn.Module):
         hints: Optional[dict] = None,
         word_progress: Optional[torch.Tensor] = None,  # (B, T) float, (0,1)
         word_progress_mask: Optional[torch.Tensor] = None,  # (B, T) bool
+        dur_prog: Optional[torch.Tensor] = None,  # (B, T) float, (0,1)
+        dur_prog_mask: Optional[torch.Tensor] = None,  # (B, T) bool
     ) -> dict:
         """Delayed next-token loss over all codebooks, plus word progress.
 
@@ -1957,14 +2162,31 @@ class CodeTransformer(nn.Module):
         inputs = seq[..., :L]
         targets = seq[..., 1:]
 
-        if self.word_progress_head is not None and word_progress is not None:
-            logits, decoder_hidden = self.decoder.forward_with_hidden(
-                inputs, memory, memory_mask, sid=sid,
-                hint_vec=self._dec_hint(hints))
-        else:
-            decoder_hidden = None
-            logits = self.decoder(inputs, memory, memory_mask, sid=sid,
-                                  hint_vec=self._dec_hint(hints))
+        prog = self._prog_columns(dur_prog, dur_prog_mask, L, inputs.device)
+        # Alignment supervision needs the cross-attention maps, which the fused
+        # path does not expose.  Capture is scoped to this call so ``generate``
+        # and any other forward stay on the fast path.
+        align_on = (dur_prog is not None and dur_prog_mask is not None
+                    and self.align_weight > 0.0
+                    and bool(self.decoder.align_layers))
+        if align_on:
+            for li in self.decoder.align_layers:
+                self.decoder.decoder.layers[li].multihead_attn.capture = True
+        try:
+            if self.word_progress_head is not None and word_progress is not None:
+                logits, decoder_hidden = self.decoder.forward_with_hidden(
+                    inputs, memory, memory_mask, sid=sid,
+                    hint_vec=self._dec_hint(hints),
+                    progress=prog[0], progress_mask=prog[1])
+            else:
+                decoder_hidden = None
+                logits = self.decoder(inputs, memory, memory_mask, sid=sid,
+                                      hint_vec=self._dec_hint(hints),
+                                      progress=prog[0], progress_mask=prog[1])
+        finally:
+            if align_on:
+                for li in self.decoder.align_layers:
+                    self.decoder.decoder.layers[li].multihead_attn.capture = False
 
         losses, accs, entropies = [], [], []
         for k in range(K):
@@ -1997,6 +2219,23 @@ class CodeTransformer(nn.Module):
             "code_losses": losses,
             "loss_weights": weights,
         }
+        # Pure code CE, before any auxiliary term: the number to compare a run
+        # with auxiliary losses against one without.
+        out["code_ce"] = out["loss"]
+        if align_on:
+            al = self._alignment_loss(dur_prog, dur_prog_mask, memory_mask, L)
+            if al is not None:
+                # Warmup state is a plain counter (not a buffer): a resumed run
+                # replays the ramp, which is harmless and keeps it out of the
+                # checkpoint contract.
+                if self.training:
+                    self._align_step += 1
+                frac = (min(1.0, self._align_step / self.align_warmup)
+                        if self.align_warmup > 0 else 1.0)
+                out["align_ce"], out["align_entropy"] = al
+                out["align_weight_eff"] = torch.tensor(
+                    self.align_weight * frac, device=al[0].device)
+                out["loss"] = out["loss"] + self.align_weight * frac * al[0]
         if diagnostics:
             accs = torch.stack(accs)
             entropies = torch.stack(entropies)
@@ -2011,7 +2250,6 @@ class CodeTransformer(nn.Module):
         if (decoder_hidden is not None and word_progress is not None
                 and word_progress_mask is not None
                 and self.word_progress_head is not None):
-            out["code_ce"] = out["loss"]
             Tp = min(int(word_progress.shape[1]), int(T),
                      int(decoder_hidden.shape[1]))
             if Tp > 0:
@@ -2068,6 +2306,8 @@ class CodeTransformer(nn.Module):
         hints: Optional[dict] = None,
         word_progress: Optional[torch.Tensor] = None,
         word_progress_mask: Optional[torch.Tensor] = None,
+        dur_prog: Optional[torch.Tensor] = None,
+        dur_prog_mask: Optional[torch.Tensor] = None,
     ) -> dict:
         """Training forward pass: phonemes + speaker -> spec/pitch code loss.
 
@@ -2093,7 +2333,8 @@ class CodeTransformer(nn.Module):
             memory, memory_mask, codes, code_lengths, sid=sid, epoch=epoch,
             complete=complete, diagnostics=diagnostics, hints=hints,
             word_progress=word_progress,
-            word_progress_mask=word_progress_mask)
+            word_progress_mask=word_progress_mask,
+            dur_prog=dur_prog, dur_prog_mask=dur_prog_mask)
 
     #: Sentinel for "no explicit hints argument" (see ``compute_batch_loss``).
     _USE_BATCH_HINTS = object()
@@ -2129,6 +2370,8 @@ class CodeTransformer(nn.Module):
             hints=hints,
             word_progress=batch.get("word_progress"),
             word_progress_mask=batch.get("word_progress_mask"),
+            dur_prog=batch.get("dur_prog"),
+            dur_prog_mask=batch.get("dur_prog_mask"),
         )
 
     #: Per-channel keys a probe can drop, in the order they are logged.
@@ -2209,6 +2452,8 @@ class CodeTransformer(nn.Module):
         hints: Optional[dict] = None,
         hint_guidance: Optional[float] = None,
         hint_guidance_books: Optional[Sequence[float]] = None,
+        progress: Optional[torch.Tensor] = None,
+        progress_mask: Optional[torch.Tensor] = None,
     ):
         """Autoregressively sample ``(B, K, n)`` delayed codes.
 
@@ -2274,19 +2519,38 @@ class CodeTransformer(nn.Module):
 
             device = phone_ids.device
 
+            # Oracle phone-progress schedule, expanded to the decoder's column
+            # layout once (``progress`` is (B, T) over code frames; column j
+            # predicts frame j).  Sliced per step so the next-token call sees
+            # exactly one tag per column it is given.
+            prog_cols = self._prog_columns(progress, progress_mask, L, device)
+            if not self.duration_cond:
+                prog_cols = (None, None)
+
             seq = self._pad_column(B, device)
             cols = []
             # Column at which codebook 0 emitted EOS == the predicted frame
             # count.  ``L`` is the "still running" sentinel, never a column index.
             stop_col = torch.full((B,), L, dtype=torch.long, device=device)
             for i in range(L):
-                logits = self.decoder(seq, memory, memory_mask, sid=sid,
-                                      hint_vec=dec_hint)
+                n_col = seq.size(2)      # (B, K, columns); dim 1 is the books
+                logits = self.decoder(
+                    seq, memory, memory_mask, sid=sid, hint_vec=dec_hint,
+                    progress=(prog_cols[0][:, :n_col]
+                              if prog_cols[0] is not None else None),
+                    progress_mask=(prog_cols[1][:, :n_col]
+                                   if prog_cols[1] is not None else None))
                 if g_weights is not None:
                     logits = self._combine_guidance(
                         logits,
                         self.decoder(seq, g_memory, g_mask, sid=sid,
-                                     hint_vec=g_hint),
+                                     hint_vec=g_hint,
+                                     progress=(prog_cols[0][:, :n_col]
+                                               if prog_cols[0] is not None
+                                               else None),
+                                     progress_mask=(prog_cols[1][:, :n_col]
+                                                    if prog_cols[1] is not None
+                                                    else None)),
                         g_weights)
                 col = []
 
@@ -2398,6 +2662,11 @@ class CodeTransformer(nn.Module):
                else "pos=sinusoidal")
             + (f", input_dropout={self.input_dropout:g}"
                if self.input_dropout > 0 else "")
+            + (", duration_cond(oracle phone progress)"
+               if self.duration_cond else "")
+            + (f", align(w={self.align_weight:g}, s={self.align_sigma:g}, "
+               f"layers={self.align_layers})"
+               if self.align_weight > 0 else "")
             + (f", word_progress(w={self.word_progress_weight:g}, "
                f"mono={self.word_progress_mono_weight:g})"
                if self.word_progress else "")

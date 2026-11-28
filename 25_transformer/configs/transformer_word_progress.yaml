@@ -101,9 +101,9 @@ transformer:
   # (64: 50 %, 256: 83 %), and the codes are SVD-initialised by
   # scratch/init_lowrank_speakers.py -- `spk_init: zero` below only describes
   # the constructor (the marker), the transfer overwrites the values.
-  spk_rank: 256
+  spk_rank: 0
   spk_norm: "none"
-  spk_init: "zero"
+  spk_init: "default"
   spk_kl_weight: 0.0
   spk_film_memory: false
   # ---- coarse conditioning hints (v0.8) -----------------------------------
@@ -518,8 +518,8 @@ train:
   # `cosine_anneal_end` (see TrainModule._check_anneal_end).
   # v2.6: a short warm-started run (see exp_name) -- the anneal must end with
   # the run, otherwise the periodic cosine climbs again after step 60 k.
-  cosine_anneal_end: 60000
-  max_steps: 60000
+  cosine_anneal_end: 300000
+  max_steps: 300000
   max_epochs: -1
   # Code frames per training segment.  Code rate is 25 Hz (48 kHz / hop 480 /
   # Generator down_factor 4), so 512 frames = 20.5 s and covers 99.0 % of the
@@ -711,9 +711,20 @@ train:
   # Phonemisation is CPU-only (FeatureExtractor with load_qwen=False, i.e. no
   # ASR/aligner weights) and cached after the first pass; failures are logged
   # and never interrupt training. Set ood_samples: 0 to disable.
-  ood_samples: 1
+  ood_samples: 3
   ood_frames: 768           # 768 code frames = 30.7 s (25 Hz)
-  ood_texts: null           # null -> DEFAULT_OOD_TEXTS in 2_training.py
+  ood_texts:
+    - >
+      The quick brown fox jumps over the lazy dog while the orchestra
+      rehearses a brand new symphony in the courtyard.
+    - >
+      I was taken aback, and all I could say was “Huh?”
+      but he kept cutting me off and going “huh? huh? huh?”
+      and closing his hand shut in front of my face.
+    - >
+      One Ring to rule them all, one Ring to find them,
+      One Ring to bring them all, and in the darkness bind them;
+      In the Land of Mordor where the Shadows lie.
   ood_sid: 1542             # null -> speaker of the first sampled val item
 
   # ---- end-to-end WER probe (v2.4) ----------------------------------------

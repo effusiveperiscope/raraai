@@ -145,6 +145,8 @@ class CodeDataset(Dataset):
         n_slot_buckets: int = DEFAULT_SLOT_BUCKETS,
         word_crop: bool = True,
         word_progress: bool = False,
+        duration: bool = False,
+        duration_dropout: float = 0.1,
         alignment_blocklist: Optional[str] = None,
         stage_direction_blocklist: Optional[str] = None,
         transcript_blocklist: Optional[str] = None,
@@ -173,6 +175,14 @@ class CodeDataset(Dataset):
         # model then trains on code CE only.
         self.word_progress = bool(word_progress)
         self.n_word_progress_missing = 0
+        # Oracle phone-progress schedule (``transformer.duration_cond``): the
+        # phone that should be sounding at each code frame, from the alignment.
+        # ``duration_dropout`` clears the mask for a whole clip so the model
+        # also trains in the "no schedule" state that inference without a
+        # duration model runs in (the ``prog_absent`` vector).
+        self.duration = bool(duration)
+        self.duration_dropout = float(duration_dropout or 0.0)
+        self.n_duration_missing = 0
         # Optional blocklists, dropped at filelist-build time.  The first comes
         # from ``scratch/audit_word_alignment.py`` (a word given < 1 code frame
         # per phone => ~40 ms/phone, which teaches the model to swallow it);
@@ -791,6 +801,86 @@ class CodeDataset(Dataset):
             return None
         return target, mask
 
+    def _phone_progress_targets(
+        self,
+        cond: Optional[Dict[str, object]],
+        n_frames: int,
+        start: int,
+        p0: int,
+        p1: int,
+        n_phone: int,
+        stale: bool = False,
+    ):
+        """Oracle per-frame phone progress in ``(0, 1]``, plus its valid mask.
+
+        Same source as :meth:`_word_progress_targets` -- the forced-alignment
+        word timings in the sibling ``.cond`` -- but one level finer: each
+        word's frame span is split evenly over the phones that word owns, so
+        ``progress[t] = (phone_index + fraction_within_phone) / n_phones``.
+
+        This is the *input* to the duration channel (``transformer.duration_cond``),
+        not a target the model regresses: it tells the decoder which phone
+        should be sounding at frame ``t``.  At inference the schedule comes
+        from predicted per-phone durations instead of the aligner; feeding the
+        oracle here measures the **ceiling** of that mechanism, which is what
+        the prototype needs to know before building a duration predictor.
+
+        Returns ``(progress, mask)``, both length ``n_frames``, or ``None``
+        when the ``.cond`` cannot describe this phone sequence.
+        """
+        if stale or cond is None:
+            return None
+        needed = ("word_start_f", "word_slot_f", "phone_word_idx")
+        if any(k not in cond for k in needed):
+            return None
+        pwi = cond["phone_word_idx"].long().reshape(-1).numpy()
+        starts = cond["word_start_f"].long().reshape(-1).numpy()
+        slots = cond["word_slot_f"].long().reshape(-1).numpy()
+        if (pwi.size != n_phone or starts.size == 0
+                or slots.shape != starts.shape):
+            return None
+        if p0 < 0 or p1 > pwi.size or p1 <= p0:
+            return None
+        phones = np.arange(int(p0), int(p1))
+        n_ph = int(phones.size)
+        if n_ph == 0:
+            return None
+        words = pwi[phones]
+
+        progress = np.zeros(int(n_frames), dtype=np.float32)
+        mask = np.zeros(int(n_frames), dtype=bool)
+        for word in np.unique(words):
+            if word < 0 or word >= starts.size:
+                continue
+            idx = phones[words == word]          # absolute phone indices
+            if idx.size == 0:
+                continue
+            w0 = int(starts[word])
+            w1 = w0 + int(slots[word])
+            if w1 <= w0:
+                continue
+            # Split the word's frame span evenly over its phones: the aligner
+            # gives word boundaries, not phone ones, so this is the only
+            # sub-word timing available (and it is what a duration predictor
+            # trained on the same targets would have to reproduce).
+            edges = np.linspace(w0, w1, idx.size + 1)
+            a_all = np.round(edges[:-1]).astype(int)
+            b_all = np.round(edges[1:]).astype(int)
+            for phone, a, b in zip(idx.tolist(), a_all.tolist(), b_all.tolist()):
+                b = max(b, a)
+                lo = max(0, a - int(start))
+                hi = min(int(n_frames), b - int(start))
+                if hi <= lo:
+                    continue
+                frac = (np.arange(lo, hi) + int(start) - a) / max(b - a, 1)
+                local = int(phone) - int(p0)
+                progress[lo:hi] = (local + np.clip(frac, 0.0, 1.0)) / n_ph
+                mask[lo:hi] = True
+        if not bool(mask.any()):
+            return None
+        np.clip(progress, 0.0, 1.0, out=progress)
+        return torch.from_numpy(progress), torch.from_numpy(mask)
+
     def __getitem__(self, index: int) -> dict:
         item = self.items[index]
         phone_ids = torch.load(item["phone_ids"], weights_only=True).long().reshape(-1)
@@ -823,6 +913,20 @@ class CodeDataset(Dataset):
             if word_progress is None:
                 self.n_word_progress_missing += 1
 
+        dur_prog = None
+        if self.duration:
+            dur_prog = self._phone_progress_targets(
+                cond, spec.shape[1], start, p0, p1, n_phone,
+                stale=cond_stale)
+            if dur_prog is None:
+                self.n_duration_missing += 1
+            elif self.is_train and self.duration_dropout > 0.0:
+                # Whole-clip dropout, not per frame: a partially-known schedule
+                # is a state the duration model never produces at inference.
+                if self.rng.random() < self.duration_dropout:
+                    dur_prog = (dur_prog[0],
+                                torch.zeros_like(dur_prog[1]))
+
         hint: Dict[str, object] = {}
         if self.hints:
             hint = self._load_hints(
@@ -851,6 +955,13 @@ class CodeDataset(Dataset):
                 out["word_progress_mask"] = torch.zeros(n_frames, dtype=torch.bool)
             else:
                 out["word_progress"], out["word_progress_mask"] = word_progress
+        if self.duration:
+            n_frames = int(spec.shape[1])
+            if dur_prog is None:
+                out["dur_prog"] = torch.zeros(n_frames, dtype=torch.float32)
+                out["dur_prog_mask"] = torch.zeros(n_frames, dtype=torch.bool)
+            else:
+                out["dur_prog"], out["dur_prog_mask"] = dur_prog
         return out
 
 
@@ -999,6 +1110,15 @@ class CodeCollator:
                                         dtype=torch.float32)
             word_progress_mask = torch.zeros(len(batch), max_frames,
                                              dtype=torch.bool)
+        # Oracle phone-progress schedule (no-op unless the dataset emits it,
+        # i.e. unless transformer.duration_cond is on).  An all-False mask is
+        # the trained ``prog_absent`` state.
+        has_duration = bool(batch) and "dur_prog" in batch[0]
+        dur_prog = dur_prog_mask = None
+        if has_duration:
+            dur_prog = torch.zeros(len(batch), max_frames, dtype=torch.float32)
+            dur_prog_mask = torch.zeros(len(batch), max_frames,
+                                        dtype=torch.bool)
         # Conditioning hints (no-op unless the dataset emits them, i.e. unless
         # transformer.hints is on).  Level 0 is the trained "not provided"
         # state, so padding with zeros is correct.
@@ -1058,6 +1178,14 @@ class CodeCollator:
                     if n_wp > 0:
                         word_progress[i, :n_wp] = wp[:n_wp].float()
                         word_progress_mask[i, :n_wp] = wm[:n_wp].bool()
+            if has_duration:
+                dp = x.get("dur_prog")
+                dm = x.get("dur_prog_mask")
+                if dp is not None and dm is not None:
+                    n_dp = min(int(dp.numel()), int(dm.numel()), max_frames)
+                    if n_dp > 0:
+                        dur_prog[i, :n_dp] = dp[:n_dp].float()
+                        dur_prog_mask[i, :n_dp] = dm[:n_dp].bool()
             if has_hints:
                 hint_int[i] = int(x.get("hint_int", 0))
                 hint_reg[i] = int(x.get("hint_reg", 0))
@@ -1103,6 +1231,11 @@ class CodeCollator:
             out.update({
                 "word_progress": word_progress,
                 "word_progress_mask": word_progress_mask,
+            })
+        if has_duration:
+            out.update({
+                "dur_prog": dur_prog,
+                "dur_prog_mask": dur_prog_mask,
             })
         if has_hints:
             out.update({

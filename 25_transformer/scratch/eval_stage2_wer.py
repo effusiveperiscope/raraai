@@ -80,14 +80,16 @@ from omegaconf import OmegaConf
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from commons import load_state_dict_mismatch, load_submodule_prefix  # noqa: E402
-from modeling.transformer import CodeTransformer, uses_rope  # noqa: E402
+from modeling.transformer import (  # noqa: E402
+    CodeTransformer, adapt_state_dict_special, uses_rope)
 from stage2_wer import (  # noqa: E402
     Asr, apply_wer_reference_audit, build_wer_dataset, code_frame_samples,
-    grouped_wer, item_basename, load_references, load_sid_map, peek_layout,
+    format_by_length, format_diagnostics, grouped_wer, item_basename,
+    load_references, load_sid_map, paired_wer_delta, peek_layout,
     resolve_generator_path, resolve_source_filelists, select_items,
     speaker_bucket, speaker_clip_counts, stage1_speaker_fallback,
     synthesize_generated, synthesize_reference, to_16k,
-    transformer_speaker_fallback, wer_summary,
+    transformer_speaker_fallback, wer_by_length, wer_diagnostics, wer_summary,
 )
 
 
@@ -132,6 +134,14 @@ def load_transformer_weights(net, path):
     ck = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     sd = ck.get("state_dict", ck)
     prefix = "net." if any(k.startswith("net.") for k in sd) else ""
+    # Adapt the codebook special-class rows *before* comparing keys: a
+    # checkpoint from before FIM was removed has `vocab + 1 + eos + 2` rows per
+    # codebook (and `decoder.region_emb` / `decoder.len_emb`), so every
+    # embedding and head would silently be skipped as a shape mismatch and the
+    # model would be scored with randomly initialised codebooks.  This slices
+    # the retired rows and folds the old AR region/length embedding into
+    # `decoder.input_bias`.
+    sd = adapt_state_dict_special(net, sd, prefix=prefix)
     own = set(net.state_dict())
     dropped = sorted(k for k in sd
                      if k.startswith(prefix) and k[len(prefix):] not in own)
@@ -205,6 +215,18 @@ def main():
                     help="decode exactly the item's own length instead of "
                          "letting the model emit EOS early; isolates content "
                          "errors from duration errors")
+    ap.add_argument("--duration", action="store_true",
+                    help="supply each item's ORACLE phone-progress schedule "
+                         "(from the .cond alignment) to the duration channel "
+                         "(transformer.duration_cond).  Without it the same "
+                         "checkpoint generates in the trained 'no schedule' "
+                         "state -- the paired control for the channel.")
+    ap.add_argument("--diagnostics", action="store_true",
+                    help="print where the deletions sit (head/mid/tail of the "
+                         "utterance, and per reference decile) and the "
+                         "generated-vs-reference frame length profile.  "
+                         "Distinguishes 'stops early' from 'skips a word in "
+                         "the middle'.")
     ap.add_argument("--hints", action="store_true",
                     help="supply each item's <.cond> hint channels at "
                          "generation time (default: the model's *trained null "
@@ -344,8 +366,12 @@ def main():
         raise SystemExit(
             "--hints needs transformer.hints: true (and the hint tables in "
             "the checkpoint); this config has hints disabled.")
+    if args.duration and not bool(config.transformer.get("duration_cond", False)):
+        raise SystemExit("--duration needs transformer.duration_cond: true (and "
+                         "a checkpoint trained with the channel).")
     config.train.val_filelist = val_filelist
-    dataset = build_wer_dataset(config, hints=bool(args.hints))
+    dataset = build_wer_dataset(config, hints=bool(args.hints),
+                                duration=bool(args.duration))
     if args.hints and not dataset.hints:
         raise SystemExit("--hints was requested but the dataset built without "
                          "hint channels; check transformer.hints_json.")
@@ -464,6 +490,15 @@ def main():
         print(f"WER floor (ground-truth codes, same vocoder): "
               f"{floor['wer'] * 100:.2f}%  "
               f"[{floor['errors']}/{floor['words']} words]")
+        if args.diagnostics:
+            # The same positional profile for the *ground truth* audio.  Without
+            # this control a tail-heavy deletion profile in the generated arm
+            # could just be the reference transcript's tail (a trailing
+            # interjection, a quiet word the ASR misses) rather than a model
+            # failure.
+            print(format_diagnostics(wer_diagnostics(list(zip(texts, ref_hyps)))))
+            print("    by utterance length:")
+            print(format_by_length(wer_by_length(list(zip(texts, ref_hyps)))))
         if args.verbose:
             for i, (t, h) in enumerate(zip(texts, ref_hyps)):
                 print(f"  [{i:02d}] {labels[i]}\n       ref: {t}\n       hyp: {h}")
@@ -489,6 +524,7 @@ def main():
                     for k, v in batch.items()}
 
     rows = []
+    generated_pairs = []
     current = {"rope": bool(config.transformer.get("rope", False))}
     for path in (args.checkpoints if arms - {"reference"} else []):
         # RoPE is parameter-free, so a mixed list would otherwise load every
@@ -534,7 +570,7 @@ def main():
             # Same draws for every checkpoint: the comparison is then paired, so
             # a WER difference is the weights and not the sampling noise.
             torch.manual_seed(args.seed)
-            wavs = synthesize_generated(
+            out = synthesize_generated(
                 net, net_g, items, phone_pad, device,
                 batch_size=args.batch_size, max_frames=args.max_frames,
                 temperature=args.temperature, top_k=args.top_k,
@@ -542,10 +578,16 @@ def main():
                 hint_arg_fn=hint_arg_fn,
                 hint_guidance=args.hint_guidance,
                 hint_guidance_books=args.hint_guidance_books,
-                sid_map=sid_map)
+                sid_map=sid_map, return_lengths=bool(args.diagnostics),
+                duration=bool(args.duration))
+            if args.diagnostics:
+                wavs, gen_frames = out
+            else:
+                wavs, gen_frames = out, None
             save(f"{tag}_generated", wavs)
             hyps = asr.transcribe(to_16k(wavs, sample_rate))
-            summary = wer_summary(list(zip(texts, hyps)))
+            pairs = list(zip(texts, hyps))
+            summary = wer_summary(pairs)
             rows.append((f"{tag}/generated", summary))
             print("    [generated]")
             show("generated", summary, hyps)
@@ -553,10 +595,49 @@ def main():
             if floor:
                 print(f"    floor {floor['wer'] * 100:.2f}%   "
                       f"(gap {(summary['wer'] - floor['wer']) * 100:+.2f} pp)\n")
+            if args.diagnostics:
+                diag = wer_diagnostics(pairs)
+                print(format_diagnostics(diag))
+                print("    by utterance length:")
+                print(format_by_length(wer_by_length(pairs)))
+                ref_frames = [int(it["spec_codes"].shape[1]) for it in items]
+                ratios = [g / max(r, 1) for g, r in zip(gen_frames, ref_frames)]
+                print(f"    frames: generated {np.mean(gen_frames):6.1f} vs "
+                      f"reference {np.mean(ref_frames):6.1f} "
+                      f"(median ratio {np.median(ratios):.3f}; "
+                      f"<0.8: {100 * np.mean([r < 0.8 for r in ratios]):.1f}%, "
+                      f">1.2: {100 * np.mean([r > 1.2 for r in ratios]):.1f}%)")
+                short = [i for i, r in enumerate(ratios) if r < 0.8]
+                del_tail = sum(
+                    wer_diagnostics([pairs[i]])["del_rate_tail"]
+                    for i in short) if short else float("nan")
+                if short:
+                    print(f"    of the {len(short)} items that under-generate "
+                          f"(<0.8x frames), tail delete rate "
+                          f"{100 * del_tail / len(short):.1f}%")
+                if args.verbose:
+                    for i, (t, h) in enumerate(pairs):
+                        print(f"      [{i:02d}] {labels[i]}  "
+                              f"frames {gen_frames[i]}/{ref_frames[i]}  "
+                              f"words {len(t.split())}->{len(h.split())}")
+                print()
+                generated_pairs.append((tag, pairs))
 
     if len(rows) > 1:
         best = min(rows, key=lambda r: r[1]["wer"])
         print(f"lowest WER: {best[0]} ({best[1]['wer'] * 100:.2f}%)")
+
+    if args.diagnostics and len(generated_pairs) > 1:
+        # Paired bootstrap against the first checkpoint: the same utterances,
+        # the same sampling seed, so this answers "did the weights change the
+        # result?" rather than "is this a different draw?".
+        base_tag, base_pairs = generated_pairs[0]
+        print(f"\npaired vs {base_tag} (same items, same seed):")
+        for tag, pairs_ in generated_pairs[1:]:
+            d = paired_wer_delta(pairs_, base_pairs, seed=args.seed)
+            print(f"  {tag} - {base_tag}: {100 * d['delta']:+.2f} pp "
+                  f"[{100 * d['lo']:+.2f}, {100 * d['hi']:+.2f}] 95% CI   "
+                  f"P(better)={d['p_better']:.2f}")
 
 
 if __name__ == "__main__":

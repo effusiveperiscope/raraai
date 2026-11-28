@@ -301,6 +301,7 @@ class PlanDataset(Dataset):
             "phone_dur": torch.from_numpy(plan.phone_dur.astype(np.int64)),
             "phone_word": torch.from_numpy(plan.phone_word.astype(np.int64)),
             "phone_index": torch.from_numpy(plan.phone_index_100().astype(np.int64)),
+            "frame_phone": torch.from_numpy(plan.frame_phone().astype(np.int64)),
             "word_start": torch.from_numpy(plan.word_start.astype(np.int64)),
             "word_dur": torch.from_numpy(plan.word_dur.astype(np.int64)),
             "pause_after": torch.from_numpy(plan.pause_after.astype(np.int64)),
@@ -345,6 +346,7 @@ def collate_plans(batch: Sequence[dict]) -> dict:
     phone_word = torch.zeros(B, N, dtype=torch.long)
     phone_mask = torch.zeros(B, N, dtype=torch.bool)
     phone_index = torch.full((B, P), -1, dtype=torch.long)
+    frame_phone = torch.full((B, T), -1, dtype=torch.long)
     word_start = torch.zeros(B, W, dtype=torch.long)
     word_dur = torch.zeros(B, W, dtype=torch.long)
     pause = torch.zeros(B, W, dtype=torch.long)
@@ -376,6 +378,7 @@ def collate_plans(batch: Sequence[dict]) -> dict:
         phone_word[b, :nph] = x["phone_word"]
         phone_mask[b, :nph] = True
         phone_index[b, :4 * n] = x["phone_index"]
+        frame_phone[b, :n] = x["frame_phone"]
         word_start[b, :nw] = x["word_start"]
         word_dur[b, :nw] = x["word_dur"]
         pause[b, :nw] = x["pause_after"]
@@ -395,6 +398,7 @@ def collate_plans(batch: Sequence[dict]) -> dict:
     return {
         "phone_ids": phone, "phone_dur": phone_dur, "phone_word": phone_word,
         "phone_mask": phone_mask, "phone_index": phone_index,
+        "frame_phone": frame_phone,
         "word_start": word_start, "word_dur": word_dur,
         "pause_after": pause, "word_mask": word_mask, "word_db": word_db,
         "pitch_st": pitch_st, "voiced": voiced,

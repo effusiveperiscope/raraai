@@ -84,6 +84,19 @@ plan (word rate)                           renderer (non-AR, one pass)
   **100 Hz**, not 25 Hz: a 40–80 ms word can hold 3–5 phones, and one code frame
   each would either stretch the word or drop a phone. The renderer expands at
   100 Hz and pools the hidden state 4:1 to the code rate.
+- **Global context, not just convolutions.** The dilated-conv frame stack has a
+  receptive field of `1 + 4·(1+2+4+8+1+2) = 73` code frames (~2.9 s), and the
+  phone convs see ~33 phones. Both are too local for a sentence-level plan.
+  The renderer adds **1 phone-attention layer + 2 frame-attention layers**
+  (non-causal, key-padding masks), which makes every frame see the whole plan.
+  The v2 default is 28.7 M params.
+- **The content path must be forced, not hoped for.** On the first conv-only
+  baseline (v1, 24 epochs, WER 99 % at its best checkpoint) zeroing *all* phone
+  input moved spec CE only **3.53 → 3.74 nats**, and zeroing the plan
+  3.53 → 3.67. The model was a speaker-conditioned code prior: good f0/level
+  (corr ~0.77) with no words. The fix is a **phone-identity auxiliary head**
+  (predict the plan's dominant phone per code frame, weight 0.5), which makes
+  the hidden retain content; `val_phone_acc` is the diagnostic to watch.
 - **Codebook heads: measured, not assumed.** Within-frame dependence is weak in
   this codec: conditioning on all previous books saves ~0.4 bits per spec book
   (marginal 5.6 bits, 64 codes), falling pairwise as 0.38 → 0.13 bits from book
@@ -235,13 +248,18 @@ probability mass between equally plausible codes).
   meant to add the micro-prosody). 5.4 % of clips are rejected: 3.6 % degenerate
   word runs and 1.7 % word/phone length mismatches. On MLP (noisier corpus)
   the word-level figures are 0.927 / 0.967 / 98 cents.
-- **Head design settled by measurement** (see §3): parallel 8 spec heads,
-  depth-AR over the 2 pitch heads. Pre-quantisation `z` was rejected: it needs
-  ~18 GB of reprocessed latents and the frozen decoder has only ever seen `zq`;
-  `zq` itself is free from the stored codes but CE over 64-way books is the
-  sharper objective. The pitch codec was re-measured on `base_v0.7`: round trip
-  is **0.22 cents median / 0.6 p90**, so the old 508-cent problem is gone and
-  pitch needs no continuous bypass.
+- **Head design, corrected by measurement** (see §3): 8 spec heads and 2
+  depth-AR pitch heads, but the spec objective changes with v3. Pre-quantisation
+  `z` is still rejected (needs ~18 GB of reprocessed latents; the frozen decoder
+  only saw `zq`). `zq` itself is free from the stored codes, and the 64-way CE
+  is **metric-blind**: on 3 clips the vocoder log-mel L1 is **3.81** for a random
+  wrong code, **1.37** for the nearest other code (same CE loss!), **1.70** for
+  nearest-other across all 8 books, and only **0.16–0.26** for 1–30 % Gaussian
+  noise on `zq`. A linear probe from the v2 hidden to `zq` gets L1 0.31
+  (R² 0.49) and decodes closer than the sampled codes (mel 1.96/2.33/1.80 vs
+  2.59/2.74/1.86). v3 therefore uses a **continuous `zq` head** with L1 weight
+  5; the 64-way CE is a 0.1 auxiliary. Pitch keeps its codes: round trip on
+  `base_v0.7` is **0.22 cents median / 0.6 p90**.
 - **Dataset implemented** (`dataset_plan.py`): word-aligned crops, 100 Hz
   phone index for the expansion, per-frame plan features, masked collator, and
   a compact plan cache (`plans/<corpus>/<clip>.npz`, ~8.6 KB/clip) built by
@@ -252,9 +270,10 @@ probability mass between equally plausible codes).
 - **Renderer implemented** (`renderer.py`): phone conv encoder, 100 Hz weighted
   expansion pooled 4:1, dilated-conv frame decoder (non-causal), 8 parallel
   spec heads, 2 depth-AR pitch heads (parallel ablation flag), optional f0
-  regression head. **18.7 M params** at 512/4+6, **35.8 M** at 640/6+8 (the
-  ~40 M option). A real 4-item batch (≤161 frames) is 0.25 s forward+backward
-  on the 5060 Ti at 512/4+6.
+  regression head, **global phone/frame attention**, and a **phone-identity
+  auxiliary head**. **18.7 M** conv-only, **28.7 M** with attention + aux at
+  512/4+6, **~38 M** at 576/5+7 + attention. A real 4-item batch
+  (≤161 frames) is 0.25 s forward+backward conv-only on the 5060 Ti.
 - **Training loop implemented** (`train_renderer.py`): masked code CE +
   optional f0 L1, bf16 autocast, warmup/cosine, grad clip, val CE/accuracy,
   `best.ckpt`/`last.ckpt`, resume. Smoke-tested for 4 steps with a 1.7 M
@@ -279,8 +298,21 @@ probability mass between equally plausible codes).
   10 % on a 6-item probe. The 400-step smoke model gives WER 108 % and f0 corr
   0.41 -- expected at that budget, and exactly the gap the first real run is
   meant to close.
-- **First real run launched**: `renderer_v1`, 512/4+6, batch 16, 40 epochs,
-  110 k items, 400-step val. Measured **42 it/s**, ~3 min/epoch, ~2 h total.
+- **v1 (conv-only) stopped at epoch 24** as a negative baseline: val spec CE
+  3.49 nats, WER **99 %** on 12 items (oracle 9.3 %), f0 plan-corr 0.77.
+  Checkpoints remain in `checkpoints/renderer_v1/`.
+- **v2 finished (conv + attention + phone-aux)**: val spec CE **3.4912** vs
+  v1's 3.4867, `val_phone_acc` **0.959**, WER **102.9 %** (oracle 9.3 %). The
+  attention and the phone head did not make the content path load-bearing; the
+  phone head solved its own task in a subspace the code head ignored.
+- **v3 launched**: the same attention/phone-aux model plus a continuous `zq`
+  head, L1 weight 5, spec CE auxiliary 0.1, 20 epochs, 400-item val,
+  TensorBoard audio every 5 epochs. This is the arm the sensitivity numbers
+  call for.
+- **Batch-padding decode bug fixed**: the collator pads codes to the batch max;
+  the decoder must be called per item with `lengths[i]`, or short items get a
+  tail of zero-code frames (an audible drone and extra length). Both the eval
+  and TensorBoard loggers now use the per-item path.
 
 Next: read `renderer_v1`'s val curves, then run `eval_renderer.py` on
 `best.ckpt` with 120 items + oracle, and start the guidance sweeps

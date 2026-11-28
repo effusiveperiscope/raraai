@@ -767,6 +767,9 @@ class TrainModule(pl.LightningModule):
             max_phone_length=hp.train.get("max_phone_length", None),
             speaker_map=hp.train.get("speaker_map", None),
             word_progress=bool(hp.transformer.get("word_progress", False)),
+            duration=bool(hp.transformer.get("duration_cond", False)
+                          or hp.transformer.get("align_supervision", False)),
+            duration_dropout=0.0,
         )
         self.test_collator = CodeCollator(config=hp)
         self.test_dataloader = DataLoader(
@@ -1373,7 +1376,8 @@ class TrainModule(pl.LightningModule):
             dict(refs_raw), config.train.get("wer_reference_audit", None),
             mode=str(config.train.get("wer_reference_audit_mode", "drop")
                      or "drop"))
-        dataset = W.build_wer_dataset(config)
+        dataset = W.build_wer_dataset(
+            config, duration=bool(config.train.get("wer_duration", False)))
         pool = [i for i in range(len(dataset))
                 if W.item_basename(dataset.items[i]["spec_codes"]) in refs_raw]
         picked, items, texts = W.select_items(
@@ -1440,6 +1444,7 @@ class TrainModule(pl.LightningModule):
         max_frames = int(cfg.get("wer_max_frames", 1000) or 1000)
         batch_size = int(cfg.get("wer_batch_size", 4) or 4)
         ignore_eos = bool(cfg.get("wer_ignore_eos", False))
+        wer_duration = bool(cfg.get("wer_duration", False))
         seed = int(cfg.get("wer_seed", 0) or 0)
         phone_pad = int(self.config.transformer.get("phone_pad_id", 0) or 0)
 
@@ -1466,9 +1471,23 @@ class TrainModule(pl.LightningModule):
                     batch_size=batch_size, max_frames=max_frames,
                     temperature=temperature, top_k=top_k,
                     stop_on_eos=not ignore_eos, hint_arg_fn=st["hint_fn"],
-                    sid_map=st["sid_map"])
+                    sid_map=st["sid_map"], duration=wer_duration)
                 hyps = st["asr"].transcribe(W.to_16k(wavs, sample_rate))
                 results["generated"] = W.wer_summary(list(zip(texts, hyps)))
+                if wer_duration:
+                    # Paired control: the same checkpoint and seed with the
+                    # schedule absent (the trained `prog_absent` state).  The
+                    # difference between the two is the channel's whole effect.
+                    torch.manual_seed(seed)
+                    wavs0 = W.synthesize_generated(
+                        self.net, self.net_g, items, phone_pad, self.device,
+                        batch_size=batch_size, max_frames=max_frames,
+                        temperature=temperature, top_k=top_k,
+                        stop_on_eos=not ignore_eos, hint_arg_fn=st["hint_fn"],
+                        sid_map=st["sid_map"], duration=False)
+                    hyps0 = st["asr"].transcribe(W.to_16k(wavs0, sample_rate))
+                    results["generated_nodur"] = W.wer_summary(
+                        list(zip(texts, hyps0)))
         except Exception as e:  # ASR OOM etc. must not kill a long run
             print(f"WER: probe failed ({e}); disabling it for this run.")
             self._wer_failed = True
@@ -1811,7 +1830,8 @@ class TrainModule(pl.LightningModule):
         for key in ("spec_loss", "pitch_loss", "acc", "spec_acc", "pitch_acc",
                     "word_progress_loss", "word_progress_mse",
                     "word_progress_mae", "word_progress_mono",
-                    "word_progress_frac", "code_ce"):
+                    "word_progress_frac", "code_ce",
+                    "align_ce", "align_entropy", "align_weight_eff"):
             if key in out:
                 self.log(f"{prefix}_{key}", out[key], **kw)
 
@@ -2130,6 +2150,19 @@ def apply_finetune_args(config, args):
             raise SystemExit(f"--finetune_lr must be > 0, got {lr}")
         config.finetune.lr = float(lr)
     return config
+
+
+def _wants_schedule(config) -> bool:
+    """Emit the oracle phone schedule when any feature consumes it.
+
+    Two independent switches read the same dataset tensors: ``duration_cond``
+    (the schedule as a decoder input) and ``align_supervision`` (the schedule as
+    the cross-attention target).  Building the dataset for only one of them
+    silently starves the other.
+    """
+    t = config.transformer
+    return (bool(t.get("duration_cond", False))
+            or bool(t.get("align_supervision", False)))
 
 
 def check_special_layout(state_dict, net, source, strict: bool = True):
@@ -2472,6 +2505,11 @@ def train(config, resume_from=None, transfer_from=None):
         # Uses the same `.cond` word timings; clips without them are skipped by
         # the masked loss, not by the dataset.
         word_progress=bool(config.transformer.get("word_progress", False)),
+        # Oracle phone-progress schedule for the duration channel
+        # (transformer.duration_cond).  `duration_dropout` clears it for a
+        # whole clip so the trained "no schedule" state exists.
+        duration=_wants_schedule(config),
+        duration_dropout=float(config.train.get("duration_dropout", 0.1) or 0.0),
         # Optional list of clips whose forced alignment gave a word an
         # impossible duration (see scratch/audit_word_alignment.py).  Those
         # teach the model to swallow the word; dropping them is the cheap fix.
@@ -2493,6 +2531,10 @@ def train(config, resume_from=None, transfer_from=None):
         speaker_map=config.train.get("speaker_map", None),
         word_crop=bool(config.train.get("word_crop", True)),
         word_progress=bool(config.transformer.get("word_progress", False)),
+        duration=_wants_schedule(config),
+        # Validation always gets the real schedule when it is available (it is
+        # the measurement arm), so no dropout here.
+        duration_dropout=0.0,
         # A blocklist built from the whole corpus may also hit val items; if it
         # was built from train only this is a no-op.
         alignment_blocklist=config.train.get("alignment_blocklist", None),
@@ -2519,6 +2561,19 @@ def train(config, resume_from=None, transfer_from=None):
               f"decoder-side={'yes' if config.transformer.get('decoder_hints', True) else 'no'}")
         print(f"       dropout={train_dataset.hint_dropout}, "
               f"null_all={train_dataset.hint_null_all}")
+    if bool(config.transformer.get("duration_cond", False)):
+        print("Duration conditioning: on -- oracle phone-progress schedule from "
+              "the .cond alignment, "
+              f"dropout={float(config.train.get('duration_dropout', 0.1) or 0.0):g}; "
+              "clips without usable word timings run in the trained absent "
+              "state.")
+    if float(net.align_weight) > 0:
+        print(f"Alignment supervision: on -- layers {net.align_layers}, "
+              f"sigma {net.align_sigma:g} phone(s), weight {net.align_weight:g}"
+              f" (warmup {net.align_warmup} steps); "
+              "target = the .cond phone schedule.  Watch align_entropy fall "
+              "from ~1.0 (uniform attention); scratch/check_alignment.py "
+              "measures the same thing offline.")
     if train_dataset.word_progress:
         print("Word-progress loss: on -- "
               f"weight={net.word_progress_weight}, "

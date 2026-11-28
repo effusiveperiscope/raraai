@@ -30,6 +30,8 @@ def _batch(B=2, T=12, N=6):
         frame_mask[1, 8:] = False
     spec = torch.randint(0, 64, (B, 8, T))
     pitch = torch.randint(0, 128, (B, 2, T))
+    frame_phone = torch.randint(1, 32, (B, T))
+    frame_phone[~frame_mask] = -1
     f0 = torch.zeros(B, P)
     f0_valid = torch.zeros(B, P, dtype=torch.bool)
     for b in range(B):
@@ -42,6 +44,7 @@ def _batch(B=2, T=12, N=6):
         "sid": sid, "frame_mask": frame_mask,
         "spec_codes": spec, "pitch_codes": pitch,
         "f0": f0, "f0_valid": f0_valid,
+        "frame_phone": frame_phone,
     }
 
 
@@ -56,7 +59,9 @@ def _inputs(batch):
 def test_shapes_and_backward():
     batch = _batch()
     model = GuidedRenderer(vocab=32, num_speakers=8, width=64,
-                           phone_layers=2, frame_layers=3, dropout=0.0)
+                           phone_layers=2, frame_layers=3, dropout=0.0,
+                           phone_attn_layers=1, frame_attn_layers=2, nhead=4,
+                           phone_aux=True)
     out = model(**_inputs(batch), pitch_targets=batch["pitch_codes"])
     B, T = batch["frame_mask"].shape
     assert out["spec_logits"].shape == (B, T, 8, 64), out["spec_logits"].shape
@@ -64,18 +69,36 @@ def test_shapes_and_backward():
     assert out["pitch_logits"][0].shape == (B, T, 128)
     assert out["pitch_logits"][1].shape == (B, T, 128)
     assert out["f0_pred"].shape == (B, T)
+    assert out["phone_logits"].shape == (B, T, 32)
 
-    losses = renderer_loss(out, batch)
+    losses = renderer_loss(out, batch, phone_weight=0.5)
     assert torch.isfinite(losses["loss"]), losses
+    assert "phone_ce" in losses and torch.isfinite(losses["phone_ce"])
     losses["loss"].backward()
     assert any(p.grad is not None for p in model.parameters())
     return B, T
 
 
+def test_zq_head():
+    batch = _batch()
+    model = GuidedRenderer(vocab=32, num_speakers=8, width=64,
+                           phone_layers=1, frame_layers=2, dropout=0.0,
+                           phone_attn_layers=1, frame_attn_layers=1, nhead=4,
+                           zq_aux=True, zq_dim=256)
+    out = model(**_inputs(batch), pitch_targets=batch["pitch_codes"])
+    B, T = batch["frame_mask"].shape
+    assert out["zq_pred"].shape == (B, T, 256)
+    zqt = torch.randn(B, T, 256)
+    losses = renderer_loss(out, batch, zq_target=zqt, zq_weight=1.0)
+    assert "zq_l1" in losses and torch.isfinite(losses["zq_l1"])
+    losses["loss"].backward()
+
+
 def test_inference_and_parallel_ablation():
     batch = _batch()
     model = GuidedRenderer(vocab=32, num_speakers=8, width=64,
-                           phone_layers=1, frame_layers=2, dropout=0.0)
+                           phone_layers=1, frame_layers=2, dropout=0.0,
+                           phone_attn_layers=1, frame_attn_layers=1, nhead=4)
     with torch.no_grad():
         out = model(**_inputs(batch), pitch_targets=None, temperature=0.0)
     assert out["pitch_logits"][0].shape == (2, 12, 128)
@@ -94,7 +117,8 @@ def test_length_is_exact():
     """The output covers exactly T frames; padding is masked, never appended."""
     batch = _batch(B=1, T=17, N=5)
     model = GuidedRenderer(vocab=32, num_speakers=8, width=32,
-                           phone_layers=1, frame_layers=1, dropout=0.0)
+                           phone_layers=1, frame_layers=1, dropout=0.0,
+                           phone_attn_layers=1, frame_attn_layers=1, nhead=4)
     with torch.no_grad():
         out = model(**_inputs(batch), pitch_targets=None)
     assert out["spec_logits"].shape[1] == 17
@@ -104,14 +128,17 @@ def test_length_is_exact():
 if __name__ == "__main__":
     test_shapes_and_backward()
     print("ok  test_shapes_and_backward")
+    test_zq_head()
+    print("ok  test_zq_head")
     test_inference_and_parallel_ablation()
     print("ok  test_inference_and_parallel_ablation")
     test_length_is_exact()
     print("ok  test_length_is_exact")
     m = GuidedRenderer(vocab=1024, num_speakers=8192, width=512,
-                       phone_layers=4, frame_layers=6)
+                       phone_layers=4, frame_layers=6,
+                       phone_attn_layers=1, frame_attn_layers=2)
     n = sum(p.numel() for p in m.parameters())
-    print(f"default 512/4+6 renderer: {n / 1e6:.1f} M params")
+    print(f"default 512/4+6 + attn 1/2 renderer: {n / 1e6:.1f} M params")
     m = GuidedRenderer(vocab=1024, num_speakers=8192, width=768,
                        phone_layers=8, frame_layers=8)
     n = sum(p.numel() for p in m.parameters())
