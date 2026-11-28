@@ -111,10 +111,15 @@ plan (word rate)                           renderer (non-AR, one pass)
   1–9 DSP score; it is **not loudness** (corr 0.08 with peak-normalised level)
   and is strongly tied to pitch/voice type (corr 0.62 with `register_st`, 0.45
   within speaker; ~⅓ of its variance is between speakers, within-speaker std
-  0.40). Keep it as a **clip-level style condition**, z-scored per speaker
-  before bucketing, and do not use it as the level slider. Its adherence must
-  be swept separately after training; if it only moves f0 it duplicates
-  register and should be dropped.
+  0.40). Keep it as a **clip-level style condition**, but expose it as a
+  **slider** (user decision: it is cross-influenced with register/pitch yet it
+  demonstrably does something they want). `Plan.intensity_rel` is the slider
+  value: `(raw - shrunk speaker mean) / global std`, so 0 = this character's
+  usual delivery, +1 = more intense than usual. Label it **"Delivery"**
+  (or "Energy") in any UI, not "intensity" — the score is partly pitch, and
+  the name should not promise loudness. Sweep its adherence separately after
+  training; if it only moves f0 it duplicates register and should be demoted
+  to a predicted style input.
 
 ## 4. Data contract (all read from the symlinked `data/`)
 
@@ -237,6 +242,13 @@ probability mass between equally plausible codes).
   sharper objective. The pitch codec was re-measured on `base_v0.7`: round trip
   is **0.22 cents median / 0.6 p90**, so the old 508-cent problem is gone and
   pitch needs no continuous bypass.
+- **Intensity slider wired**: `scratch/fit_intensity_stats.py` fitted on the
+  combined train split (146,441 clips, 2,704 speakers; global mean 4.328,
+  std 0.822) writes `intensity_stats.json` (gitignored, regenerate with
+  `python scratch/fit_intensity_stats.py`). `Plan.intensity_rel` uses the
+  shrunk speaker mean and the global std; the validator sees it centred at 0
+  (p10 −0.59, p90 +0.68). The file is optional: without it the loader falls
+  back to the global mean, and a fully authored plan can set the field itself.
 - Environment: conda `raraai25` (same as `25_transformer`).
 
 Still open, before the first training run:

@@ -12,8 +12,8 @@ import numpy as np
 import torch
 
 from plan import (
-    CODE_FPS, F0_REF_HZ, Plan, PlanError, plan_from_cond,
-    speech_mask_from_spec,
+    CODE_FPS, F0_REF_HZ, Plan, PlanError, intensity_reference,
+    plan_from_cond, speech_mask_from_spec,
 )
 
 
@@ -138,6 +138,24 @@ def test_stale_and_degenerate_raise():
         pass
     else:
         raise AssertionError("zero-length word was accepted")
+
+
+def test_intensity_reference_and_slider():
+    stats = {"global": {"mean": 5.0, "std": 0.5, "n": 100}, "shrink_k": 5.0,
+             "speakers": {"7": {"mean": 6.0, "std": 0.3, "n": 1}}}
+    ref, scale = intensity_reference(stats, 7)
+    assert abs(ref - (6.0 + 5 * 5.0) / 6.0) < 1e-9, ref
+    assert abs(scale - 0.5) < 1e-9
+    assert intensity_reference(stats, 99) == (5.0, 0.5)
+    assert intensity_reference(None, 0) == (None, None)
+
+    cond = _cond(starts=[0], slots=[10], phone_word=[0, 0],
+                 anchors=[[[0.5, 0.0]]])
+    cond["intensity"] = torch.tensor([6.0])
+    plan = plan_from_cond(cond, np.zeros(2), n_frames=10, spec=None,
+                          intensity_ref=5.0, intensity_scale=0.5)
+    assert abs(plan.intensity_rel - 2.0) < 1e-6, plan.intensity_rel
+    assert abs(plan.intensity - 6.0) < 1e-6
 
 
 def test_speech_mask():

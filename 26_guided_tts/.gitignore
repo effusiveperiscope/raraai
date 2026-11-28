@@ -4,3 +4,5 @@ __pycache__/
 checkpoints/
 logs/
 plans/
+# derived by scratch/fit_intensity_stats.py
+intensity_stats.json

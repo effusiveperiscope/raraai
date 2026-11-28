@@ -34,6 +34,10 @@ Units
   rate; ``pitch_hz = 100 * 2 ** ((register_st + pitch_st) / 12)``
 * level: dB relative to the clip's median word energy (the stage-1 features are
   peak-normalised per clip, so only within-clip level is recoverable)
+* style: :attr:`Plan.intensity_rel`, a speaker-relative z-score of the
+  subjective 1-9 DSP score (0 = the character's usual delivery).  This is the
+  value a UI slider should set; it is *style*, not loudness -- per-word
+  emphasis is :attr:`Plan.word_db`.
 
 The word timings are word-level; phone durations inside a word are an even
 split.  That is the one supervised-but-noisy part of the plan (see AGENTS.md
@@ -42,6 +46,7 @@ split.  That is the one supervised-but-noisy part of the plan (see AGENTS.md
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +66,9 @@ F0_REF_HZ = 100.0
 MIN_PAUSE_F = 2
 #: The magnitude spectrogram floor in every corpus built so far.
 SPEC_FLOOR = 1e-3
+#: Where ``scratch/fit_intensity_stats.py`` writes the speaker references.
+ROOT = Path(__file__).resolve().parent
+INTENSITY_STATS = ROOT / "intensity_stats.json"
 #: VAD: a code frame is silent when its mean magnitude is this far below the
 #: clip's 95th percentile.  Measured on 280 Genshin clips: pauses >= 2 frames
 #: are found in 12 % of words (median 7 frames), which matches the audible gaps.
@@ -103,9 +111,15 @@ class Plan:
     #: Clip-level *subjective* performance intensity from the DSP score (1-9).
     #: This is a style descriptor, not the level knob: on Genshin it correlates
     #: 0.62 with `register_st` (0.45 within speaker) and only 0.08 with
-    #: peak-normalised level.  Z-score it per speaker before conditioning, and
-    #: use :attr:`word_db` for per-word emphasis.
+    #: peak-normalised level.  Use :attr:`word_db` for per-word emphasis.
     intensity: float
+    #: `intensity` as a z-score against the *speaker's* reference (see
+    #: ``scratch/fit_intensity_stats.py``), using the global std and a
+    #: shrunk speaker mean.  This is the field a downstream UI slider should
+    #: set: 0 = the character's usual delivery, +1 = more intense than usual.
+    #: NaN when no reference is available.  Neutral UI wording is deliberate
+    #: ("Delivery"/"Energy", not "intensity") -- the score is partly pitch.
+    intensity_rel: float = float("nan")
     # provenance
     speaker: int = -1
     n_frames: int = 0                # T, code frames; = len(spec_codes[-1])
@@ -399,7 +413,9 @@ def _interp_anchor(st: np.ndarray, pos: np.ndarray, n: int, n_sample: int) -> np
 def plan_from_cond(cond: dict, phone_ids, n_frames: int, *,
                    spec: Optional[np.ndarray] = None,
                    min_pause: int = MIN_PAUSE_F,
-                   speaker: int = -1) -> Plan:
+                   speaker: int = -1,
+                   intensity_ref: Optional[float] = None,
+                   intensity_scale: Optional[float] = None) -> Plan:
     """Derive a :class:`Plan` from a ``.cond`` record and the code length.
 
     Args:
@@ -409,7 +425,10 @@ def plan_from_cond(cond: dict, phone_ids, n_frames: int, *,
         spec: stage-1 magnitude spectrogram (``S x 769`` or transposed); when
             absent, the silence mask is all-speech and no pauses are split.
         min_pause: silent runs shorter than this stay in the word.
-        speaker: stage-1 speaker id, carried through for the renderer.
+        speaker: stage-2 speaker id, carried through for the renderer/stats.
+        intensity_ref: the speaker's intensity reference, in raw score units;
+            when given, ``intensity_rel = (intensity - ref) / scale``.
+        intensity_scale: global std for the z-score; defaults to 1.0.
 
     Raises:
         PlanError: the record does not describe this phone sequence, or a word
@@ -546,6 +565,11 @@ def plan_from_cond(cond: dict, phone_ids, n_frames: int, *,
             word_db -= ref
 
     intensity = float(_as_1d(cond.get("intensity", [np.nan]))[0])
+    intensity_rel = float("nan")
+    if intensity_ref is not None and math.isfinite(intensity):
+        scale = float(intensity_scale or 1.0)
+        if scale > 0:
+            intensity_rel = (intensity - float(intensity_ref)) / scale
     grouped = int(W - uniq.size)
 
     plan = Plan(
@@ -561,6 +585,7 @@ def plan_from_cond(cond: dict, phone_ids, n_frames: int, *,
         register_st=register,
         word_db=word_db,
         intensity=intensity,
+        intensity_rel=intensity_rel,
         speaker=int(speaker),
         n_frames=n,
         has_spec=spec is not None,
@@ -605,10 +630,54 @@ def code_length(path: Path | str, n_books: int = 8) -> int:
     raise PlanError(f"codes {tuple(a.shape)} do not have {n_books} books")
 
 
+def load_intensity_stats(path: Path | str | None = None) -> dict | None:
+    """Load ``intensity_stats.json`` if it exists (``None`` otherwise)."""
+    p = Path(path) if path is not None else INTENSITY_STATS
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def intensity_reference(stats: dict | None, speaker: int | None) -> tuple[float | None, float | None]:
+    """``(reference, scale)`` for the speaker-relative intensity slider.
+
+    The speaker mean is shrunk towards the global mean with ``shrink_k``
+    pseudo-clips, so a character with 3 lines does not get a wild reference;
+    the z-score uses the global std because per-speaker std is noisier.
+    """
+    if not stats:
+        return None, None
+    g = stats.get("global") or {}
+    g_mean = float(g.get("mean", float("nan")))
+    g_std = float(g.get("std", 1.0) or 1.0)
+    if not math.isfinite(g_mean) or not math.isfinite(g_std) or g_std <= 0:
+        return None, None
+    k = float(stats.get("shrink_k", 0.0) or 0.0)
+    row = (stats.get("speakers") or {}).get(str(speaker)) if speaker is not None else None
+    if row is None:
+        return g_mean, g_std
+    n = float(row.get("n", 0) or 0)
+    mean = float(row.get("mean", g_mean))
+    ref = (n * mean + k * g_mean) / (n + k) if n + k > 0 else g_mean
+    return ref, g_std
+
+
 def load_plan(phone_ids_path: Path | str, *,
               spec_codes_path: Optional[Path | str] = None,
-              with_spec: bool = True) -> Plan:
-    """Load one clip's plan from ``<base>.phone_ids`` (+ ``.cond``/``.spec``)."""
+              with_spec: bool = True,
+              speaker: Optional[int] = None,
+              intensity_stats: dict | str | Path | None = None) -> Plan:
+    """Load one clip's plan from ``<base>.phone_ids`` (+ ``.cond``/``.spec``).
+
+    ``speaker`` is the stage-2 speaker id from the filelist.  When
+    ``intensity_stats`` (a dict or a path) is supplied -- or the default
+    ``intensity_stats.json`` exists -- the plan also carries
+    ``intensity_rel``, the slider-ready z-score.  Pass ``intensity_stats=False``
+    to disable the lookup.
+    """
     p = Path(phone_ids_path)
     base = str(p)[: -len(".phone_ids")] if str(p).endswith(".phone_ids") else str(p.with_suffix(""))
     cond_path = Path(base + ".cond")
@@ -628,7 +697,14 @@ def load_plan(phone_ids_path: Path | str, *,
         spec_path, f0_path = _stage1_siblings(codes)
         if spec_path is not None:
             spec = _load_tensor(spec_path)
-    plan = plan_from_cond(cond, _load_tensor(p), n, spec=spec)
+    stats = None
+    if intensity_stats is not False:
+        stats = (intensity_stats if isinstance(intensity_stats, dict)
+                 else load_intensity_stats(intensity_stats))
+    ref, scale = intensity_reference(stats, speaker)
+    plan = plan_from_cond(cond, _load_tensor(p), n, spec=spec,
+                          speaker=-1 if speaker is None else int(speaker),
+                          intensity_ref=ref, intensity_scale=scale)
     plan.meta = {"cond": str(cond_path), "codes": str(codes),
                  "spec": None if spec_path is None else str(spec_path),
                  "f0": None if f0_path is None else str(f0_path)}
@@ -637,5 +713,6 @@ def load_plan(phone_ids_path: Path | str, *,
 
 __all__ = [
     "Plan", "PlanError", "plan_from_cond", "load_plan", "code_length",
-    "speech_mask_from_spec", "CODE_FPS", "PITCH_FPS", "F0_REF_HZ",
+    "load_intensity_stats", "intensity_reference", "speech_mask_from_spec",
+    "CODE_FPS", "PITCH_FPS", "F0_REF_HZ",
 ]

@@ -37,7 +37,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from plan import (  # noqa: E402
-    PITCH_FPS, F0_REF_HZ, Plan, PlanError, plan_from_cond,
+    PITCH_FPS, F0_REF_HZ, Plan, PlanError, intensity_reference,
+    load_intensity_stats, plan_from_cond,
 )
 
 DEFAULT_FILELIST = "data/genshin_plus_extras/val_stage2.txt"
@@ -148,6 +149,7 @@ def main() -> int:
     if args.limit:
         lines = lines[: args.limit]
 
+    intensity_stats = load_intensity_stats()
     reasons = Counter()
     clips: list[dict] = []
     errors: list[tuple[str, str]] = []
@@ -186,8 +188,12 @@ def main() -> int:
             if spec is None:
                 reasons["no stage-1 spec"] += 1
 
+        sid = int(parts[3]) if len(parts) > 3 else None
+        ref, scale = intensity_reference(intensity_stats, sid)
         try:
-            plan = plan_from_cond(cond, phones, n, spec=spec)
+            plan = plan_from_cond(cond, phones, n, spec=spec,
+                                  speaker=-1 if sid is None else sid,
+                                  intensity_ref=ref, intensity_scale=scale)
         except PlanError as exc:
             msg = str(exc)
             if msg.startswith("word run"):
@@ -227,6 +233,8 @@ def main() -> int:
             "phones": plan.n_phones,
             "word_dur": plan.word_dur.astype(float),
             "has_spec": plan.has_spec,
+            "intensity": plan.intensity,
+            "intensity_rel": plan.intensity_rel,
         }
         if f0 is not None:
             pr = _pitch_report(plan, f0)
@@ -269,6 +277,18 @@ def main() -> int:
     print(f"  pause frames   {100 * pause_frac:.1f}% of all frames; "
           f"{100 * wpause / max(words, 1):.1f}% of words have a pause >= 2")
     print(f"  grouped words  {grouped} ({100 * grouped / max(words, 1):.1f}%) share a start frame")
+
+    iv = [c["intensity"] for c in clips if np.isfinite(c["intensity"])]
+    if iv:
+        st_i = _stats(iv)
+        rel = [c["intensity_rel"] for c in clips if np.isfinite(c["intensity_rel"])]
+        print(f"\nintensity (speaker-relative slider)")
+        print(f"  raw score      median {st_i['median']:.2f}  p10 {st_i['p10']:.2f}  "
+              f"p90 {st_i['p90']:.2f}")
+        if rel:
+            st_r = _stats(rel)
+            print(f"  intensity_rel  median {st_r['median']:+.2f}  p10 {st_r['p10']:+.2f}  "
+                  f"p90 {st_r['p90']:+.2f}  ({len(rel)}/{len(clips)} with a reference)")
 
     pr = [c["pitch"] for c in clips if "pitch" in c]
     if pr:
