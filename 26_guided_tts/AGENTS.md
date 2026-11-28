@@ -1,0 +1,258 @@
+# 26_guided_tts — agents guide
+
+A rewrite of 25_transformer stage 2 as **plan → renderer**: a word-rate *plan* (durations,
+pitch contour, intensity, nonverbal tokens) is expanded to frame rate and
+rendered by a **non-autoregressive** decoder over the stage-1 RVQ codes.
+Stage 1 (codec + NSF vocoder) is reused unchanged from `../25_transformer`.
+
+Read `../25_transformer/AGENTS.md` for the stage-1 codec, the `.cond` format,
+`features.py` and the phonemizer. This file covers only what is new, plus the
+measurements that motivated the rewrite.
+
+---
+
+## 1. Why this project exists
+
+Four stage-2 arms were measured on `25_transformer` (120 val utterances, ASR
+WER, floor = ground-truth codes through the same vocoder = 6.1 %):
+
+| arm | what changed | WER | notes |
+|---|---|---|---|
+| `transformer_hints_v2.4` | – (baseline) | **15.75 %** | S117 D161 I25 |
+| `transformer_word_progress_v1` | word-clock auxiliary loss, 136 k steps | 14.76 % | CI [−3.5, +1.3] ⇒ no effect |
+| `transformer_duration_v1` | oracle phone-progress as a decoder *input* | +0.1 pp vs its paired control | channel never learned (`prog_dir` norm 0.27 vs `input_bias` 13.2) |
+| `transformer_align_v2` | cross-attention supervised to the alignment | +2.3 pp | CI [−0.35, +5.1] ⇒ no effect |
+
+Three findings drive this project:
+
+1. **Guidance channels do not reach the model.** `hint_slot` +0.004 nats,
+   `hint_int` −0.0005, `hint_reg` +0.003 when dropped. The cause is structural,
+   not a weight: `memory_norm: temporal` standardises every memory dimension
+   *over time*, which subtracts any constant added to all phones, so clip-level
+   conditioning is erased before the decoder sees it.
+2. **There is no alignment to pace with.** Cross-attention entropy / log N is
+   **0.96–0.99 in all 12 layers** (1.0 = uniform), on every checkpoint, with a
+   healthy memory (phone vectors pairwise cosine ≈ 0). The decoder sequences
+   from an acoustic prior. Consequence: length is not a function of the text
+   (halving the phoneme sequence leaves the generated length unchanged).
+3. **The failure survives the obvious fixes.** ~1 word in 5 of the final 20 %
+   of each sentence is dropped; forcing the exact code length makes WER
+   *worse* (14.8 → 20.3 %), and it stays unchanged when the attention map is
+   made to track the alignment exactly (`|pos − oracle| = 0.015`). Supervising a
+   map changes what it looks like; it does not change what the decoder is
+   driven by.
+
+Conclusion: in an AR codec decoder, *time is a decision* that the code CE never
+trains, and soft side channels are ignorable. Both have to become structure.
+
+## 2. Goal
+
+A strongly guidable voice-imitation TTS for voice acting / content creation:
+
+- **coarse, human-settable prosody** that the model interprets into natural
+  micro-prosody: per-word duration, register/pitch contour, intensity/emphasis;
+- **phoneme input**, so OOV words and names can be corrected (the baseline
+  mispronounces exactly those: Paimon→Python, Mora→Laura);
+- **no skipped or stretched words**;
+- **nonverbal phenomena** (sighs, laughs, breaths) under explicit control;
+- **small**: consumer GPU, ideally CPU;
+- trainable on ~100 h / one 16 GB card, and useful *without* guidance in
+  low-resource settings.
+
+Not voice conversion: prosody must be settable independently of any source
+audio, so the control surface is symbolic/numeric, never extracted from a
+reference's acoustics.
+
+## 3. Architecture
+
+```
+plan (word rate)                           renderer (non-AR, one pass)
+  segments: <sil> / <word>                  phones → phoneme encoder
+  dur_frames[word]                   ──→    → expand at 100 Hz by phone duration
+  dur_frames[phone] @100 Hz                 + per-frame plan features
+  register + pitch anchors (st)             → frame decoder (L = Σ word + pause)
+  word level (dB)                           → 8 parallel spec heads
+  emphasis / <sigh> / <laugh>               → 2 depth-AR pitch heads
+                                            → stage-1 Generator (reused) → audio
+```
+
+- **Length is computed, never decided**: `L = lead + Σ(word + pause)`, no EOS,
+  no delay pattern. The plan partitions the code frame axis exactly; this is
+  what removes the tail truncation by construction.
+- **Every frame is built from its phone** (the expanded memory *is* the input),
+  not from an attention map the model may ignore. Phone durations are stored at
+  **100 Hz**, not 25 Hz: a 40–80 ms word can hold 3–5 phones, and one code frame
+  each would either stretch the word or drop a phone. The renderer expands at
+  100 Hz and pools the hidden state 4:1 to the code rate.
+- **Codebook heads: measured, not assumed.** Within-frame dependence is weak in
+  this codec: conditioning on all previous books saves ~0.4 bits per spec book
+  (marginal 5.6 bits, 64 codes), falling pairwise as 0.38 → 0.13 bits from book
+  0→1 to 6→7 (937 k frames). So the 8 spec books get **parallel heads**, with a
+  `depth_ar_spec_books` knob (2 steps buys ~0.8 of the ~2.7 bits) as the
+  insurance ablation. The **pitch** books are different: `MI(c0,c1) = 1.23` of
+  ~6 bits, so they get depth-AR (one extra step).
+- **The plan has three sources, one interface**:
+  1. *authored* — sliders/markup/an editable per-word JSON;
+  2. *derived from a reference recording* — align it, extract per-word duration,
+     coarse f0 and energy → a plan (prosody transfer; keep it coarse, never pass
+     the source's spectral detail or this becomes VC);
+  3. *predicted* — variance adaptors inside the renderer infer the plan from
+     text + speaker, and the user overrides the fields they care about. Same
+     slots, predicted or set.
+- Plan units: **absolute register** (`register_st`, semitones re 100 Hz) plus a
+  **contour relative to it** (anchors, semitones re the clip's voiced median),
+  word duration in code frames, level in dB re the clip's median word. A
+  whole-line "raise it by 2 st" is the register field; it must not be
+  re-normalised against the realised median or the guidance erases itself (the
+  same failure as `memory_norm: temporal`).
+- **Two intensity axes, kept apart** (measured on 1,200 Genshin clips):
+  `word_db` is per-word level in dB re the clip median — the clean emphasis
+  control, speaker- and clip-normalised. `cond.intensity` is the subjective
+  1–9 DSP score; it is **not loudness** (corr 0.08 with peak-normalised level)
+  and is strongly tied to pitch/voice type (corr 0.62 with `register_st`, 0.45
+  within speaker; ~⅓ of its variance is between speakers, within-speaker std
+  0.40). Keep it as a **clip-level style condition**, z-scored per speaker
+  before bucketing, and do not use it as the level slider. Its adherence must
+  be swept separately after training; if it only moves f0 it duplicates
+  register and should be dropped.
+
+## 4. Data contract (all read from the symlinked `data/`)
+
+Per clip (`<base>.{phone_ids,spec_codes,pitch_codes,cond}`):
+
+| tensor | shape | meaning |
+|---|---|---|
+| `phone_ids` | (N,) | g2pen phone ids, the text |
+| `spec_codes` | (8, T) | RVQ spec codes @25 Hz |
+| `pitch_codes` | (2, T) | RVQ pitch codes @25 Hz |
+| `cond.phone_word_idx` | (N,) | phone → word |
+| `cond.word_start_f`, `word_slot_f` | (W,) | word start / start-to-start, in code frames |
+| `cond.pitch_anchors_st`, `pitch_anchors_pos`, `pitch_anchor_n` | (W,A),(W,A),(W,) | f0 contour per word, semitones re the utterance's voiced median, with positions in the word |
+| `cond.pitch_word_st`, `pitch_word_voiced` | (W,) | word mean f0 / voicing |
+| `cond.register_st`, `intensity` | (1,) | clip-level register (semitones re 100 Hz) and perceptual intensity 1–9 |
+| `cond.word_bert` | (W,768) | per-word bert-base state |
+
+The plan is **derived at load time** from these — no new preprocessing pass.
+Word durations are the slot minus the trailing silence found by an energy VAD
+over the stage-1 `.spec` (the features are peak-normalised per clip, so the
+threshold is relative to the clip's 95th percentile; a code frame is silent when
+≥ half of its four 100 Hz frames are below `p95 − 35 dB`). Per-phone durations
+are an even split of the word at **100 Hz**; per-word pitch is the anchors
+interpolated across the word, with the level supplied by `register_st`.
+
+Five gotchas, all of which have already caused bugs elsewhere:
+
+1. **A clip's code frames include lead/tail silence**, and `word_slot_f` is
+   start-to-start with the last slot running to the clip end, so the edge
+   silence lives *inside* the first/last word's slot. The plan splits it out
+   with the VAD; without that, expanding the edge word's phones over its slot
+   stretches them into the silence. Measured on 284 val clips: lead median 1
+   frame, tail median 2, pauses 9.1 % of all frames; 13.3 % of words have a
+   pause ≥ 2 frames.
+2. **Stage directions are stripped** by the current corpus build
+   (`features.strip_stage_directions`), so `*sigh*` is *not* in `phone_ids`.
+   Nonverbals need a reserved token id written at phonemization time; this is a
+   corpus decision, not a model one.
+3. **Word timings are word-level**; phone splits within a word are even. Treat
+   per-phone durations as a supervised but noisy target, and measure adherence
+   at the word level.
+4. **`word_slot_f` is start-to-start** (a word ends where the next starts), and
+   adjacent words occasionally share a start frame; collapse equal starts into
+   one run before deriving durations (3.8 % of words in the val sample).
+5. **Zero-phone words exist** (114/400 Genshin val clips carry at least one,
+   usually a punctuation token) and so do degenerate runs (2 frames for 3
+   words). `plan.py` drops the former and renumbers; a run that cannot give one
+   100 Hz frame per phone is rejected (`PlanError`) and the clip is skipped —
+   5.5 % of the val sample. Do not "fix" those by stretching: they are broken
+   alignments, not fast speech.
+
+## 5. Reuse map
+
+Symlinked (data and artefacts only — never copy, `data/` is 417 GB):
+
+| link | target |
+|---|---|
+| `data`, `filelists_1`, `filelists_2`, `hints` | `../25_transformer/*` (all corpora, `.cond`, alignments) |
+| `checkpoints_stage1`, `checkpoints_stage2` | stage-1 codec + the baselines to compare against |
+| `speakers.json`, `speaker_map_genshin.json` | stage-2 → stage-1 speaker id mapping |
+
+Imported by path (`shared.py` appends `../25_transformer` to `sys.path`):
+`features`, `hints`, `stage2_wer`, `commons`, `utils`, `speaker_map`,
+`horsephonemizer`, `modeling.generator`, `dataset_codes` (for reference only).
+
+**Not reused:** `modeling/transformer.py`, `dataset_codes`' hint plumbing,
+`2_training.py`. The AR stage 2 is the thing being replaced; the old runs stay
+useful only as baselines and as an expressiveness reference.
+
+**Reserved module names** — do not create files called `features.py`,
+`utils.py`, `commons.py`, `stage2_wer.py`, `speaker_map.py`, `hints/` or a
+`modeling/generator.py`: the local project root comes first on `sys.path`, so a
+same-named file would shadow the shared one for every import here. New modules
+are named for what they do (`plan.py`, `renderer.py`, `dataset_plan.py`, ...).
+
+`shared.py` is the only place that knows about the old tree:
+
+```python
+from shared import DATA, CORPORA, STAGE1, BASELINE_WER, build_stage1
+net_g, cfg = build_stage1()          # frozen 33.7 M codec + vocoder
+```
+
+## 6. Metrics
+
+Judge on these, in this order — none of them is CE, which cannot see prosody
+(a per-frame code CE is flat across pitch/intensity changes because they move
+probability mass between equally plausible codes).
+
+1. **Plan adherence** (primary). Realised vs requested: per-word duration error
+   (%), frame-level f0 correlation with the requested contour, energy response
+   to the intensity knob, and monotonicity across a level sweep. A guidance
+   channel that does not move these is decoration, regardless of CE.
+2. **Intelligibility** — `stage2_wer` (ASR WER), same 120-utterance set and
+   audit as the baselines: floor **6.08 %**, current best **15.75 %**.
+3. **Deletions**, by position (head/mid/tail) — the symptom this rewrite targets;
+   the baseline loses 18–23 % of the words in the final 20 %.
+4. **Nonverbals** — a listening rubric: present when requested, absent when not.
+5. **Cost** — params, step time, and CPU real-time factor.
+
+## 7. Status
+
+- Project created; `shared.py` verified: resolves every artefact and loads the
+  stage-1 Generator (33.7 M params, 8+2 books, 3 frames → 5760 samples at
+  48 kHz).
+- **`plan.py` implemented** (CPU only, no model): word/silence segments at
+  25 Hz, phone durations at 100 Hz, 100 Hz pitch contour (`register + anchors`),
+  per-word dB, exact partition invariant. `test_plan.py` guards the edge cases
+  (equal starts, zero-phone words, edge silence, stale `.cond`).
+- `scratch/validate_plan.py`, 1,000 Genshin val clips: partition exact on all
+  946 accepted clips, 9.4 % of frames explicit silence, word-level plan pitch
+  vs `.f0` **corr 0.977 / slope 1.007 / 67 cents median**, frame-level after
+  offset 66 cents (the anchors are a coarse 1–3 points per word; the renderer is
+  meant to add the micro-prosody). 5.4 % of clips are rejected: 3.6 % degenerate
+  word runs and 1.7 % word/phone length mismatches. On MLP (noisier corpus)
+  the word-level figures are 0.927 / 0.967 / 98 cents.
+- **Head design settled by measurement** (see §3): parallel 8 spec heads,
+  depth-AR over the 2 pitch heads. Pre-quantisation `z` was rejected: it needs
+  ~18 GB of reprocessed latents and the frozen decoder has only ever seen `zq`;
+  `zq` itself is free from the stored codes but CE over 64-way books is the
+  sharper objective. The pitch codec was re-measured on `base_v0.7`: round trip
+  is **0.22 cents median / 0.6 p90**, so the old 508-cent problem is gone and
+  pitch needs no continuous bypass.
+- Environment: conda `raraai25` (same as `25_transformer`).
+
+Still open, before the first training run:
+
+1. **Nonverbal tokens**: reserve ids in the existing g2pen vocabulary, or add a
+   small parallel token stream? Needs a `--only phones` re-phonemization either
+   way.
+2. **Pitch plan strength**: a hard target the decoder must hit (concatenative
+   feel) or a bias the decoder may deviate from. Add an auxiliary f0-space loss
+   through the frozen pitch decoder so the code CE is not the only pitch signal.
+3. **Renderer size**: start ~40 M; the point is that ~100 h trains it, not that
+   it can absorb more.
+4. **Corpus mix**: dense 100 Hz `.f0` and `.spec` exist for genshin (106 k) and
+   mlp (28 k), but not for expresso/vctk, which carry only `.cond` word anchors.
+   `.cond` itself covers genshin 102,815, mlp 19,088 of 33,765 train items,
+   expresso 6,182 and vctk 23,568 — and **mlp's val split has no `.cond` at
+   all** (0 of 1,777), so it cannot be used for plan training or validation
+   until `hints/build.py --words` is re-run on it. Restrict the first run to
+   the two corpora with performance audio, or backfill the alignments.
