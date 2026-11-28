@@ -242,6 +242,23 @@ probability mass between equally plausible codes).
   sharper objective. The pitch codec was re-measured on `base_v0.7`: round trip
   is **0.22 cents median / 0.6 p90**, so the old 508-cent problem is gone and
   pitch needs no continuous bypass.
+- **Dataset implemented** (`dataset_plan.py`): word-aligned crops, 100 Hz
+  phone index for the expansion, per-frame plan features, masked collator, and
+  a compact plan cache (`plans/<corpus>/<clip>.npz`, ~8.6 KB/clip) built by
+  `scratch/build_plan_cache.py` (287 clips/s). Plans are cached because the
+  derivation needs the 0.5 MB stage-1 `.spec`; training must not read 75 GB of
+  spectrograms per epoch. Use `--require-cache` after building so degenerate
+  alignments are skipped rather than raising mid-epoch.
+- **Renderer implemented** (`renderer.py`): phone conv encoder, 100 Hz weighted
+  expansion pooled 4:1, dilated-conv frame decoder (non-causal), 8 parallel
+  spec heads, 2 depth-AR pitch heads (parallel ablation flag), optional f0
+  regression head. **18.7 M params** at 512/4+6, **35.8 M** at 640/6+8 (the
+  ~40 M option). A real 4-item batch (≤161 frames) is 0.25 s forward+backward
+  on the 5060 Ti at 512/4+6.
+- **Training loop implemented** (`train_renderer.py`): masked code CE +
+  optional f0 L1, bf16 autocast, warmup/cosine, grad clip, val CE/accuracy,
+  `best.ckpt`/`last.ckpt`, resume. Smoke-tested for 4 steps with a 1.7 M
+  throwaway model; checkpoints go to the gitignored `checkpoints/`.
 - **Intensity slider wired**: `scratch/fit_intensity_stats.py` fitted on the
   combined train split (146,441 clips, 2,704 speakers; global mean 4.328,
   std 0.822) writes `intensity_stats.json` (gitignored, regenerate with
@@ -250,6 +267,24 @@ probability mass between equally plausible codes).
   (p10 −0.59, p90 +0.68). The file is optional: without it the loader falls
   back to the global mean, and a fully authored plan can set the field itself.
 - Environment: conda `raraai25` (same as `25_transformer`).
+
+- **Plan cache built** for genshin+mlp train+val: **115,115 plans**, 6,713
+  skipped (5.7 %: 4,864 degenerate runs, 1,762 length mismatches, 87 no word
+  fields), 428 s. `plans/` is gitignored.
+- **Eval path implemented** (`eval_renderer.py`): generated codes -> frozen
+  stage-1 -> 48 kHz, ASR WER, plan-vs-generated f0, true-f0-vs-generated f0,
+  per-word level, optional oracle decode (codec ceiling), and
+  `--register-shift`/`--level-shift` for later adherence sweeps. Validated with
+  the oracle: true f0 vs oracle decode **corr 0.996, 25 c median**, oracle WER
+  10 % on a 6-item probe. The 400-step smoke model gives WER 108 % and f0 corr
+  0.41 -- expected at that budget, and exactly the gap the first real run is
+  meant to close.
+- **First real run launched**: `renderer_v1`, 512/4+6, batch 16, 40 epochs,
+  110 k items, 400-step val. Measured **42 it/s**, ~3 min/epoch, ~2 h total.
+
+Next: read `renderer_v1`'s val curves, then run `eval_renderer.py` on
+`best.ckpt` with 120 items + oracle, and start the guidance sweeps
+(register/level shifts) once the base WER is credible.
 
 Still open, before the first training run:
 

@@ -69,6 +69,11 @@ SPEC_FLOOR = 1e-3
 #: Where ``scratch/fit_intensity_stats.py`` writes the speaker references.
 ROOT = Path(__file__).resolve().parent
 INTENSITY_STATS = ROOT / "intensity_stats.json"
+#: Dataset cache layout; bump when the fields below or the derivation changes.
+PLAN_CACHE_VERSION = 1
+#: Per-code-frame conditioning built from the plan (order is part of the API).
+FRAME_FEATURES = ("pitch_st", "voiced_frac", "word_db", "register_st",
+                  "intensity_rel", "is_silence")
 #: VAD: a code frame is silent when its mean magnitude is this far below the
 #: clip's 95th percentile.  Measured on 280 Genshin clips: pauses >= 2 frames
 #: are found in 12 % of words (median 7 frames), which matches the audible gaps.
@@ -159,14 +164,27 @@ class Plan:
         Phones are finer than the 25 Hz code rate on purpose: a 40 ms word with
         three phones cannot give each phone a code frame.  The renderer expands
         the phone sequence at 100 Hz and pools the hidden state to the code
-        rate, so no phone is dropped.
+        rate, so no phone is dropped.  The spans skip the silence between
+        words, exactly like :meth:`segments`.
         """
-        out, f = [], 0
-        for p in range(self.n_phones):
-            d = int(self.phone_dur[p])
-            out.append((p, f, f + d))
-            f += d
+        counts = np.bincount(self.phone_word, minlength=self.n_words) \
+            if self.n_phones else np.zeros(self.n_words, dtype=int)
+        out, p = [], 0
+        for w in range(self.n_words):
+            f = 4 * int(self.word_start[w])
+            for _ in range(int(counts[w])):
+                d = int(self.phone_dur[p])
+                out.append((p, f, f + d))
+                f += d
+                p += 1
         return out
+
+    def phone_index_100(self) -> np.ndarray:
+        """``(4T,)`` phone index at 100 Hz; ``-1`` on silence."""
+        idx = np.full(4 * int(self.n_frames), -1, dtype=np.int32)
+        for p, s, e in self.phone_frames():
+            idx[s:e] = p
+        return idx
 
     def word_table(self) -> list[dict]:
         """Per-word rows, for inspection and for authoring a JSON plan."""
@@ -227,6 +245,9 @@ class Plan:
             raise PlanError("phone durations do not cover the word durations")
         if not np.isfinite(self.pitch_st).all():
             raise PlanError("non-finite pitch contour")
+        for p, s, e in self.phone_frames():
+            if s < 0 or e > 4 * T or e <= s:
+                raise PlanError(f"phone {p} span {s}:{e} outside the frame axis")
 
 
 # --------------------------------------------------------------------------- #
@@ -596,6 +617,115 @@ def plan_from_cond(cond: dict, phone_ids, n_frames: int, *,
 
 
 # --------------------------------------------------------------------------- #
+# dataset cache
+# --------------------------------------------------------------------------- #
+
+def frame_features(plan: "Plan") -> np.ndarray:
+    """``(T, len(FRAME_FEATURES))`` conditioning at the 25 Hz code rate.
+
+    This is what the renderer reads at frame *t* in addition to the expanded
+    phone memory.  ``pitch_st`` and ``voiced_frac`` summarise the four 100 Hz
+    pitch samples of the frame; ``word_db`` is repeated over its word's frames;
+    pauses are ``is_silence=1`` with zero prosody.
+    """
+    T = int(plan.n_frames)
+    out = np.zeros((T, len(FRAME_FEATURES)), dtype=np.float32)
+    pitch = plan.pitch_st.reshape(T, 4) if plan.pitch_st.size == 4 * T else None
+    voiced = plan.voiced.reshape(T, 4) if plan.voiced.size == 4 * T else None
+    if pitch is not None:
+        v = np.maximum(voiced, 0).astype(np.float32)
+        denom = np.maximum(v.sum(axis=1), 1)
+        out[:, 0] = (pitch * v).sum(axis=1) / denom
+        out[:, 1] = v.mean(axis=1)
+    silence = np.ones(T, dtype=bool)
+    for w in range(plan.n_words):
+        s, d = int(plan.word_start[w]), int(plan.word_dur[w])
+        if d <= 0:
+            continue
+        silence[s:s + d] = False
+        out[s:s + d, 2] = float(plan.word_db[w])
+    out[:, 3] = float(plan.register_st) if math.isfinite(plan.register_st) else 0.0
+    out[:, 4] = float(plan.intensity_rel) if math.isfinite(plan.intensity_rel) else 0.0
+    out[:, 5] = silence.astype(np.float32)
+    return out
+
+
+def save_plan_cache(plan: "Plan", path: Path | str) -> None:
+    """Write a compact cache (~2-3 KB) of the derivation, not the `.spec`."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # np.savez appends ".npz" when the name does not already end with it, so
+    # the temp name must; otherwise the rename looks for a file that is not
+    # there (FileNotFoundError).
+    tmp = p.with_name(p.name + ".tmp.npz")
+    np.savez(
+        tmp,
+        version=np.int64(PLAN_CACHE_VERSION),
+        n_frames=np.int64(plan.n_frames),
+        n_phone=np.int64(plan.n_phones),
+        n_words=np.int64(plan.n_words),
+        phone_dur=plan.phone_dur.astype(np.int16),
+        phone_word=plan.phone_word.astype(np.int16),
+        word_start=plan.word_start.astype(np.int32),
+        word_dur=plan.word_dur.astype(np.int32),
+        pause_after=plan.pause_after.astype(np.int32),
+        lead_sil=np.int64(plan.lead_sil),
+        pitch_st=plan.pitch_st.astype(np.float16),
+        voiced=np.packbits(plan.voiced),
+        register_st=np.float64(plan.register_st),
+        word_db=plan.word_db.astype(np.float16),
+        intensity=np.float64(plan.intensity),
+        intensity_rel=np.float64(plan.intensity_rel),
+        has_spec=np.bool_(plan.has_spec),
+        grouped_words=np.int64(plan.grouped_words),
+    )
+    tmp.replace(p)
+
+
+def load_plan_cache(path: Path | str, phone_ids, speaker: int = -1) -> Optional["Plan"]:
+    """Read :func:`save_plan_cache`; ``None`` on version/shape mismatch."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        with np.load(p, allow_pickle=False) as z:
+            if int(z["version"]) != PLAN_CACHE_VERSION:
+                return None
+            n_phone = int(z["n_phone"])
+            if n_phone != int(np.asarray(phone_ids).size):
+                return None
+            T = int(z["n_frames"])
+            voiced = np.unpackbits(z["voiced"])[: 4 * T].astype(bool)
+            phone_ids = np.asarray(phone_ids, dtype=np.int64).reshape(-1)
+            plan = Plan(
+                phone_ids=phone_ids.astype(np.int32),
+                phone_word=z["phone_word"].astype(np.int32),
+                phone_dur=z["phone_dur"].astype(np.int32),
+                word_start=z["word_start"].astype(np.int32),
+                word_dur=z["word_dur"].astype(np.int32),
+                pause_after=z["pause_after"].astype(np.int32),
+                lead_sil=int(z["lead_sil"]),
+                pitch_st=z["pitch_st"].astype(np.float32),
+                voiced=voiced,
+                register_st=float(z["register_st"]),
+                word_db=z["word_db"].astype(np.float32),
+                intensity=float(z["intensity"]),
+                intensity_rel=float(z["intensity_rel"]),
+                speaker=int(speaker),
+                n_frames=T,
+                has_spec=bool(z["has_spec"]),
+                grouped_words=int(z["grouped_words"]),
+            )
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        plan.check()
+    except PlanError:
+        return None
+    return plan
+
+
+# --------------------------------------------------------------------------- #
 # loading from disk
 # --------------------------------------------------------------------------- #
 
@@ -608,9 +738,8 @@ def _stage1_siblings(spec_codes: Path) -> tuple[Optional[Path], Optional[Path]]:
     plan falls back to "the whole slot is speech".
     """
     s = str(spec_codes)
-    if "_stage2/" not in s:
-        return None, None
-    s = s.replace("_stage2/", "_stage1/")
+    if "_stage2/" in s:
+        s = s.replace("_stage2/", "_stage1/")
     base = s[: -len(".spec_codes")] if s.endswith(".spec_codes") else str(Path(s).with_suffix(""))
     spec, f0 = Path(base + ".spec"), Path(base + ".f0")
     return (spec if spec.exists() else None,
@@ -714,5 +843,7 @@ def load_plan(phone_ids_path: Path | str, *,
 __all__ = [
     "Plan", "PlanError", "plan_from_cond", "load_plan", "code_length",
     "load_intensity_stats", "intensity_reference", "speech_mask_from_spec",
+    "frame_features", "save_plan_cache", "load_plan_cache",
+    "FRAME_FEATURES", "PLAN_CACHE_VERSION",
     "CODE_FPS", "PITCH_FPS", "F0_REF_HZ",
 ]
